@@ -1,0 +1,3 @@
+simlab:
+  enabled: true
+  benches: 5

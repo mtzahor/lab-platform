@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lab-platform"
+version = "0.1.0a0"
+description = "Local-first lab platform foundation."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Lab Platform Contributors" }]
+dependencies = [
+    "pydantic>=2.8,<3",
+    "PyYAML>=6.0.1,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+lab-agent = "lab_platform.agent.cli:main"
+labctl = "lab_platform.cli.main:main"
+
+[tool.setuptools]
+packages = [
+    "lab_platform.agent",
+    "lab_platform.cli",
+    "lab_platform.config",
+    "lab_platform.core",
+    "lab_platform.logging",
+    "lab_platform.models",
+    "lab_platform.plugins",
+    "lab_platform.simlab",
+]
+
+[tool.setuptools.package-dir]
+"lab_platform.agent" = "apps/agent/src/lab_platform/agent"
+"lab_platform.cli" = "apps/cli/src/lab_platform/cli"
+"lab_platform.config" = "packages/config/src/lab_platform/config"
+"lab_platform.core" = "packages/core/src/lab_platform/core"
+"lab_platform.logging" = "packages/logging/src/lab_platform/logging"
+"lab_platform.models" = "packages/models/src/lab_platform/models"
+"lab_platform.plugins" = "packages/plugins/src/lab_platform/plugins"
+"lab_platform.simlab" = "packages/simlab/src/lab_platform/simlab"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["apps", "packages", "tests"]
+strict = true
+warn_unreachable = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+    "apps/agent/src",
+    "apps/cli/src",
+    "packages/config/src",
+    "packages/core/src",
+    "packages/logging/src",
+    "packages/models/src",
+    "packages/plugins/src",
+    "packages/simlab/src",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=lab_platform --cov-report=term-missing --cov-fail-under=90"
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

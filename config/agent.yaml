@@ -1,0 +1,10 @@
+agent:
+  name: local-agent
+  host: 127.0.0.1
+  port: 8080
+  log_level: INFO
+
+plugins:
+  - power
+  - serial
+  - firmware
