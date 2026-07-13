@@ -1,5 +1,10 @@
 from lab_platform.config.loader import (
     AgentSettings,
+    ArtifactSettings,
+    BackendSettings,
+    DatabaseSettings,
+    DevelopmentSettings,
+    OperationSettings,
     PlatformConfig,
     SimLabSettings,
     load_config,
@@ -8,6 +13,11 @@ from lab_platform.config.loader import (
 
 __all__ = [
     "AgentSettings",
+    "ArtifactSettings",
+    "BackendSettings",
+    "DatabaseSettings",
+    "DevelopmentSettings",
+    "OperationSettings",
     "PlatformConfig",
     "SimLabSettings",
     "load_config",

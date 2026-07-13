@@ -1,20 +1,21 @@
 # Roadmap
 
-## Phase 0 — local foundation
+## Phase 0 — local foundation (complete)
 
-- Typed core and models
-- Dependency-injected Agent composition
-- Async event bus and lifecycle
-- Health aggregation
-- Dynamic plugins with Power, Serial, and Firmware examples
-- Deterministic SimLab benches
-- Read-only local REST API and CLI
-- YAML configuration, structured logging, tests, and CI
+- Typed core, plugins, lifecycle, health, structured logging, and deterministic SimLab benches
+- Read-only local API and CLI
 
-## Explicitly out of scope for Phase 0
+## Phase 1 — remote control and core bench workflow (complete)
 
-Authentication, cloud services, multi-agent coordination, PostgreSQL or other
-databases, dashboards, WebSockets, firmware flashing, reservations, AI features,
-billing, metrics, Kubernetes, and Docker orchestration are intentionally excluded.
+- Versioned FastAPI REST boundary and HTTP-only CLI
+- Persistent reservation ownership and history
+- Asynchronous power and firmware operations with polling and cancellation
+- SHA-256-addressed firmware artifacts
+- SQLite repositories, atomic per-bench operation locking, and restart recovery
+- SimLab backend contract, deterministic failure injection, and complete CLI E2E coverage
 
-Future phases require a separate specification before any of these boundaries change.
+## Phase 2 — future specification required
+
+Physical hardware drivers, authentication, RBAC, multi-Agent coordination, live serial streaming,
+CI-provider integrations, dashboards, and production deployment remain out of scope until a Phase 2
+specification defines those boundaries.

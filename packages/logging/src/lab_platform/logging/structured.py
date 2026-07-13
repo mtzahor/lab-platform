@@ -6,6 +6,22 @@ from datetime import UTC, datetime
 from typing import Any
 
 _HANDLER_NAME = "lab-platform-structured-console"
+_CONTEXT_FIELDS = (
+    "request_id",
+    "method",
+    "path",
+    "status_code",
+    "duration_ms",
+    "operation_id",
+    "bench_id",
+    "operation_type",
+    "owner",
+    "status",
+    "backend_type",
+    "capability",
+    "action",
+    "result",
+)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -18,6 +34,9 @@ class StructuredFormatter(logging.Formatter):
         }
         if record.exc_info is not None:
             payload["exception"] = self.formatException(record.exc_info)
+        for field in _CONTEXT_FIELDS:
+            if hasattr(record, field):
+                payload[field] = getattr(record, field)
         return json.dumps(payload, sort_keys=True)
 
 

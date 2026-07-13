@@ -4,14 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-platform"
-version = "0.1.0a0"
-description = "Local-first lab platform foundation."
+version = "0.2.0a0"
+description = "Local-first remote hardware bench management platform."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Lab Platform Contributors" }]
 dependencies = [
+    "fastapi>=0.116,<1",
     "pydantic>=2.8,<3",
+    "python-multipart>=0.0.20,<1",
     "PyYAML>=6.0.1,<7",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.optional-dependencies]
@@ -30,24 +33,30 @@ labctl = "lab_platform.cli.main:main"
 [tool.setuptools]
 packages = [
     "lab_platform.agent",
+    "lab_platform.agent.api",
     "lab_platform.cli",
     "lab_platform.config",
     "lab_platform.core",
     "lab_platform.logging",
     "lab_platform.models",
+    "lab_platform.persistence",
     "lab_platform.plugins",
     "lab_platform.simlab",
+    "lab_platform.simlab_adapter",
 ]
 
 [tool.setuptools.package-dir]
 "lab_platform.agent" = "apps/agent/src/lab_platform/agent"
+"lab_platform.agent.api" = "apps/agent/src/lab_platform/agent/api"
 "lab_platform.cli" = "apps/cli/src/lab_platform/cli"
 "lab_platform.config" = "packages/config/src/lab_platform/config"
 "lab_platform.core" = "packages/core/src/lab_platform/core"
 "lab_platform.logging" = "packages/logging/src/lab_platform/logging"
 "lab_platform.models" = "packages/models/src/lab_platform/models"
+"lab_platform.persistence" = "packages/persistence/src/lab_platform/persistence"
 "lab_platform.plugins" = "packages/plugins/src/lab_platform/plugins"
 "lab_platform.simlab" = "packages/simlab/src/lab_platform/simlab"
+"lab_platform.simlab_adapter" = "packages/simlab_adapter/src/lab_platform/simlab_adapter"
 
 [tool.ruff]
 line-length = 100
@@ -70,13 +79,16 @@ mypy_path = [
     "packages/core/src",
     "packages/logging/src",
     "packages/models/src",
+    "packages/persistence/src",
     "packages/plugins/src",
     "packages/simlab/src",
+    "packages/simlab_adapter/src",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=lab_platform --cov-report=term-missing --cov-fail-under=90"
+markers = ["backend_contract: shared behavioral contract for LabBackend implementations"]
 
 [tool.coverage.run]
 branch = true
@@ -84,3 +96,8 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.5.0",
+]

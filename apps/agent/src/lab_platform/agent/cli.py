@@ -59,9 +59,9 @@ def _print_startup(agent: LabAgent) -> None:
     print("✓ Logging initialized")
     print("✓ Event bus started")
     if agent.config.simlab.enabled:
-        print("✓ SimLab started")
+        print("✓ SimLab backend started")
     else:
-        print("✓ SimLab disabled")
+        print("✓ SimLab backend disabled")
     print(f"✓ {len(agent.benches())} benches registered")
     print(f"✓ {len(agent.plugins())} plugins loaded")
     print()

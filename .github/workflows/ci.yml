@@ -24,3 +24,5 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
+      - run: uv run python scripts/export_openapi.py --check docs/openapi.json
+      - run: uv build
