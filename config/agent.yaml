@@ -4,6 +4,23 @@ agent:
   port: 8080
   log_level: INFO
 
+backend:
+  type: simlab
+
+database:
+  url: sqlite:///./.lab-platform/lab.db
+
+artifacts:
+  directory: ./.lab-platform/artifacts
+  max_firmware_size_mb: 100
+
+operations:
+  poll_interval_ms: 250
+  shutdown_timeout_seconds: 10
+
+development:
+  enable_simlab_controls: false
+
 plugins:
   - power
   - serial

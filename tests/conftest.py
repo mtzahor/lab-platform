@@ -11,8 +11,10 @@ SOURCE_ROOTS = (
     ROOT / "packages/core/src",
     ROOT / "packages/logging/src",
     ROOT / "packages/models/src",
+    ROOT / "packages/persistence/src",
     ROOT / "packages/plugins/src",
     ROOT / "packages/simlab/src",
+    ROOT / "packages/simlab_adapter/src",
 )
 
 for source_root in SOURCE_ROOTS:

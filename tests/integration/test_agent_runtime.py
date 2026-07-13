@@ -1,153 +1,114 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 
 import pytest
 from lab_platform.agent.cli import main as agent_main
-from lab_platform.agent.runtime import LabAgent, create_agent
-from lab_platform.config import AgentSettings, PlatformConfig, SimLabSettings
-from lab_platform.core import AgentCore, CapabilityRegistry, EventBus, HealthMonitor
-from lab_platform.models import Capability, Event, HealthStatus, PluginMetadata
-from lab_platform.plugins import BasePlugin, PluginLoadError, PluginManager
-from lab_platform.simlab import SimLab
+from lab_platform.agent.runtime import create_agent
+from lab_platform.models import HealthStatus, Operation, OperationStatus, OperationType
+from lab_platform.persistence import SQLiteDatabase, SQLiteOperationRepository
 
 
-def test_agent_starts_simlab_plugins_health_and_events() -> None:
+def _write_config(root: Path, *, benches: int = 2, enabled: bool = True) -> None:
+    (root / "agent.yaml").write_text(
+        "agent:\n  name: integration-agent\n  log_level: ERROR\nplugins:\n  - power\n",
+        encoding="utf-8",
+    )
+    (root / "simlab.yaml").write_text(
+        f"simlab:\n  enabled: {str(enabled).lower()}\n  benches: {benches}\n"
+        "  speed_multiplier: 100\n",
+        encoding="utf-8",
+    )
+
+
+def test_agent_starts_backend_database_plugins_and_is_idempotent(tmp_path: Path) -> None:
+    _write_config(tmp_path)
+
     async def scenario() -> None:
-        bus = EventBus()
-        monitor = HealthMonitor()
-        core = AgentCore(bus, monitor, CapabilityRegistry())
-        events: list[Event] = []
-        bus.subscribe("*", events.append)
-        agent = LabAgent(
-            config=PlatformConfig(),
-            logger=logging.getLogger("tests.agent"),
-            event_bus=bus,
-            health_monitor=monitor,
-            plugin_manager=PluginManager(),
-            simlab=SimLab(),
-            core=core,
-        )
-
+        agent = create_agent(tmp_path)
         await agent.start()
         await agent.start()
 
-        assert len(agent.benches()) == 5
-        assert len(agent.plugins()) == 3
+        assert [bench.name for bench in agent.benches()] == ["bench-01", "bench-02"]
+        assert [plugin.name for plugin in agent.plugins()] == ["power"]
         assert agent.health_payload() == {
             "status": "healthy",
-            "version": "0.1.0-alpha",
-            "benches": 5,
-            "plugins": 3,
+            "version": "0.2.0-alpha",
+            "backend": "simlab",
+            "database": "healthy",
+            "benches": {"total": 2, "online": 2},
         }
         assert all(report.status is HealthStatus.HEALTHY for report in agent.health_reports())
-        event_types = [event.type for event in events]
-        assert "AgentStarted" in event_types
-        assert event_types.count("PluginLoaded") == 3
-        assert event_types.count("BenchRegistered") == 5
-        assert "HealthChanged" in event_types
 
         await agent.shutdown()
         await agent.shutdown()
         assert agent.benches() == []
         assert agent.plugins() == []
         assert agent.health_payload()["status"] == "warning"
-        assert [event.type for event in events].count("BenchOffline") == 5
 
     asyncio.run(scenario())
 
 
-class StartupFailurePlugin(BasePlugin):
-    def __init__(self) -> None:
-        super().__init__(
-            PluginMetadata(
-                name="failure",
-                version="1.0.0",
-                author="tests",
-                description="always fails",
-                capabilities=["Failure"],
-            ),
-            [Capability(name="Failure")],
-        )
+def test_reservation_and_history_survive_agent_restart(tmp_path: Path) -> None:
+    _write_config(tmp_path, benches=1)
 
-    async def initialize(self) -> None:
-        raise RuntimeError("startup failed")
-
-
-def test_agent_marks_failed_start_unhealthy() -> None:
     async def scenario() -> None:
-        bus = EventBus()
-        monitor = HealthMonitor()
-        agent = LabAgent(
-            config=PlatformConfig(plugins=["failure"]),
-            logger=logging.getLogger("tests.agent.failure"),
-            event_bus=bus,
-            health_monitor=monitor,
-            plugin_manager=PluginManager({"failure": StartupFailurePlugin}),
-            simlab=SimLab(),
-            core=AgentCore(bus, monitor, CapabilityRegistry()),
-        )
+        first = create_agent(tmp_path)
+        await first.start()
+        reservation = await first.reservation_service.reserve("bench-01", "michael")
+        await first.shutdown()
 
-        with pytest.raises(PluginLoadError, match="Could not initialize"):
-            await agent.start()
-        assert agent.health_payload()["status"] == "unhealthy"
+        second = create_agent(tmp_path)
+        await second.start()
+        restored = await second.reservation_service.get_reservation("bench-01")
+        assert restored == reservation
+        bench = await second.bench_service.get_bench("bench-01")
+        assert bench.reserved_by == "michael"
+        events = await second.event_service.list_events(bench_id="bench-01")
+        assert [event.type for event in events] == ["BENCH_RESERVED"]
+        await second.shutdown()
 
     asyncio.run(scenario())
 
 
-def test_create_agent_and_agent_cli_once(
+def test_agent_cli_once_and_disabled_backend(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (tmp_path / "agent.yaml").write_text(
-        "agent:\n  name: integration-agent\nplugins:\n  - power\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "simlab.yaml").write_text(
-        "simlab:\n  enabled: true\n  benches: 2\n",
-        encoding="utf-8",
-    )
-
-    agent = create_agent(tmp_path)
-    asyncio.run(agent.start())
-    assert [bench.name for bench in agent.benches()] == ["bench-01", "bench-02"]
-    asyncio.run(agent.shutdown())
-
+    _write_config(tmp_path, benches=2)
     assert agent_main(["--config-dir", str(tmp_path), "--once"]) == 0
     output = capsys.readouterr().out
-    assert "Lab Agent v0.1.0-alpha" in output
+    assert "Lab Agent v0.2.0-alpha" in output
+    assert "✓ SimLab backend started" in output
     assert "✓ 2 benches registered" in output
-    assert "✓ 1 plugins loaded" in output
+
+    disabled = tmp_path / "disabled"
+    disabled.mkdir()
+    _write_config(disabled, enabled=False)
+    assert agent_main(["--config-dir", str(disabled), "--once"]) == 0
+    output = capsys.readouterr().out
+    assert "✓ SimLab backend disabled" in output
+    assert "✓ 0 benches registered" in output
 
 
-def test_disabled_simlab_starts_without_benches(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    config = PlatformConfig(
-        agent=AgentSettings(name="disabled-test"),
-        simlab=SimLabSettings(enabled=False),
-        plugins=[],
-    )
-    bus = EventBus()
-    monitor = HealthMonitor()
-    agent = LabAgent(
-        config=config,
-        logger=logging.getLogger("tests.agent.disabled"),
-        event_bus=bus,
-        health_monitor=monitor,
-        plugin_manager=PluginManager(),
-        simlab=SimLab(enabled=False),
-        core=AgentCore(bus, monitor, CapabilityRegistry()),
-    )
-    asyncio.run(agent.start())
-    assert agent.benches() == []
-    asyncio.run(agent.shutdown())
+def test_startup_fails_interrupted_operation_records(tmp_path: Path) -> None:
+    _write_config(tmp_path, benches=1)
 
-    (tmp_path / "simlab.yaml").write_text(
-        "simlab:\n  enabled: false\nplugins: []\n",
-        encoding="utf-8",
-    )
-    assert agent_main(["--config-dir", str(tmp_path), "--once"]) == 0
-    assert "✓ SimLab disabled" in capsys.readouterr().out
+    async def scenario() -> None:
+        database = SQLiteDatabase(tmp_path / ".lab-platform" / "lab.db")
+        database.initialize()
+        operations = SQLiteOperationRepository(database)
+        pending = Operation.pending("bench-01", OperationType.POWER_ON, "alice")
+        await operations.create(pending)
+        database.close()
+
+        agent = create_agent(tmp_path)
+        await agent.start()
+        recovered = await agent.operation_service.get_operation(pending.id)
+        assert recovered.status is OperationStatus.FAILED
+        assert recovered.error_code == "AGENT_RESTARTED"
+        events = await agent.event_service.list_events(event_type="BACKEND_ERROR")
+        assert events[0].payload["operations_failed"] == 1
+        await agent.shutdown()
+
+    asyncio.run(scenario())

@@ -19,6 +19,8 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run pytest
+uv run python scripts/export_openapi.py --check docs/openapi.json
+uv build
 ```
 
 Tests must retain more than 90% combined branch coverage. Add unit tests for business
@@ -31,7 +33,8 @@ rules and integration tests for changes that cross package or process boundaries
 - Prefer immutable Pydantic contracts in `packages/models`.
 - Publish lifecycle changes through `EventBus`.
 - Make resource lifecycles asynchronous and idempotent.
-- Keep Phase 0 local and read-only; check [ROADMAP.md](ROADMAP.md) before expanding scope.
+- Keep transport rules out of services and SimLab-specific rules inside the adapter.
+- Preserve the per-bench reservation and operation atomicity guarantees.
 
-Use semantic versioning. Python package metadata encodes `0.1.0-alpha` as the
-PEP 440-compatible version `0.1.0a0`.
+Use semantic versioning. Python package metadata encodes `0.2.0-alpha` as the
+PEP 440-compatible version `0.2.0a0`.

@@ -1,3 +1,7 @@
 simlab:
   enabled: true
   benches: 5
+  auto_start: true
+  clock_mode: accelerated
+  speed_multiplier: 20
+  flash_duration_seconds: 5
