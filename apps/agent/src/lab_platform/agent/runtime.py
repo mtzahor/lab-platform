@@ -31,10 +31,12 @@ from lab_platform.persistence import (
     SQLiteArtifactRepository,
     SQLiteDatabase,
     SQLiteEventRepository,
+    SQLiteOperationArtifactRepository,
     SQLiteOperationRepository,
     SQLiteReservationRepository,
 )
 from lab_platform.plugins import PluginManager
+from lab_platform.real_backend import RealLabBackend
 from lab_platform.simlab_adapter import SimLabBackend
 
 
@@ -198,20 +200,34 @@ def create_lab_backend(config: PlatformConfig) -> LabBackend:
             speed_multiplier=config.simlab.speed_multiplier,
             flash_duration_seconds=config.simlab.flash_duration_seconds,
         )
+    if config.backend.type == "real":
+        return RealLabBackend.from_config(config.hardware)
     raise ConfigurationError(f"Unsupported backend type: {config.backend.type}")
 
 
 def create_agent(config_dir: str | Path = "config") -> LabAgent:
     config_root = Path(config_dir)
     config = load_config(config_root)
-    storage_root = config_root.parent if config_root.name == "config" else config_root
+    storage_root = (
+        config_root.parent if config_root.is_file() or config_root.name == "config" else config_root
+    )
     database = SQLiteDatabase(_database_path(config.database.url, storage_root))
     reservations = SQLiteReservationRepository(database)
     operations = SQLiteOperationRepository(database)
     events = SQLiteEventRepository(database)
     artifacts = SQLiteArtifactRepository(database)
+    operation_artifacts = SQLiteOperationArtifactRepository(database)
     backend = create_lab_backend(config)
-    runner = OperationRunner(backend, operations, events)
+    artifact_path = config.artifacts.directory
+    if not artifact_path.is_absolute():
+        artifact_path = storage_root / artifact_path
+    runner = OperationRunner(
+        backend,
+        operations,
+        events,
+        operation_artifacts,
+        artifact_path,
+    )
     reservation_service = ReservationService(backend, reservations, events)
     bench_service = BenchService(
         backend,
@@ -222,16 +238,14 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
         artifacts,
         runner,
     )
-    operation_service = OperationService(operations, events, runner)
+    operation_service = OperationService(operations, events, runner, operation_artifacts)
     event_service = EventService(events)
     event_bus = EventBus()
     health_monitor = HealthMonitor()
     logger = get_logger(config.agent.name, config.agent.log_level)
     get_logger("lab-platform.operations", config.agent.log_level)
     get_logger("lab-platform.backend.simlab", config.agent.log_level)
-    artifact_path = config.artifacts.directory
-    if not artifact_path.is_absolute():
-        artifact_path = storage_root / artifact_path
+    get_logger("lab-platform.backend.real", config.agent.log_level)
     return LabAgent(
         config=config,
         logger=logger,
@@ -253,6 +267,6 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
 def _database_path(url: str, storage_root: Path) -> Path:
     prefix = "sqlite:///"
     if not url.startswith(prefix):
-        raise ConfigurationError("Phase 1 supports only sqlite:/// database URLs", url=url)
+        raise ConfigurationError("Lab Platform supports only sqlite:/// database URLs", url=url)
     path = Path(url.removeprefix(prefix))
     return path if path.is_absolute() else storage_root / path

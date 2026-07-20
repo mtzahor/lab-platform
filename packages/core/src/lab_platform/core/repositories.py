@@ -8,6 +8,7 @@ from lab_platform.models import (
     EventRecord,
     FirmwareArtifact,
     Operation,
+    OperationArtifact,
     OperationStatus,
     OperationType,
     Reservation,
@@ -57,3 +58,9 @@ class EventRepository(Protocol):
 
 class ArtifactRepository(Protocol):
     async def save(self, artifact: FirmwareArtifact) -> FirmwareArtifact: ...
+
+
+class OperationArtifactRepository(Protocol):
+    async def save(self, artifact: OperationArtifact) -> OperationArtifact: ...
+
+    async def list_for_operation(self, operation_id: UUID) -> list[OperationArtifact]: ...

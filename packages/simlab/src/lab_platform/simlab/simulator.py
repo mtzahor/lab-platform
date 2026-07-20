@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -153,6 +154,31 @@ class SimLab:
         await self._wait(2.0)
         self._raise_failure(bench)
         bench.powered = True
+
+    async def reset(self, bench_id: str) -> None:
+        await self.power_cycle(bench_id)
+
+    async def read_serial(
+        self,
+        bench_id: str,
+        *,
+        until_pattern: str | None,
+        max_lines: int | None,
+    ) -> AsyncIterator[str]:
+        bench = self._require_controllable(bench_id, "Serial")
+        self._raise_failure(bench)
+        lines = (
+            "BOOTING",
+            f"FIRMWARE_VERSION={bench.firmware_version or 'unknown'}",
+            "SELF_TEST=PASS",
+            "READY",
+        )
+        for index, line in enumerate(lines, start=1):
+            yield line
+            if until_pattern is not None and re.search(until_pattern, line):
+                return
+            if max_lines is not None and index >= max_lines:
+                return
 
     async def flash_firmware(
         self,

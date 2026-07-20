@@ -5,7 +5,7 @@
 Install Python 3.11+ and uv, then run:
 
 ```console
-uv sync --extra dev
+uv sync --all-extras
 uv run labctl config validate
 uv run lab-agent --once
 ```
@@ -33,8 +33,8 @@ rules and integration tests for changes that cross package or process boundaries
 - Prefer immutable Pydantic contracts in `packages/models`.
 - Publish lifecycle changes through `EventBus`.
 - Make resource lifecycles asynchronous and idempotent.
-- Keep transport rules out of services and SimLab-specific rules inside the adapter.
+- Keep transport rules out of services and target-specific rules inside backend adapters.
 - Preserve the per-bench reservation and operation atomicity guarantees.
 
-Use semantic versioning. Python package metadata encodes `0.2.0-alpha` as the
-PEP 440-compatible version `0.2.0a0`.
+Use semantic versioning. Python package metadata encodes `0.3.0-alpha` as the
+PEP 440-compatible version `0.3.0a0`.

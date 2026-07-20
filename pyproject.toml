@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-platform"
-version = "0.2.0a0"
+version = "0.3.0a0"
 description = "Local-first remote hardware bench management platform."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,8 +13,10 @@ dependencies = [
     "fastapi>=0.116,<1",
     "pydantic>=2.8,<3",
     "python-multipart>=0.0.20,<1",
+    "pyserial>=3.5,<4",
     "PyYAML>=6.0.1,<7",
     "uvicorn>=0.35,<1",
+    "esptool>=4.8,<5",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,9 @@ packages = [
     "lab_platform.models",
     "lab_platform.persistence",
     "lab_platform.plugins",
+    "lab_platform.real_backend",
+    "lab_platform.real_backend.targets",
+    "lab_platform.real_backend.targets.esp32",
     "lab_platform.simlab",
     "lab_platform.simlab_adapter",
 ]
@@ -55,6 +60,9 @@ packages = [
 "lab_platform.models" = "packages/models/src/lab_platform/models"
 "lab_platform.persistence" = "packages/persistence/src/lab_platform/persistence"
 "lab_platform.plugins" = "packages/plugins/src/lab_platform/plugins"
+"lab_platform.real_backend" = "packages/real_backend/src/lab_platform/real_backend"
+"lab_platform.real_backend.targets" = "packages/real_backend/src/lab_platform/real_backend/targets"
+"lab_platform.real_backend.targets.esp32" = "packages/real_backend/src/lab_platform/real_backend/targets/esp32"
 "lab_platform.simlab" = "packages/simlab/src/lab_platform/simlab"
 "lab_platform.simlab_adapter" = "packages/simlab_adapter/src/lab_platform/simlab_adapter"
 
@@ -81,6 +89,7 @@ mypy_path = [
     "packages/models/src",
     "packages/persistence/src",
     "packages/plugins/src",
+    "packages/real_backend/src",
     "packages/simlab/src",
     "packages/simlab_adapter/src",
 ]
@@ -88,7 +97,10 @@ mypy_path = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=lab_platform --cov-report=term-missing --cov-fail-under=90"
-markers = ["backend_contract: shared behavioral contract for LabBackend implementations"]
+markers = [
+    "backend_contract: shared behavioral contract for LabBackend implementations",
+    "hardware: requires an explicitly enabled physical hardware bench",
+]
 
 [tool.coverage.run]
 branch = true

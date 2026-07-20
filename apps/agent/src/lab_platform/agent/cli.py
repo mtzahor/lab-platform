@@ -13,7 +13,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    agent = create_agent(args.config_dir)
+    agent = create_agent(args.config or args.config_dir)
     asyncio.run(agent.start())
     _print_startup(agent)
 
@@ -43,6 +43,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("config"),
         help="Directory containing agent.yaml and simlab.yaml.",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to one complete Agent YAML configuration file.",
+    )
     parser.add_argument("--host", default=None, help="Override the configured HTTP host.")
     parser.add_argument("--port", type=int, default=None, help="Override the configured HTTP port.")
     parser.add_argument(
@@ -58,7 +64,9 @@ def _print_startup(agent: LabAgent) -> None:
     print("✓ Configuration loaded")
     print("✓ Logging initialized")
     print("✓ Event bus started")
-    if agent.config.simlab.enabled:
+    if agent.config.backend.type == "real":
+        print("✓ RealLabBackend started")
+    elif agent.config.simlab.enabled:
         print("✓ SimLab backend started")
     else:
         print("✓ SimLab backend disabled")

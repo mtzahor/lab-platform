@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from lab_platform.core.errors import (
     BackendFailureError,
@@ -12,7 +13,15 @@ from lab_platform.core.errors import (
     CapabilityNotSupportedError,
     SimulationFailureError,
 )
-from lab_platform.models import BackendProgress, BenchSnapshot, FirmwareInput
+from lab_platform.models import (
+    BackendProgress,
+    BenchSnapshot,
+    FirmwareInput,
+    SerialLine,
+    SerialReadRequest,
+    TargetHealth,
+    TargetHealthStatus,
+)
 from lab_platform.simlab import (
     SimLab,
     SimLabBenchNotFound,
@@ -73,6 +82,22 @@ class SimLabBackend:
     async def power_cycle(self, bench_id: str) -> None:
         await self._call("power", "power_cycle", self._simulator.power_cycle, bench_id)
 
+    async def reset(self, bench_id: str) -> None:
+        await self._call("reset", "reset", self._simulator.reset, bench_id)
+
+    async def probe(self, bench_id: str) -> TargetHealth:
+        try:
+            bench = self._simulator.get_bench(bench_id)
+        except Exception as exc:
+            raise _translate_error(exc, bench_id) from exc
+        return TargetHealth(
+            bench_id=bench_id,
+            status=(TargetHealthStatus.ONLINE if bench.online else TargetHealthStatus.OFFLINE),
+            chip_type="SimLab",
+            serial_port=f"sim://{bench_id}",
+            details={"backend": "simlab"},
+        )
+
     async def flash_firmware(
         self, bench_id: str, firmware: FirmwareInput
     ) -> AsyncIterator[BackendProgress]:
@@ -89,6 +114,23 @@ class SimLabBackend:
             raise _translate_error(exc, bench_id) from exc
         else:
             self._log_call(bench_id, "firmware", "flash", started, "success")
+
+    async def read_serial(
+        self, bench_id: str, request: SerialReadRequest
+    ) -> AsyncIterator[SerialLine]:
+        started = time.perf_counter()
+        try:
+            async for text in self._simulator.read_serial(
+                bench_id,
+                until_pattern=request.until_pattern,
+                max_lines=request.max_lines,
+            ):
+                yield SerialLine(timestamp=datetime.now(UTC), text=text)
+        except Exception as exc:
+            self._log_call(bench_id, "serial", "read", started, "failure")
+            raise _translate_error(exc, bench_id) from exc
+        else:
+            self._log_call(bench_id, "serial", "read", started, "success")
 
     async def _call(
         self,
