@@ -1,11 +1,11 @@
 # Lab Platform
 
 Lab Platform is a local-first system for safely reserving and controlling remote hardware
-benches. Phase 1 provides a versioned REST API, an HTTP-only CLI, persistent reservations and
-operation history, and a deterministic SimLab backend. No physical hardware or internet access is
-required for the demo.
+benches. Phase 2 adds a configuration-selected real backend and the first physical target, an
+ESP32 DevKit V1, while retaining the deterministic SimLab workflow. The REST API, HTTP-only CLI,
+reservation rules, operation tracking, and event history are shared by both backends.
 
-The current release is **0.2.0-alpha**.
+The current release is **0.3.0-alpha**.
 
 ## Quick start
 
@@ -14,7 +14,7 @@ Requirements: Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
 ```console
 git clone <repository-url> lab-platform
 cd lab-platform
-uv sync --extra dev
+uv sync --all-extras
 source .venv/bin/activate
 lab-agent --config-dir config
 ```
@@ -48,12 +48,40 @@ The default configuration stores platform-owned state under `.lab-platform/`:
 - `artifacts/<sha256>/` contains uploaded firmware.
 
 SimLab remains the source of truth for current simulated power and firmware state. Delete
-`.lab-platform/` only when you intentionally want to clear local Phase 1 history.
+`.lab-platform/` only when you intentionally want to clear local history.
+
+## ESP32 DevKit V1
+
+Connect one ESP32 DevKit V1 over a USB data cable, review
+[`examples/esp32-local.yaml`](examples/esp32-local.yaml), and preferably configure its USB serial
+number. Build the reference firmware as described in
+[`docs/ESP32_SETUP.md`](docs/ESP32_SETUP.md), then start the real backend:
+
+```console
+lab-agent --config examples/esp32-local.yaml
+```
+
+The complete physical workflow uses the same operation API as SimLab:
+
+```console
+labctl bench list
+labctl bench probe esp32-devkit-01
+labctl bench reserve esp32-devkit-01 --owner michael
+labctl bench flash esp32-devkit-01 ./firmware.bin --owner michael --version 0.1.0
+labctl operation watch <operation-id>
+labctl bench serial read esp32-devkit-01 --owner michael --until '^READY$'
+labctl bench reset esp32-devkit-01 --owner michael
+labctl bench release esp32-devkit-01 --owner michael
+```
+
+The target advertises firmware, serial, probe, and reset. It does not advertise physical power
+control. Serial output is retained under
+`.lab-platform/artifacts/operations/<operation-id>/serial.log`.
 
 ## Development
 
 ```console
-uv sync --extra dev
+uv sync --all-extras
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy
@@ -61,6 +89,7 @@ uv run pytest
 uv build
 ```
 
-See [PHASE_1.md](PHASE_1.md), [API.md](API.md), [CLI.md](CLI.md),
-[SIMLAB_INTEGRATION.md](SIMLAB_INTEGRATION.md), [ARCHITECTURE.md](ARCHITECTURE.md), and
-[DEVELOPMENT.md](DEVELOPMENT.md).
+See [Phase 2](docs/PHASE_2.md), [ESP32 setup](docs/ESP32_SETUP.md),
+[real-backend design](docs/REAL_BACKEND.md), [hardware testing](docs/HARDWARE_TESTING.md),
+[serial troubleshooting](docs/TROUBLESHOOTING_SERIAL.md), [API.md](API.md), [CLI.md](CLI.md), and
+[ARCHITECTURE.md](ARCHITECTURE.md).

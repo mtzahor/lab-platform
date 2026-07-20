@@ -5,6 +5,10 @@ from lab_platform.simlab import SimulatedBenchSnapshot
 
 
 def map_simlab_bench(bench: SimulatedBenchSnapshot) -> BenchSnapshot:
+    capabilities = [capability.lower() for capability in bench.capabilities]
+    capabilities.append("probe")
+    if "power" in capabilities:
+        capabilities.append("reset")
     return BenchSnapshot(
         id=bench.id,
         name=bench.name,
@@ -12,5 +16,5 @@ def map_simlab_bench(bench: SimulatedBenchSnapshot) -> BenchSnapshot:
         online=bench.online,
         powered=bench.powered if bench.online else None,
         firmware_version=bench.firmware_version,
-        capabilities=[capability.lower() for capability in bench.capabilities],
+        capabilities=capabilities,
     )

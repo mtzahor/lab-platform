@@ -14,13 +14,14 @@ from lab_platform.models import (
     EventRecord,
     FirmwareArtifact,
     Operation,
+    OperationArtifact,
     OperationStatus,
     OperationType,
     Reservation,
     ReservationStatus,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SQLiteDatabase:
@@ -71,6 +72,14 @@ class SQLiteDatabase:
                     sha256 TEXT PRIMARY KEY, filename TEXT NOT NULL, local_path TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL, version TEXT, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS operation_artifacts (
+                    id TEXT PRIMARY KEY, operation_id TEXT NOT NULL, type TEXT NOT NULL,
+                    path TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(operation_id) REFERENCES operations(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS operation_artifacts_operation
+                    ON operation_artifacts(operation_id, created_at);
                 """
             )
             connection.execute(
@@ -312,6 +321,37 @@ class SQLiteArtifactRepository:
         return artifact
 
 
+class SQLiteOperationArtifactRepository:
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self._database = database
+
+    async def save(self, artifact: OperationArtifact) -> OperationArtifact:
+        with self._database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO operation_artifacts "
+                "(id, operation_id, type, path, size_bytes, sha256, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(artifact.id),
+                    str(artifact.operation_id),
+                    artifact.type,
+                    str(artifact.path),
+                    artifact.size_bytes,
+                    artifact.sha256,
+                    artifact.created_at.isoformat(),
+                ),
+            )
+        return artifact
+
+    async def list_for_operation(self, operation_id: UUID) -> list[OperationArtifact]:
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM operation_artifacts WHERE operation_id = ? ORDER BY created_at",
+                (str(operation_id),),
+            ).fetchall()
+        return [_operation_artifact_from_row(row) for row in rows]
+
+
 def _operation_values(operation: Operation) -> tuple[object, ...]:
     return (
         str(operation.id),
@@ -367,6 +407,18 @@ def _event_from_row(row: sqlite3.Row) -> EventRecord:
         operation_id=UUID(row["operation_id"]) if row["operation_id"] else None,
         actor=row["actor"],
         payload=json.loads(row["payload"]),
+    )
+
+
+def _operation_artifact_from_row(row: sqlite3.Row) -> OperationArtifact:
+    return OperationArtifact(
+        id=UUID(row["id"]),
+        operation_id=UUID(row["operation_id"]),
+        type=row["type"],
+        path=Path(row["path"]),
+        size_bytes=row["size_bytes"],
+        sha256=row["sha256"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 

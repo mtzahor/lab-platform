@@ -3,6 +3,7 @@ from lab_platform.persistence.database import (
     SQLiteArtifactRepository,
     SQLiteDatabase,
     SQLiteEventRepository,
+    SQLiteOperationArtifactRepository,
     SQLiteOperationRepository,
     SQLiteReservationRepository,
 )
@@ -13,5 +14,6 @@ __all__ = [
     "SQLiteDatabase",
     "SQLiteEventRepository",
     "SQLiteOperationRepository",
+    "SQLiteOperationArtifactRepository",
     "SQLiteReservationRepository",
 ]

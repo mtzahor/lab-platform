@@ -70,3 +70,7 @@ class BackendTimeoutError(PlatformError):
 
 class SimulationFailureError(PlatformError):
     code = "SIMULATION_FAILURE"
+
+
+class OperationArtifactNotFoundError(PlatformError):
+    code = "OPERATION_ARTIFACT_NOT_FOUND"

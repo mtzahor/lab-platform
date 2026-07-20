@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,6 +30,13 @@ class HealthStatus(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
+class TargetHealthStatus(StrEnum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    DEGRADED = "degraded"
+    UNKNOWN = "unknown"
+
+
 class ReservationStatus(StrEnum):
     ACTIVE = "active"
     RELEASED = "released"
@@ -41,6 +48,8 @@ class OperationType(StrEnum):
     POWER_OFF = "power_off"
     POWER_CYCLE = "power_cycle"
     FLASH_FIRMWARE = "flash_firmware"
+    RESET = "reset"
+    SERIAL_READ = "serial_read"
 
 
 class OperationStatus(StrEnum):
@@ -201,9 +210,52 @@ class FirmwareArtifact(LabModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class SerialPortInfo(LabModel):
+    device: str
+    description: str | None = None
+    manufacturer: str | None = None
+    serial_number: str | None = None
+    vendor_id: int | None = Field(default=None, ge=0, le=0xFFFF)
+    product_id: int | None = Field(default=None, ge=0, le=0xFFFF)
+
+
+class SerialReadRequest(LabModel):
+    timeout_seconds: float = Field(default=10, gt=0, le=3600)
+    until_pattern: str | None = None
+    max_lines: int | None = Field(default=500, ge=1, le=100_000)
+    include_timestamps: bool = True
+
+
+class SerialLine(LabModel):
+    timestamp: datetime = Field(default_factory=utc_now)
+    text: str
+    stream: Literal["stdout", "stderr", "serial"] = "serial"
+
+
 class BackendProgress(LabModel):
     percent: int = Field(ge=0, le=100)
     message: str
+    serial_lines: list[SerialLine] = Field(default_factory=list)
+    firmware_version: str | None = None
+
+
+class TargetHealth(LabModel):
+    bench_id: str
+    status: TargetHealthStatus
+    chip_type: str | None = None
+    mac_address: str | None = None
+    serial_port: str | None = None
+    details: dict[str, str] = Field(default_factory=dict)
+
+
+class OperationArtifact(LabModel):
+    id: UUID = Field(default_factory=uuid4)
+    operation_id: UUID
+    type: str
+    path: Path
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class EventRecord(LabModel):

@@ -13,6 +13,7 @@ SOURCE_ROOTS = (
     ROOT / "packages/models/src",
     ROOT / "packages/persistence/src",
     ROOT / "packages/plugins/src",
+    ROOT / "packages/real_backend/src",
     ROOT / "packages/simlab/src",
     ROOT / "packages/simlab_adapter/src",
 )

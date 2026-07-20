@@ -1,0 +1,48 @@
+agent:
+  name: local-esp32-agent
+  host: 127.0.0.1
+  port: 8080
+  log_level: INFO
+
+backend:
+  type: real
+
+hardware:
+  benches:
+    - id: esp32-devkit-01
+      name: Michael ESP32 DevKit V1
+      target_type: esp32
+      connection:
+        serial_port: /dev/cu.usbserial-0001
+        baud_rate: 115200
+        usb:
+          vendor_id: null
+          product_id: null
+          serial_number: null
+      flash:
+        tool: esptool
+        chip: esp32
+        baud_rate: 460800
+        flash_address: "0x10000"
+        reset_mode: default_reset
+        after: hard_reset
+        timeout_seconds: 120
+      firmware:
+        format: raw_bin
+      boot:
+        ready_pattern: "^READY$"
+        version_pattern: "^FIRMWARE_VERSION=(?P<version>.+)$"
+        failure_patterns:
+          - "Guru Meditation Error"
+          - "abort\\(\\)"
+          - "Brownout detector was triggered"
+        timeout_seconds: 20
+
+database:
+  url: sqlite:///./.lab-platform/lab.db
+
+artifacts:
+  directory: ./.lab-platform/artifacts
+  max_firmware_size_mb: 100
+
+plugins: []

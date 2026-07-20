@@ -2,6 +2,11 @@
 
 - [Architecture](../ARCHITECTURE.md)
 - [Phase 1](../PHASE_1.md)
+- [Phase 2](PHASE_2.md)
+- [ESP32 setup](ESP32_SETUP.md)
+- [Real backend](REAL_BACKEND.md)
+- [Hardware testing](HARDWARE_TESTING.md)
+- [Serial troubleshooting](TROUBLESHOOTING_SERIAL.md)
 - [REST API](../API.md)
 - [CLI](../CLI.md)
 - [SimLab integration](../SIMLAB_INTEGRATION.md)

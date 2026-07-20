@@ -101,6 +101,44 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
             {"owner": args.owner},
         )
         _print_operation_created(payload, args.output)
+    elif command == "reset":
+        payload = client.post(
+            f"/api/v1/benches/{args.bench_id}/actions/reset",
+            {"owner": args.owner},
+        )
+        _print_operation_created(payload, args.output)
+    elif command == "probe":
+        payload = client.post(f"/api/v1/benches/{args.bench_id}/actions/probe", {})
+        _print_read_payload(payload, args.output, _probe_table)
+    elif command == "serial" and args.serial_command == "read":
+        payload = client.post(
+            f"/api/v1/benches/{args.bench_id}/actions/read-serial",
+            {
+                "owner": args.owner,
+                "timeout_seconds": args.timeout,
+                "until_pattern": args.until_pattern,
+                "max_lines": args.max_lines,
+            },
+        )
+        accepted = _require_mapping(payload, "operation")
+        operation_id = str(accepted.get("operation_id", ""))
+        operation = _wait_for_terminal(client, operation_id)
+        if operation.get("status") != "succeeded":
+            print(
+                f"serial read failed [{operation.get('error_code')}]: "
+                f"{operation.get('error_message')}",
+                file=sys.stderr,
+            )
+            return 7
+        artifact = _require_mapping(
+            client.get(f"/api/v1/operations/{operation_id}/artifacts/serial"),
+            "serial artifact",
+        )
+        text = str(artifact.get("text", ""))
+        if args.output == "json":
+            _print_json({"operation": operation, "serial_output": text})
+        else:
+            print(text, end="" if text.endswith("\n") else "\n")
     elif command == "flash":
         checksum, size = _validate_firmware(args.firmware_path)
         payload = client.upload(
@@ -180,6 +218,16 @@ def _watch_operation(client: AgentClient, args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def _wait_for_terminal(
+    client: AgentClient, operation_id: str, interval: float = 0.05
+) -> dict[str, object]:
+    while True:
+        operation = _require_mapping(client.get(f"/api/v1/operations/{operation_id}"), "operation")
+        if operation.get("status") in {"succeeded", "failed", "cancelled"}:
+            return operation
+        time.sleep(interval)
+
+
 def _bench_list(client: AgentClient, args: argparse.Namespace) -> None:
     payload = client.get(
         "/api/v1/benches",
@@ -211,7 +259,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_list.add_argument("--reserved", action=argparse.BooleanOptionalAction, default=None)
     bench_show = _read_parser(benches.add_parser("show"))
     bench_show.add_argument("bench_id")
-    for name in ("reserve", "release", "power-on", "power-off", "power-cycle"):
+    for name in ("reserve", "release", "power-on", "power-off", "power-cycle", "reset"):
         action = _read_parser(benches.add_parser(name))
         action.add_argument("bench_id")
         action.add_argument("--owner", required=True)
@@ -220,6 +268,16 @@ def _build_parser() -> argparse.ArgumentParser:
     flash.add_argument("firmware_path", type=Path)
     flash.add_argument("--owner", required=True)
     flash.add_argument("--version")
+    probe = _read_parser(benches.add_parser("probe"))
+    probe.add_argument("bench_id")
+    serial = benches.add_parser("serial")
+    serial_commands = serial.add_subparsers(dest="serial_command", required=True)
+    serial_read = _read_parser(serial_commands.add_parser("read"))
+    serial_read.add_argument("bench_id")
+    serial_read.add_argument("--owner", required=True)
+    serial_read.add_argument("--timeout", type=float, default=10)
+    serial_read.add_argument("--until", dest="until_pattern")
+    serial_read.add_argument("--max-lines", type=int, default=500)
 
     operation = commands.add_parser("operation", help="Inspect asynchronous operations.")
     operations = operation.add_subparsers(dest="operation_command", required=True)
@@ -300,7 +358,7 @@ def _api_exit_code(error: AgentApiError) -> int:
         return 5
     if error.status == 409:
         return 4
-    if error.status == 503:
+    if error.status in {503, 504}:
         return 6
     return 1
 
@@ -374,6 +432,19 @@ def _bench_show_table(bench: dict[str, object]) -> None:
             ("Power", _power(bench.get("powered"))),
             ("Firmware", str(bench.get("firmware_version") or "—")),
             ("Capabilities", capability_text),
+        ],
+    )
+
+
+def _probe_table(health: dict[str, object]) -> None:
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Bench", str(health.get("bench_id", ""))),
+            ("Status", str(health.get("status", "")).title()),
+            ("Chip", str(health.get("chip_type") or "—")),
+            ("Serial port", str(health.get("serial_port") or "—")),
+            ("MAC address", str(health.get("mac_address") or "—")),
         ],
     )
 

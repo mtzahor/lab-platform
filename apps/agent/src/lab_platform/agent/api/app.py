@@ -19,12 +19,18 @@ from lab_platform.agent.api.errors import (
 )
 from lab_platform.agent.runtime import LabAgent
 from lab_platform.core import (
+    VERSION,
     BenchNotReservedError,
     FirmwareFileTooLargeError,
     InvalidFirmwareFileError,
     PlatformError,
 )
-from lab_platform.models import FirmwareInput, OperationStatus, OperationType
+from lab_platform.models import (
+    FirmwareInput,
+    OperationStatus,
+    OperationType,
+    SerialReadRequest,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException
 
@@ -42,10 +48,17 @@ class OperationAccepted(ApiModel):
     status: OperationStatus
 
 
+class SerialReadApiRequest(OwnerRequest):
+    timeout_seconds: float = Field(default=10, gt=0, le=3600)
+    until_pattern: str | None = None
+    max_lines: int | None = Field(default=500, ge=1, le=100_000)
+    include_timestamps: bool = True
+
+
 def create_app(agent: LabAgent) -> FastAPI:
     app = FastAPI(
         title="Lab Platform Agent API",
-        version="0.2.0-alpha",
+        version=VERSION,
         description="Versioned local API for reserving and controlling lab benches.",
     )
     logger = logging.getLogger(agent.config.agent.name)
@@ -88,7 +101,7 @@ def create_app(agent: LabAgent) -> FastAPI:
 
     @router.get("/version")
     async def version() -> dict[str, str]:
-        return {"version": "0.2.0-alpha"}
+        return {"version": VERSION}
 
     @router.get("/benches")
     async def list_benches(
@@ -167,6 +180,37 @@ def create_app(agent: LabAgent) -> FastAPI:
     async def power_cycle(bench_id: str, request: OwnerRequest) -> OperationAccepted:
         return await submit_power(bench_id, request, OperationType.POWER_CYCLE)
 
+    @router.post("/benches/{bench_id}/actions/probe")
+    async def probe(bench_id: str) -> object:
+        return (await agent.bench_service.probe(bench_id)).model_dump(mode="json")
+
+    @router.post(
+        "/benches/{bench_id}/actions/reset",
+        response_model=OperationAccepted,
+        status_code=202,
+    )
+    async def reset(bench_id: str, request: OwnerRequest) -> OperationAccepted:
+        operation = await agent.bench_service.reset(bench_id, request.owner)
+        return OperationAccepted(operation_id=operation.id, status=operation.status)
+
+    @router.post(
+        "/benches/{bench_id}/actions/read-serial",
+        response_model=OperationAccepted,
+        status_code=202,
+    )
+    async def read_serial(bench_id: str, request: SerialReadApiRequest) -> OperationAccepted:
+        operation = await agent.bench_service.read_serial(
+            bench_id,
+            request.owner,
+            SerialReadRequest(
+                timeout_seconds=request.timeout_seconds,
+                until_pattern=request.until_pattern,
+                max_lines=request.max_lines,
+                include_timestamps=request.include_timestamps,
+            ),
+        )
+        return OperationAccepted(operation_id=operation.id, status=operation.status)
+
     @router.post(
         "/benches/{bench_id}/actions/flash",
         response_model=OperationAccepted,
@@ -186,6 +230,15 @@ def create_app(agent: LabAgent) -> FastAPI:
     async def get_operation(operation_id: UUID) -> object:
         operation = await agent.operation_service.get_operation(operation_id)
         return operation.model_dump(mode="json")
+
+    @router.get("/operations/{operation_id}/artifacts")
+    async def list_operation_artifacts(operation_id: UUID) -> dict[str, object]:
+        artifacts = await agent.operation_service.list_artifacts(operation_id)
+        return {"items": [artifact.model_dump(mode="json") for artifact in artifacts]}
+
+    @router.get("/operations/{operation_id}/artifacts/serial")
+    async def read_serial_artifact(operation_id: UUID) -> dict[str, str]:
+        return {"text": await agent.operation_service.read_serial_artifact(operation_id)}
 
     @router.get("/operations")
     async def list_operations(
@@ -232,7 +285,7 @@ def create_app(agent: LabAgent) -> FastAPI:
 
     @app.get("/version", include_in_schema=False)
     async def legacy_version() -> dict[str, str]:
-        return {"version": "0.2.0-alpha"}
+        return {"version": VERSION}
 
     @app.get("/plugins", include_in_schema=False)
     async def legacy_plugins() -> list[object]:

@@ -82,7 +82,9 @@
           "power_on",
           "power_off",
           "power_cycle",
-          "flash_firmware"
+          "flash_firmware",
+          "reset",
+          "serial_read"
         ],
         "title": "OperationType",
         "type": "string"
@@ -101,6 +103,59 @@
           "owner"
         ],
         "title": "OwnerRequest",
+        "type": "object"
+      },
+      "SerialReadApiRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "include_timestamps": {
+            "default": true,
+            "title": "Include Timestamps",
+            "type": "boolean"
+          },
+          "max_lines": {
+            "anyOf": [
+              {
+                "maximum": 100000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 500,
+            "title": "Max Lines"
+          },
+          "owner": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Owner",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 10,
+            "exclusiveMinimum": 0.0,
+            "maximum": 3600.0,
+            "title": "Timeout Seconds",
+            "type": "number"
+          },
+          "until_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until Pattern"
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "title": "SerialReadApiRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -148,7 +203,7 @@
   "info": {
     "description": "Versioned local API for reserving and controlling lab benches.",
     "title": "Lab Platform Agent API",
-    "version": "0.2.0-alpha"
+    "version": "0.3.0-alpha"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -465,6 +520,143 @@
           }
         },
         "summary": "Power On"
+      }
+    },
+    "/api/v1/benches/{bench_id}/actions/probe": {
+      "post": {
+        "operationId": "probe_api_v1_benches__bench_id__actions_probe_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Probe Api V1 Benches  Bench Id  Actions Probe Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Probe"
+      }
+    },
+    "/api/v1/benches/{bench_id}/actions/read-serial": {
+      "post": {
+        "operationId": "read_serial_api_v1_benches__bench_id__actions_read_serial_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SerialReadApiRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Serial"
+      }
+    },
+    "/api/v1/benches/{bench_id}/actions/reset": {
+      "post": {
+        "operationId": "reset_api_v1_benches__bench_id__actions_reset_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reset"
       }
     },
     "/api/v1/benches/{bench_id}/reservation": {
@@ -853,6 +1045,92 @@
           }
         },
         "summary": "Get Operation"
+      }
+    },
+    "/api/v1/operations/{operation_id}/artifacts": {
+      "get": {
+        "operationId": "list_operation_artifacts_api_v1_operations__operation_id__artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Operation Artifacts Api V1 Operations  Operation Id  Artifacts Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Operation Artifacts"
+      }
+    },
+    "/api/v1/operations/{operation_id}/artifacts/serial": {
+      "get": {
+        "operationId": "read_serial_artifact_api_v1_operations__operation_id__artifacts_serial_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Read Serial Artifact Api V1 Operations  Operation Id  Artifacts Serial Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Serial Artifact"
       }
     },
     "/api/v1/operations/{operation_id}/cancel": {

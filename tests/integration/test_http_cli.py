@@ -48,7 +48,7 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
     prefix = ["--server", base_url]
     try:
         assert cli_main([*prefix, "version"]) == 0
-        assert capsys.readouterr().out.strip() == "labctl 0.2.0-alpha"
+        assert capsys.readouterr().out.strip() == "labctl 0.3.0-alpha"
 
         assert cli_main([*prefix, "health", "--output", "json"]) == 0
         health = json.loads(capsys.readouterr().out)
@@ -65,6 +65,9 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
 
         assert cli_main([*prefix, "bench", "show", "bench-01"]) == 0
         assert "michael" in capsys.readouterr().out
+
+        assert cli_main([*prefix, "bench", "probe", "bench-01"]) == 0
+        assert "SimLab" in capsys.readouterr().out
 
         assert cli_main([*prefix, "bench", "power-cycle", "bench-01", "--owner", "michael"]) == 0
         output = capsys.readouterr().out
@@ -122,6 +125,44 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
             == 0
         )
         assert "Firmware 2.0.0 installed" in capsys.readouterr().out
+
+        assert (
+            cli_main(
+                [
+                    *prefix,
+                    "bench",
+                    "serial",
+                    "read",
+                    "bench-01",
+                    "--owner",
+                    "michael",
+                    "--until",
+                    "READY",
+                ]
+            )
+            == 0
+        )
+        serial_output = capsys.readouterr().out
+        assert "FIRMWARE_VERSION=2.0.0" in serial_output
+        assert "READY" in serial_output
+
+        assert cli_main([*prefix, "bench", "reset", "bench-01", "--owner", "michael"]) == 0
+        reset_id = re.search(r"Operation created: ([0-9a-f-]+)", capsys.readouterr().out)
+        assert reset_id is not None
+        assert (
+            cli_main(
+                [
+                    *prefix,
+                    "operation",
+                    "watch",
+                    reset_id.group(1),
+                    "--interval",
+                    "0.01",
+                ]
+            )
+            == 0
+        )
+        assert "Status: Succeeded" in capsys.readouterr().out
 
         assert cli_main([*prefix, "operation", "list"]) == 0
         assert "Flash Firmware" in capsys.readouterr().out
