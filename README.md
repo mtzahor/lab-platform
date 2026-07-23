@@ -1,11 +1,11 @@
 # Lab Platform
 
 Lab Platform is a local-first system for safely reserving and controlling remote hardware
-benches. Phase 2 adds a configuration-selected real backend and the first physical target, an
-ESP32 DevKit V1, while retaining the deterministic SimLab workflow. The REST API, HTTP-only CLI,
-reservation rules, operation tracking, and event history are shared by both backends.
+benches. Phase 3 lets several engineers share multiple simulated and physical benches through one
+Agent, with timed reservations, persistent FIFO queues, deterministic scheduling, restart recovery,
+history, and sequential workflows.
 
-The current release is **0.3.0-alpha**.
+The current release is **0.4.0-alpha**.
 
 ## Quick start
 
@@ -24,14 +24,14 @@ In a second terminal, run the complete workflow:
 ```console
 labctl health
 labctl bench list
-labctl bench reserve bench-01 --owner demo-user
+labctl reservation create bench-01 --owner demo-user --duration 30m
 labctl bench power-cycle bench-01 --owner demo-user
 labctl operation watch <operation-id>
 labctl bench flash bench-01 examples/firmware/demo.bin --owner demo-user --version 1.1.0
 labctl operation watch <operation-id>
 labctl bench show bench-01
 labctl event list --bench-id bench-01
-labctl bench release bench-01 --owner demo-user
+labctl reservation release <reservation-id> --owner demo-user
 ```
 
 Each mutating bench action returns an operation ID. Substitute that ID in the following `watch`
@@ -44,7 +44,7 @@ The Agent listens on `http://127.0.0.1:8080` by default. Select another Agent wi
 
 The default configuration stores platform-owned state under `.lab-platform/`:
 
-- `lab.db` contains reservation, operation, firmware metadata, and event history.
+- `lab.db` contains catalog, reservation, queue, lock, workflow, operation, and event history.
 - `artifacts/<sha256>/` contains uploaded firmware.
 
 SimLab remains the source of truth for current simulated power and firmware state. Delete
@@ -65,8 +65,8 @@ The complete physical workflow uses the same operation API as SimLab:
 
 ```console
 labctl bench list
-labctl bench probe esp32-devkit-01
 labctl bench reserve esp32-devkit-01 --owner michael
+labctl bench probe esp32-devkit-01 --owner michael
 labctl bench flash esp32-devkit-01 ./firmware.bin --owner michael --version 0.1.0
 labctl operation watch <operation-id>
 labctl bench serial read esp32-devkit-01 --owner michael --until '^READY$'
@@ -89,7 +89,9 @@ uv run pytest
 uv build
 ```
 
-See [Phase 2](docs/PHASE_2.md), [ESP32 setup](docs/ESP32_SETUP.md),
+See [Phase 3](docs/PHASE_3.md), [team demo](docs/TEAM_DEMO.md),
+[reservations](docs/RESERVATIONS.md), [workflows](docs/WORKFLOWS.md),
+[Phase 2](docs/PHASE_2.md), [ESP32 setup](docs/ESP32_SETUP.md),
 [real-backend design](docs/REAL_BACKEND.md), [hardware testing](docs/HARDWARE_TESTING.md),
 [serial troubleshooting](docs/TROUBLESHOOTING_SERIAL.md), [API.md](API.md), [CLI.md](CLI.md), and
 [ARCHITECTURE.md](ARCHITECTURE.md).

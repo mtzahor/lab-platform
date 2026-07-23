@@ -60,8 +60,8 @@ In another terminal:
 
 ```console
 labctl bench list
-labctl bench probe esp32-devkit-01
 labctl bench reserve esp32-devkit-01 --owner michael
+labctl bench probe esp32-devkit-01 --owner michael
 labctl bench flash esp32-devkit-01 \
   examples/esp32-firmware/.pio/build/esp32dev/firmware.bin \
   --owner michael --version 0.1.0
@@ -83,6 +83,8 @@ Platform never changes groups, udev rules, ownership, or permissions. See
 
 ## Reconnect or return to SimLab
 
-If the board is unplugged, connect it again and run `labctl bench probe esp32-devkit-01`. A
-successful probe restores online health. To return to simulation, start with the directory-based
-configuration: `lab-agent --config-dir config`.
+If the board is unplugged, connect it again and run
+`labctl bench probe esp32-devkit-01 --owner michael`. Offline recovery probes take a maintenance
+lock even when the expired reservation can no longer be activated. A successful probe restores
+online health. To return to simulation, start with the directory-based configuration:
+`lab-agent --config-dir config`.

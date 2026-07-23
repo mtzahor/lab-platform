@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from lab_platform.core.backend import LabBackend, bind_operation_id, reset_operation_id
@@ -21,13 +22,16 @@ from lab_platform.core.errors import (
     PlatformError,
     ReservationOwnerMismatchError,
 )
+from lab_platform.core.operation_locks import OperationLockService
 from lab_platform.core.repositories import (
+    ActiveReservationRepository,
     ArtifactRepository,
     EventRepository,
     OperationArtifactRepository,
     OperationRepository,
     ReservationRepository,
 )
+from lab_platform.core.reservation_ports import BenchAvailability
 from lab_platform.models import (
     BenchSnapshot,
     BenchStatus,
@@ -46,6 +50,12 @@ from lab_platform.models import (
 )
 
 Clock = Callable[[], datetime]
+ProbeResultHandler = Callable[[TargetHealth], Awaitable[None]]
+ProbeFailureHandler = Callable[[str], Awaitable[None]]
+
+
+class ReservationOwnerGuard(Protocol):
+    async def require_owner(self, bench_id: str, owner: str) -> object: ...
 
 
 def system_clock() -> datetime:
@@ -150,6 +160,7 @@ class OperationRunner:
         operation_artifacts: OperationArtifactRepository | None = None,
         artifacts_directory: Path | None = None,
         clock: Clock = system_clock,
+        operation_locks: OperationLockService | None = None,
     ) -> None:
         self._backend = backend
         self._operations = operations
@@ -157,6 +168,7 @@ class OperationRunner:
         self._operation_artifacts = operation_artifacts
         self._artifacts_directory = artifacts_directory
         self._clock = clock
+        self._operation_locks = operation_locks
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
         self._logger = logging.getLogger("lab-platform.operations")
 
@@ -193,6 +205,8 @@ class OperationRunner:
     ) -> None:
         operation = await self._operations.get(operation_id)
         if operation is None or operation.status is not OperationStatus.PENDING:
+            if operation is not None and self._operation_locks is not None:
+                await self._operation_locks.release(operation.bench_id, operation.id)
             return
         running = operation.transition(
             OperationStatus.RUNNING,
@@ -225,6 +239,17 @@ class OperationRunner:
             await self._mark_failed(operation_id, exc)
         finally:
             reset_operation_id(operation_token)
+            if self._operation_locks is not None:
+                try:
+                    await self._operation_locks.release(running.bench_id, running.id)
+                except Exception:
+                    self._logger.exception(
+                        "Could not release operation lock",
+                        extra={
+                            "operation_id": str(running.id),
+                            "bench_id": running.bench_id,
+                        },
+                    )
 
     async def _execute(
         self,
@@ -419,13 +444,17 @@ class BenchService:
     def __init__(
         self,
         backend: LabBackend,
-        reservations: ReservationService,
-        reservation_repository: ReservationRepository,
+        reservations: ReservationOwnerGuard,
+        reservation_repository: ActiveReservationRepository,
         operations: OperationRepository,
         events: EventRepository,
         artifacts: ArtifactRepository,
         runner: OperationRunner,
         clock: Clock = system_clock,
+        operation_locks: OperationLockService | None = None,
+        availability: BenchAvailability | None = None,
+        probe_result_handler: ProbeResultHandler | None = None,
+        probe_failure_handler: ProbeFailureHandler | None = None,
     ) -> None:
         self._backend = backend
         self._reservations = reservations
@@ -435,6 +464,10 @@ class BenchService:
         self._artifacts = artifacts
         self._runner = runner
         self._clock = clock
+        self._operation_locks = operation_locks
+        self._availability = availability
+        self._probe_result_handler = probe_result_handler
+        self._probe_failure_handler = probe_failure_handler
 
     async def list_benches(self) -> list[BenchSnapshot]:
         benches = await self._backend.list_benches()
@@ -455,7 +488,7 @@ class BenchService:
     async def reset(self, bench_id: str, owner: str) -> Operation:
         return await self._submit(bench_id, owner, OperationType.RESET)
 
-    async def probe(self, bench_id: str) -> TargetHealth:
+    async def probe(self, bench_id: str, owner: str) -> TargetHealth:
         bench = await self._backend.get_bench(bench_id)
         if "probe" not in {item.lower() for item in bench.capabilities}:
             raise CapabilityNotSupportedError(
@@ -463,7 +496,41 @@ class BenchService:
                 bench_id=bench_id,
                 capability="probe",
             )
-        return await self._backend.probe(bench_id)
+        if self._operation_locks is None:
+            await self._reservations.require_owner(bench_id, owner)
+            return await self._backend.probe(bench_id)
+        probe_id = uuid4()
+        active = await self._reservation_repository.get_active(bench_id)
+        maintenance_probe = active is None and (
+            not bench.online
+            or self._availability is not None
+            and not self._availability.is_online(bench_id)
+        )
+        if maintenance_probe:
+            await self._operation_locks.acquire_maintenance(
+                bench_id,
+                probe_id,
+                owner,
+                lease_seconds=60,
+            )
+        else:
+            await self._reservations.require_owner(bench_id, owner)
+            await self._operation_locks.acquire(bench_id, probe_id, owner)
+        try:
+            health = await self._backend.probe(bench_id)
+            if self._probe_result_handler is not None:
+                await self._probe_result_handler(health)
+            return health
+        except asyncio.CancelledError:
+            if self._probe_failure_handler is not None:
+                await self._probe_failure_handler(bench_id)
+            raise
+        except Exception:
+            if self._probe_failure_handler is not None:
+                await self._probe_failure_handler(bench_id)
+            raise
+        finally:
+            await self._operation_locks.release(bench_id, probe_id)
 
     async def read_serial(
         self,
@@ -527,18 +594,31 @@ class BenchService:
             now=self._clock(),
         )
         await self._operations.create(operation)
-        await self._events.create(
-            EventRecord(
-                timestamp=self._clock(),
-                type=self._requested_event_type(operation_type),
-                source="platform",
-                bench_id=bench_id,
-                operation_id=operation.id,
-                actor=owner,
-                payload={},
+        try:
+            if self._operation_locks is not None:
+                await self._operation_locks.acquire(bench_id, operation.id, owner)
+            await self._events.create(
+                EventRecord(
+                    timestamp=self._clock(),
+                    type=self._requested_event_type(operation_type),
+                    source="platform",
+                    bench_id=bench_id,
+                    operation_id=operation.id,
+                    actor=owner,
+                    payload={},
+                )
             )
-        )
-        self._runner.schedule(operation, firmware, serial_request)
+            self._runner.schedule(operation, firmware, serial_request)
+        except Exception:
+            cancelled = operation.transition(
+                OperationStatus.CANCELLED,
+                now=self._clock(),
+                message="Operation could not acquire the bench lock",
+            )
+            await self._operations.update(cancelled)
+            if self._operation_locks is not None:
+                await self._operation_locks.release(bench_id, operation.id)
+            raise
         return operation
 
     async def _with_reservation(self, bench: BenchSnapshot) -> BenchSnapshot:
@@ -570,12 +650,14 @@ class OperationService:
         runner: OperationRunner,
         artifacts: OperationArtifactRepository | None = None,
         clock: Clock = system_clock,
+        operation_locks: OperationLockService | None = None,
     ) -> None:
         self._operations = operations
         self._events = events
         self._runner = runner
         self._artifacts = artifacts
         self._clock = clock
+        self._operation_locks = operation_locks
 
     async def get_operation(self, operation_id: UUID) -> Operation:
         operation = await self._operations.get(operation_id)
@@ -623,6 +705,8 @@ class OperationService:
             )
             await self._operations.update(cancelled)
             self._runner.cancel(operation_id)
+            if self._operation_locks is not None:
+                await self._operation_locks.release(operation.bench_id, operation.id)
             await self._events.create(
                 EventRecord(
                     timestamp=self._clock(),
@@ -659,12 +743,29 @@ class OperationService:
                     now=self._clock(),
                     message="Operation cancelled",
                 )
-                return await self._operations.update(cancelled)
+                updated = await self._operations.update(cancelled)
+                if self._operation_locks is not None:
+                    await self._operation_locks.release(operation.bench_id, operation.id)
+                return updated
             return requested
         raise OperationNotCancellableError(
             f"Operation {operation_id} cannot be cancelled from {operation.status.value}.",
             operation_id=str(operation_id),
         )
+
+    async def cancel_for_expiry(self, operation_id: UUID) -> bool:
+        """Request cancellation for a grace overrun without bypassing normal cleanup."""
+
+        operation = await self._operations.get(operation_id)
+        if operation is None:
+            return False
+        if operation.status in {OperationStatus.PENDING, OperationStatus.RUNNING}:
+            await self.cancel_operation(operation_id, operation.requested_by)
+            return True
+        if operation.status is OperationStatus.CANCEL_REQUESTED:
+            self._runner.cancel(operation_id)
+            return True
+        return False
 
     async def list_artifacts(self, operation_id: UUID) -> list[OperationArtifact]:
         await self.get_operation(operation_id)

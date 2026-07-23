@@ -1,9 +1,14 @@
 from lab_platform.core.agent import AgentCore
 from lab_platform.core.backend import LabBackend
+from lab_platform.core.backend_registry import BackendRegistry, RegistryRefreshResult
+from lab_platform.core.bench_catalog import BenchCatalog, BenchMetadata, BenchRecord
 from lab_platform.core.capabilities import CapabilityRegistry
+from lab_platform.core.clock import Clock, FakeClock, UtcClock, as_utc
 from lab_platform.core.errors import (
     BackendFailureError,
+    BackendNotFoundError,
     BackendTimeoutError,
+    BackendUnavailableError,
     BenchAlreadyReservedError,
     BenchNotFoundError,
     BenchNotReservedError,
@@ -17,12 +22,29 @@ from lab_platform.core.errors import (
     OperationNotCancellableError,
     OperationNotFoundError,
     PlatformError,
+    QueueDisabledError,
+    QueueEntryNotFoundError,
+    QueueOwnerMismatchError,
+    RecoveryFailureError,
+    ReservationAlreadyExpiredError,
+    ReservationExtensionConflictError,
+    ReservationMaxDurationExceededError,
+    ReservationNotActiveError,
+    ReservationNotFoundError,
     ReservationOwnerMismatchError,
+    ReservationTimeConflictError,
+    SchedulerFailureError,
     SimulationFailureError,
+    StaleOperationLockError,
 )
 from lab_platform.core.events import EventBus, EventHandler
 from lab_platform.core.health import HealthMonitor
+from lab_platform.core.operation_locks import OperationLockService
+from lab_platform.core.queueing import FifoQueuePolicy, QueuePolicy
+from lab_platform.core.recovery import RecoveryService
+from lab_platform.core.reservations import ReservationService as TimedReservationService
 from lab_platform.core.scheduler import Scheduler
+from lab_platform.core.scheduling import SchedulingService
 from lab_platform.core.services import (
     BenchService,
     EventService,
@@ -33,23 +55,42 @@ from lab_platform.core.services import (
 )
 from lab_platform.core.state_machine import StateMachine, StateTransitionError
 from lab_platform.core.version import VERSION
+from lab_platform.core.workflows import (
+    WorkflowAssertionFailedError,
+    WorkflowCapabilityMismatchError,
+    WorkflowInvalidError,
+    WorkflowNotFoundError,
+    WorkflowRunner,
+    WorkflowRunNotFoundError,
+    WorkflowService,
+    parse_workflow_yaml,
+)
 
 __all__ = [
     "AgentCore",
     "BackendFailureError",
+    "BackendNotFoundError",
+    "BackendRegistry",
     "BackendTimeoutError",
+    "BackendUnavailableError",
     "BenchAlreadyReservedError",
     "BenchNotFoundError",
     "BenchNotReservedError",
     "BenchOfflineError",
     "BenchOperationInProgressError",
+    "BenchCatalog",
+    "BenchMetadata",
+    "BenchRecord",
     "BenchService",
     "CapabilityRegistry",
     "CapabilityNotSupportedError",
     "ConfigurationError",
+    "Clock",
     "EventService",
     "EventBus",
     "EventHandler",
+    "FakeClock",
+    "FifoQueuePolicy",
     "FirmwareFileTooLargeError",
     "HealthMonitor",
     "InvalidFirmwareFileError",
@@ -58,14 +99,42 @@ __all__ = [
     "OperationArtifactNotFoundError",
     "OperationNotFoundError",
     "OperationRunner",
+    "OperationLockService",
     "OperationService",
     "PlatformError",
     "ReservationOwnerMismatchError",
+    "ReservationAlreadyExpiredError",
+    "ReservationExtensionConflictError",
+    "ReservationMaxDurationExceededError",
+    "ReservationNotActiveError",
+    "ReservationNotFoundError",
+    "ReservationTimeConflictError",
+    "QueueDisabledError",
+    "QueueEntryNotFoundError",
+    "QueueOwnerMismatchError",
+    "QueuePolicy",
+    "RecoveryFailureError",
+    "RecoveryService",
     "ReservationService",
+    "RegistryRefreshResult",
     "Scheduler",
+    "SchedulerFailureError",
+    "SchedulingService",
     "SimulationFailureError",
     "StateMachine",
     "StateTransitionError",
+    "StaleOperationLockError",
+    "TimedReservationService",
+    "UtcClock",
     "VERSION",
+    "WorkflowAssertionFailedError",
+    "WorkflowCapabilityMismatchError",
+    "WorkflowInvalidError",
+    "WorkflowNotFoundError",
+    "WorkflowRunNotFoundError",
+    "WorkflowRunner",
+    "WorkflowService",
     "recover_interrupted_operations",
+    "as_utc",
+    "parse_workflow_yaml",
 ]

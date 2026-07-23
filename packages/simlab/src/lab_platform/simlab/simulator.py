@@ -75,12 +75,14 @@ class SimLab:
         enabled: bool = True,
         bench_count: int = 5,
         *,
+        bench_prefix: str = "bench",
         clock_mode: str = "accelerated",
         speed_multiplier: float = 20.0,
         flash_duration_seconds: float = 5.0,
     ) -> None:
         self._enabled = enabled
         self._bench_count = bench_count
+        self._bench_prefix = bench_prefix
         self._clock_mode = clock_mode
         self._speed_multiplier = speed_multiplier
         self._flash_duration_seconds = flash_duration_seconds
@@ -97,7 +99,7 @@ class SimLab:
             return
         width = max(2, len(str(self._bench_count)))
         for index in range(self._bench_count):
-            bench_id = f"bench-{index + 1:0{width}d}"
+            bench_id = f"{self._bench_prefix}-{index + 1:0{width}d}"
             self._benches[bench_id] = _SimulatedBench(
                 id=bench_id,
                 name=f"Virtual Bench {index + 1:0{width}d}",

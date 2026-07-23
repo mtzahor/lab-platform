@@ -48,7 +48,7 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
     prefix = ["--server", base_url]
     try:
         assert cli_main([*prefix, "version"]) == 0
-        assert capsys.readouterr().out.strip() == "labctl 0.3.0-alpha"
+        assert capsys.readouterr().out.strip() == "labctl 0.4.0-alpha"
 
         assert cli_main([*prefix, "health", "--output", "json"]) == 0
         health = json.loads(capsys.readouterr().out)
@@ -66,7 +66,7 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
         assert cli_main([*prefix, "bench", "show", "bench-01"]) == 0
         assert "michael" in capsys.readouterr().out
 
-        assert cli_main([*prefix, "bench", "probe", "bench-01"]) == 0
+        assert cli_main([*prefix, "bench", "probe", "bench-01", "--owner", "michael"]) == 0
         assert "SimLab" in capsys.readouterr().out
 
         assert cli_main([*prefix, "bench", "power-cycle", "bench-01", "--owner", "michael"]) == 0

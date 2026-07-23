@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -38,9 +38,21 @@ class TargetHealthStatus(StrEnum):
 
 
 class ReservationStatus(StrEnum):
+    QUEUED = "queued"
+    SCHEDULED = "scheduled"
     ACTIVE = "active"
     RELEASED = "released"
     EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+    EXPIRED_PENDING_OPERATION = "expired_pending_operation"
+
+
+class ReservationSource(StrEnum):
+    CLI = "cli"
+    API = "api"
+    WORKFLOW = "workflow"
+    SYSTEM = "system"
 
 
 class OperationType(StrEnum):
@@ -123,9 +135,64 @@ class Reservation(LabModel):
     id: UUID
     bench_id: str
     owner: str
-    created_at: datetime
+    created_at: datetime = Field(default_factory=utc_now)
     released_at: datetime | None = None
     status: ReservationStatus = ReservationStatus.ACTIVE
+    requested_at: datetime | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    activated_at: datetime | None = None
+    expired_at: datetime | None = None
+    source: ReservationSource = ReservationSource.API
+    metadata: dict[str, str] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+    release_pending: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_phase3_timestamps(cls, value: Any) -> Any:
+        """Populate Phase 3 timestamps while accepting persisted Phase 1 records."""
+
+        if not isinstance(value, dict):
+            return value
+        values = dict(value)
+        requested_at = values.get("requested_at") or values.get("created_at")
+        if requested_at is None:
+            requested_at = utc_now()
+        values.setdefault("created_at", requested_at)
+        values.setdefault("requested_at", requested_at)
+        values.setdefault("starts_at", requested_at)
+        status = values.get("status", ReservationStatus.ACTIVE)
+        if status in {ReservationStatus.ACTIVE, ReservationStatus.ACTIVE.value}:
+            values.setdefault("activated_at", values["starts_at"])
+        return values
+
+    @field_validator(
+        "created_at",
+        "released_at",
+        "requested_at",
+        "starts_at",
+        "ends_at",
+        "activated_at",
+        "expired_at",
+    )
+    @classmethod
+    def _normalize_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Reservation timestamps must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def _validate_time_range(self) -> Reservation:
+        if (
+            self.starts_at is not None
+            and self.ends_at is not None
+            and self.ends_at <= self.starts_at
+        ):
+            raise ValueError("Reservation ends_at must be later than starts_at")
+        return self
 
 
 class Operation(LabModel):
@@ -264,9 +331,18 @@ class EventRecord(LabModel):
     type: str
     source: str
     bench_id: str | None = None
+    reservation_id: UUID | None = None
     operation_id: UUID | None = None
     actor: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+    deduplication_key: str | None = None
+
+    @field_validator("timestamp")
+    @classmethod
+    def _normalize_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Event timestamps must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class Firmware(LabModel):

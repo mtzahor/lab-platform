@@ -46,6 +46,10 @@ def test_openapi_health_benches_reservations_and_structured_errors(tmp_path: Pat
         schema = client.get("/openapi.json").json()
         assert "/api/v1/benches/{bench_id}/actions/flash" in schema["paths"]
         assert "/api/v1/operations/{operation_id}" in schema["paths"]
+        validation_schema = schema["paths"]["/api/v1/benches/{bench_id}/reservation"]["post"][
+            "responses"
+        ]["422"]["content"]["application/json"]["schema"]
+        assert validation_schema == {"$ref": "#/components/schemas/ErrorEnvelope"}
         unknown_route = client.get("/api/v1/not-a-route")
         assert unknown_route.status_code == 404
         assert unknown_route.json()["error"]["code"] == "RESOURCE_NOT_FOUND"

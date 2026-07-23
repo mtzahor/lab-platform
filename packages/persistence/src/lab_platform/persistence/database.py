@@ -20,8 +20,8 @@ from lab_platform.models import (
     Reservation,
     ReservationStatus,
 )
-
-SCHEMA_VERSION = 2
+from lab_platform.persistence.migrations import SCHEMA_VERSION as SCHEMA_VERSION
+from lab_platform.persistence.migrations import apply_migrations
 
 
 class SQLiteDatabase:
@@ -82,11 +82,7 @@ class SQLiteDatabase:
                     ON operation_artifacts(operation_id, created_at);
                 """
             )
-            connection.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
-                "VALUES (?, datetime('now'))",
-                (SCHEMA_VERSION,),
-            )
+            apply_migrations(connection)
             connection.commit()
             self._connection = connection
 
@@ -129,8 +125,10 @@ class SQLiteReservationRepository:
                 return _reservation_from_row(row)
             connection.execute(
                 "INSERT INTO reservations "
-                "(id, bench_id, owner, created_at, released_at, status) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, bench_id, owner, created_at, released_at, status, requested_at, "
+                "starts_at, ends_at, activated_at, expired_at, source, metadata, "
+                "idempotency_key, release_pending) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(reservation.id),
                     reservation.bench_id,
@@ -138,6 +136,15 @@ class SQLiteReservationRepository:
                     reservation.created_at.isoformat(),
                     None,
                     reservation.status.value,
+                    _datetime_value(reservation.requested_at),
+                    _datetime_value(reservation.starts_at),
+                    _datetime_value(reservation.ends_at),
+                    _datetime_value(reservation.activated_at),
+                    _datetime_value(reservation.expired_at),
+                    reservation.source.value,
+                    json.dumps(reservation.metadata, sort_keys=True),
+                    reservation.idempotency_key,
+                    int(reservation.release_pending),
                 ),
             )
         return reservation
@@ -249,21 +256,7 @@ class SQLiteEventRepository:
 
     async def create(self, event: EventRecord) -> EventRecord:
         with self._database.transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT INTO events "
-                "(id, timestamp, type, source, bench_id, operation_id, actor, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(event.id),
-                    event.timestamp.isoformat(),
-                    event.type,
-                    event.source,
-                    event.bench_id,
-                    str(event.operation_id) if event.operation_id else None,
-                    event.actor,
-                    json.dumps(event.payload, sort_keys=True),
-                ),
-            )
+            insert_event(connection, event)
         return event
 
     async def list(
@@ -377,6 +370,15 @@ def _reservation_from_row(row: sqlite3.Row) -> Reservation:
         created_at=datetime.fromisoformat(row["created_at"]),
         released_at=_parse_datetime(row["released_at"]),
         status=ReservationStatus(row["status"]),
+        requested_at=_parse_datetime(row["requested_at"]),
+        starts_at=_parse_datetime(row["starts_at"]),
+        ends_at=_parse_datetime(row["ends_at"]),
+        activated_at=_parse_datetime(row["activated_at"]),
+        expired_at=_parse_datetime(row["expired_at"]),
+        source=row["source"],
+        metadata=json.loads(row["metadata"]),
+        idempotency_key=row["idempotency_key"],
+        release_pending=bool(row["release_pending"]),
     )
 
 
@@ -397,6 +399,28 @@ def _operation_from_row(row: sqlite3.Row) -> Operation:
     )
 
 
+def insert_event(connection: sqlite3.Connection, event: EventRecord) -> None:
+    """Insert an idempotent event inside an existing SQLite unit of work."""
+
+    connection.execute(
+        "INSERT OR IGNORE INTO events "
+        "(id, timestamp, type, source, bench_id, reservation_id, operation_id, "
+        "actor, payload, deduplication_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(event.id),
+            event.timestamp.isoformat(),
+            event.type,
+            event.source,
+            event.bench_id,
+            str(event.reservation_id) if event.reservation_id else None,
+            str(event.operation_id) if event.operation_id else None,
+            event.actor,
+            json.dumps(event.payload, sort_keys=True),
+            event.deduplication_key,
+        ),
+    )
+
+
 def _event_from_row(row: sqlite3.Row) -> EventRecord:
     return EventRecord(
         id=UUID(row["id"]),
@@ -404,9 +428,11 @@ def _event_from_row(row: sqlite3.Row) -> EventRecord:
         type=row["type"],
         source=row["source"],
         bench_id=row["bench_id"],
+        reservation_id=UUID(row["reservation_id"]) if row["reservation_id"] else None,
         operation_id=UUID(row["operation_id"]) if row["operation_id"] else None,
         actor=row["actor"],
         payload=json.loads(row["payload"]),
+        deduplication_key=row["deduplication_key"],
     )
 
 

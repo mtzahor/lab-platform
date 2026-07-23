@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from lab_platform.agent import create_agent, create_app
+from lab_platform.models import BenchOperationLock
+from lab_platform.persistence import SQLiteDatabase, SQLiteOperationLockRepository
 
 
 def _wait(client: TestClient, operation_id: str) -> dict[str, object]:
@@ -35,10 +39,10 @@ def test_probe_reset_serial_operation_and_artifact_api(tmp_path: Path) -> None:
         assert "/api/v1/benches/{bench_id}/actions/read-serial" in schema
         assert "/api/v1/benches/{bench_id}/actions/reset" in schema
 
-        probe = client.post("/api/v1/benches/bench-01/actions/probe", json={})
-        assert probe.status_code == 200
-        assert probe.json()["status"] == "online"
-        assert probe.json()["serial_port"] == "sim://bench-01"
+        blocked_probe = client.post(
+            "/api/v1/benches/bench-01/actions/probe", json={"owner": "alice"}
+        )
+        assert blocked_probe.status_code == 404
 
         unreserved = client.post(
             "/api/v1/benches/bench-01/actions/read-serial",
@@ -46,6 +50,28 @@ def test_probe_reset_serial_operation_and_artifact_api(tmp_path: Path) -> None:
         )
         assert unreserved.status_code == 404
         client.post("/api/v1/benches/bench-01/reservation", json={"owner": "alice"})
+
+        competing_database = SQLiteDatabase(tmp_path / ".lab-platform" / "lab.db")
+        competing_database.initialize()
+        competing_locks = SQLiteOperationLockRepository(competing_database)
+        competing = BenchOperationLock(
+            bench_id="bench-01",
+            operation_id=uuid4(),
+            acquired_at=datetime.now(UTC),
+        )
+        asyncio.run(competing_locks.acquire(competing))
+        blocked_by_operation = client.post(
+            "/api/v1/benches/bench-01/actions/probe", json={"owner": "alice"}
+        )
+        assert blocked_by_operation.status_code == 409
+        assert blocked_by_operation.json()["error"]["code"] == "BENCH_OPERATION_IN_PROGRESS"
+        asyncio.run(competing_locks.release("bench-01", competing.operation_id))
+        competing_database.close()
+
+        probe = client.post("/api/v1/benches/bench-01/actions/probe", json={"owner": "alice"})
+        assert probe.status_code == 200
+        assert probe.json()["status"] == "online"
+        assert probe.json()["serial_port"] == "sim://bench-01"
 
         serial = client.post(
             "/api/v1/benches/bench-01/actions/read-serial",

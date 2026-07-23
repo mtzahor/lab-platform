@@ -4,6 +4,13 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from lab_platform.core.reservation_ports import (
+    OperationLockRepository,
+    QueueRepository,
+    ReservationEventRepository,
+    TimedReservationRepository,
+    TimelineRepository,
+)
 from lab_platform.models import (
     EventRecord,
     FirmwareArtifact,
@@ -14,6 +21,19 @@ from lab_platform.models import (
     Reservation,
 )
 
+__all__ = [
+    "ArtifactRepository",
+    "EventRepository",
+    "OperationArtifactRepository",
+    "OperationLockRepository",
+    "OperationRepository",
+    "QueueRepository",
+    "ReservationEventRepository",
+    "ReservationRepository",
+    "TimedReservationRepository",
+    "TimelineRepository",
+]
+
 
 class ReservationRepository(Protocol):
     async def create(self, reservation: Reservation) -> Reservation: ...
@@ -21,6 +41,10 @@ class ReservationRepository(Protocol):
     async def get_active(self, bench_id: str) -> Reservation | None: ...
 
     async def release(self, reservation: Reservation) -> None: ...
+
+
+class ActiveReservationRepository(Protocol):
+    async def get_active(self, bench_id: str) -> Reservation | None: ...
 
 
 class OperationRepository(Protocol):

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 
 DEFAULT_SERVER = "http://127.0.0.1:8080"
 DEFAULT_MAX_FIRMWARE_BYTES = 100 * 1024 * 1024
+_DURATION_PART = re.compile(r"(?P<value>\d+)(?P<unit>[hms])", re.IGNORECASE)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -60,6 +62,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "bench":
         return _bench_command(client, args)
+    if args.command == "reservation":
+        return _reservation_command(client, args)
+    if args.command == "workflow":
+        return _workflow_command(client, args)
     if args.command == "operation":
         return _operation_command(client, args)
     if args.command == "event":
@@ -83,6 +89,17 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
     elif command == "show":
         payload = client.get(f"/api/v1/benches/{args.bench_id}")
         _print_read_payload(payload, args.output, _bench_show_table)
+    elif command == "timeline":
+        payload = client.get(
+            f"/api/v1/benches/{args.bench_id}/timeline",
+            {
+                "category": args.category,
+                "after": args.after,
+                "before": args.before,
+                "limit": args.limit,
+            },
+        )
+        _print_collection(payload, args.output, _timeline_table)
     elif command == "reserve":
         payload = client.post(f"/api/v1/benches/{args.bench_id}/reservation", {"owner": args.owner})
         if args.output == "json":
@@ -108,7 +125,10 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
         )
         _print_operation_created(payload, args.output)
     elif command == "probe":
-        payload = client.post(f"/api/v1/benches/{args.bench_id}/actions/probe", {})
+        payload = client.post(
+            f"/api/v1/benches/{args.bench_id}/actions/probe",
+            {"owner": args.owner},
+        )
         _print_read_payload(payload, args.output, _probe_table)
     elif command == "serial" and args.serial_command == "read":
         payload = client.post(
@@ -163,6 +183,159 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
             print(f"Size:     {size} bytes")
             _print_operation_created(payload, "table")
     return 0
+
+
+def _reservation_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = args.reservation_command
+    if command == "list":
+        payload = client.get(
+            "/api/v1/reservations",
+            {
+                "bench_id": args.bench_id,
+                "owner": args.owner,
+                "status": args.status,
+                "starts_after": args.starts_after,
+                "starts_before": args.starts_before,
+                "limit": args.limit,
+            },
+        )
+        _print_collection(payload, args.output, _reservation_table)
+        return 0
+    if command == "show":
+        payload = client.get(f"/api/v1/reservations/{args.reservation_id}")
+        _print_read_payload(payload, args.output, _reservation_show_table)
+        return 0
+    if command == "create":
+        payload = client.post(
+            "/api/v1/reservations",
+            {
+                "bench_id": args.bench_id,
+                "owner": args.owner,
+                "starts_at": args.start,
+                "duration_seconds": parse_duration(args.duration),
+                "queue_if_busy": args.queue_if_busy,
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+        _print_reservation(payload, args.output)
+        return 0
+    if command == "extend":
+        payload = client.post(
+            f"/api/v1/reservations/{args.reservation_id}/extend",
+            {"owner": args.owner, "duration_seconds": parse_duration(args.duration)},
+        )
+        _print_reservation(payload, args.output)
+        return 0
+    if command == "release":
+        payload = client.post(
+            f"/api/v1/reservations/{args.reservation_id}/release",
+            {"owner": args.owner},
+        )
+        _print_reservation(payload, args.output, action="released")
+        return 0
+    if command == "cancel":
+        payload = client.post(
+            f"/api/v1/reservations/{args.reservation_id}/cancel",
+            {"owner": args.owner},
+        )
+        _print_reservation(payload, args.output, action="cancelled")
+        return 0
+    if command == "queue":
+        payload = client.post(
+            f"/api/v1/benches/{args.bench_id}/queue",
+            {
+                "owner": args.owner,
+                "duration_seconds": parse_duration(args.duration),
+                "idempotency_key": args.idempotency_key,
+            },
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            entry = _require_mapping(payload, "queue entry")
+            print("Added to queue.")
+            print(f"Queue entry: {entry.get('id', '')}")
+            print(f"Position:    {entry.get('position', '—')}")
+        return 0
+    if command == "queue-list":
+        payload = client.get(f"/api/v1/benches/{args.bench_id}/queue")
+        _print_collection(payload, args.output, _queue_table)
+        return 0
+    if command == "queue-cancel":
+        client.delete(f"/api/v1/queue/{args.queue_entry_id}", {"owner": args.owner})
+        if args.output == "json":
+            _print_json({"queue_entry_id": args.queue_entry_id, "cancelled": True})
+        else:
+            print(f"Cancelled queue entry {args.queue_entry_id}.")
+        return 0
+    raise AssertionError("unreachable reservation command")
+
+
+def _workflow_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = args.workflow_command
+    if command == "list":
+        _print_collection(client.get("/api/v1/workflows"), args.output, _workflow_table)
+        return 0
+    if command == "show":
+        payload = client.get(f"/api/v1/workflows/{args.workflow_name}")
+        _print_read_payload(payload, args.output, _workflow_show_table)
+        return 0
+    if command == "run":
+        inputs = _workflow_inputs(args.input)
+        payload = client.post(
+            f"/api/v1/workflows/{args.workflow_name}/runs",
+            {
+                "bench_id": args.bench_id,
+                "owner": args.owner,
+                "reservation_id": args.reservation_id,
+                "reserve_duration_seconds": (
+                    parse_duration(args.reserve) if args.reserve is not None else None
+                ),
+                "release_after": args.release_after,
+                "inputs": inputs,
+            },
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            run = _require_mapping(payload, "workflow run")
+            print(f"Workflow run created: {run.get('id', '')}")
+        return 0
+    if command == "watch":
+        return _watch_workflow(client, args)
+    if command == "cancel":
+        payload = client.post(
+            f"/api/v1/workflow-runs/{args.workflow_run_id}/cancel",
+            {"owner": args.owner},
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            print(f"Cancellation requested for workflow run {args.workflow_run_id}.")
+        return 0
+    raise AssertionError("unreachable workflow command")
+
+
+def _watch_workflow(client: AgentClient, args: argparse.Namespace) -> int:
+    last: tuple[object, object] | None = None
+    while True:
+        payload = _require_mapping(
+            client.get(f"/api/v1/workflow-runs/{args.workflow_run_id}"), "workflow run"
+        )
+        current = (payload.get("current_step"), payload.get("status"))
+        if args.output == "table" and current != last:
+            step = payload.get("current_step")
+            prefix = f"Step {int(step) + 1}: " if isinstance(step, int) else ""
+            print(f"{prefix}{str(payload.get('status', '')).replace('_', ' ').title()}")
+        status = str(payload.get("status", ""))
+        if status in {"succeeded", "failed", "cancelled"}:
+            if args.output == "json":
+                _print_json(payload)
+            else:
+                print(f"\nWorkflow status: {status.replace('_', ' ').title()}")
+            return 0 if status == "succeeded" else 7
+        last = current
+        time.sleep(args.interval)
 
 
 def _operation_command(client: AgentClient, args: argparse.Namespace) -> int:
@@ -235,6 +408,9 @@ def _bench_list(client: AgentClient, args: argparse.Namespace) -> None:
             "status": getattr(args, "status", None),
             "capability": getattr(args, "capability", None),
             "reserved": getattr(args, "reserved", None),
+            "online": True if getattr(args, "online", False) else None,
+            "available": True if getattr(args, "available", False) else None,
+            "label": getattr(args, "label", None),
         },
     )
     _print_collection(payload, args.output, _bench_table)
@@ -257,8 +433,17 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_list.add_argument("--status")
     bench_list.add_argument("--capability")
     bench_list.add_argument("--reserved", action=argparse.BooleanOptionalAction, default=None)
+    bench_list.add_argument("--online", action="store_true")
+    bench_list.add_argument("--available", action="store_true")
+    bench_list.add_argument("--label", action="append", default=[])
     bench_show = _read_parser(benches.add_parser("show"))
     bench_show.add_argument("bench_id")
+    timeline = _read_parser(benches.add_parser("timeline"))
+    timeline.add_argument("bench_id")
+    timeline.add_argument("--category")
+    timeline.add_argument("--after")
+    timeline.add_argument("--before")
+    timeline.add_argument("--limit", type=int, default=50)
     for name in ("reserve", "release", "power-on", "power-off", "power-cycle", "reset"):
         action = _read_parser(benches.add_parser(name))
         action.add_argument("bench_id")
@@ -270,6 +455,7 @@ def _build_parser() -> argparse.ArgumentParser:
     flash.add_argument("--version")
     probe = _read_parser(benches.add_parser("probe"))
     probe.add_argument("bench_id")
+    probe.add_argument("--owner", required=True)
     serial = benches.add_parser("serial")
     serial_commands = serial.add_subparsers(dest="serial_command", required=True)
     serial_read = _read_parser(serial_commands.add_parser("read"))
@@ -278,6 +464,63 @@ def _build_parser() -> argparse.ArgumentParser:
     serial_read.add_argument("--timeout", type=float, default=10)
     serial_read.add_argument("--until", dest="until_pattern")
     serial_read.add_argument("--max-lines", type=int, default=500)
+
+    reservation = commands.add_parser("reservation", help="Reserve and queue benches.")
+    reservations = reservation.add_subparsers(dest="reservation_command", required=True)
+    reservation_list = _read_parser(reservations.add_parser("list"))
+    reservation_list.add_argument("--bench-id")
+    reservation_list.add_argument("--owner")
+    reservation_list.add_argument("--status")
+    reservation_list.add_argument("--starts-after")
+    reservation_list.add_argument("--starts-before")
+    reservation_list.add_argument("--limit", type=int, default=50)
+    reservation_show = _read_parser(reservations.add_parser("show"))
+    reservation_show.add_argument("reservation_id")
+    reservation_create = _read_parser(reservations.add_parser("create"))
+    reservation_create.add_argument("bench_id")
+    reservation_create.add_argument("--owner", required=True)
+    reservation_create.add_argument("--duration", required=True)
+    reservation_create.add_argument("--start")
+    reservation_create.add_argument("--queue-if-busy", action="store_true")
+    reservation_create.add_argument("--idempotency-key")
+    reservation_extend = _read_parser(reservations.add_parser("extend"))
+    reservation_extend.add_argument("reservation_id")
+    reservation_extend.add_argument("--owner", required=True)
+    reservation_extend.add_argument("--duration", required=True)
+    for name in ("release", "cancel"):
+        reservation_mutation = _read_parser(reservations.add_parser(name))
+        reservation_mutation.add_argument("reservation_id")
+        reservation_mutation.add_argument("--owner", required=True)
+    reservation_queue = _read_parser(reservations.add_parser("queue"))
+    reservation_queue.add_argument("bench_id")
+    reservation_queue.add_argument("--owner", required=True)
+    reservation_queue.add_argument("--duration", required=True)
+    reservation_queue.add_argument("--idempotency-key")
+    queue_list = _read_parser(reservations.add_parser("queue-list"))
+    queue_list.add_argument("bench_id")
+    queue_cancel = _read_parser(reservations.add_parser("queue-cancel"))
+    queue_cancel.add_argument("queue_entry_id")
+    queue_cancel.add_argument("--owner", required=True)
+
+    workflow = commands.add_parser("workflow", help="Run sequential bench workflows.")
+    workflows = workflow.add_subparsers(dest="workflow_command", required=True)
+    _read_parser(workflows.add_parser("list"))
+    workflow_show = _read_parser(workflows.add_parser("show"))
+    workflow_show.add_argument("workflow_name")
+    workflow_run = _read_parser(workflows.add_parser("run"))
+    workflow_run.add_argument("workflow_name")
+    workflow_run.add_argument("--bench", dest="bench_id", required=True)
+    workflow_run.add_argument("--owner", required=True)
+    workflow_run.add_argument("--reservation-id")
+    workflow_run.add_argument("--reserve")
+    workflow_run.add_argument("--release-after", action="store_true")
+    workflow_run.add_argument("--input", action="append", default=[])
+    workflow_watch = _read_parser(workflows.add_parser("watch"))
+    workflow_watch.add_argument("workflow_run_id")
+    workflow_watch.add_argument("--interval", type=float, default=1.0)
+    workflow_cancel = _read_parser(workflows.add_parser("cancel"))
+    workflow_cancel.add_argument("workflow_run_id")
+    workflow_cancel.add_argument("--owner", required=True)
 
     operation = commands.add_parser("operation", help="Inspect asynchronous operations.")
     operations = operation.add_subparsers(dest="operation_command", required=True)
@@ -349,6 +592,34 @@ def _validate_firmware(path: Path) -> tuple[str, int]:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest(), size
+
+
+def parse_duration(value: str) -> int:
+    """Parse a compact duration such as ``30m`` or ``1h30m`` into seconds."""
+    normalized = value.strip().lower()
+    if not normalized:
+        raise ValueError("duration cannot be empty")
+    total = 0
+    cursor = 0
+    multipliers = {"h": 3600, "m": 60, "s": 1}
+    for match in _DURATION_PART.finditer(normalized):
+        if match.start() != cursor:
+            raise ValueError(f"invalid duration: {value}")
+        total += int(match.group("value")) * multipliers[match.group("unit")]
+        cursor = match.end()
+    if cursor != len(normalized) or total <= 0:
+        raise ValueError(f"invalid duration: {value}")
+    return total
+
+
+def _workflow_inputs(values: list[str]) -> dict[str, str]:
+    inputs: dict[str, str] = {}
+    for item in values:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise ValueError(f"workflow input must use key=value: {item}")
+        inputs[key.strip()] = value
+    return inputs
 
 
 def _api_exit_code(error: AgentApiError) -> int:
@@ -488,6 +759,119 @@ def _event_table(items: list[object]) -> None:
             )
         )
     _print_table(("TIMESTAMP", "TYPE", "BENCH", "ACTOR"), rows)
+
+
+def _reservation_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        reservation = _require_mapping(item, "reservation")
+        rows.append(
+            (
+                str(reservation.get("id", "")),
+                str(reservation.get("bench_id", "")),
+                str(reservation.get("owner", "")),
+                str(reservation.get("status", "")).replace("_", " ").title(),
+                str(reservation.get("starts_at") or "—"),
+                str(reservation.get("ends_at") or "—"),
+            )
+        )
+    _print_table(("ID", "BENCH", "OWNER", "STATUS", "STARTS", "ENDS"), rows)
+
+
+def _reservation_show_table(reservation: dict[str, object]) -> None:
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            (str(key).replace("_", " ").title(), str(value if value is not None else "—"))
+            for key, value in reservation.items()
+        ],
+    )
+
+
+def _print_reservation(payload: object, output: str, action: str | None = None) -> None:
+    reservation = _require_mapping(payload, "reservation")
+    if output == "json":
+        _print_json(reservation)
+        return
+    status = str(reservation.get("status", "reservation")).replace("_", " ")
+    verb = action or status
+    print(f"Reservation {verb}.")
+    print(f"Reservation ID: {reservation.get('id', '')}")
+    print(f"Bench:          {reservation.get('bench_id', '')}")
+    print(f"Owner:          {reservation.get('owner', '')}")
+    print(f"Ends:           {reservation.get('ends_at') or '—'}")
+
+
+def _queue_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        entry = _require_mapping(item, "queue entry")
+        rows.append(
+            (
+                str(entry.get("position") or "—"),
+                str(entry.get("id", "")),
+                str(entry.get("owner", "")),
+                str(entry.get("requested_duration_seconds", "")),
+                str(entry.get("status", "")).replace("_", " ").title(),
+            )
+        )
+    _print_table(("POSITION", "ID", "OWNER", "DURATION (S)", "STATUS"), rows)
+
+
+def _timeline_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        entry = _require_mapping(item, "timeline entry")
+        rows.append(
+            (
+                str(entry.get("timestamp", "")),
+                str(entry.get("category", "")).title(),
+                str(entry.get("event_type", "")),
+                str(entry.get("actor") or "—"),
+                str(entry.get("summary", "")),
+            )
+        )
+    _print_table(("TIMESTAMP", "CATEGORY", "EVENT", "ACTOR", "SUMMARY"), rows)
+
+
+def _workflow_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        workflow = _require_mapping(item, "workflow")
+        steps = workflow.get("steps", [])
+        count = len(steps) if isinstance(steps, list) else 0
+        rows.append(
+            (
+                str(workflow.get("name", "")),
+                str(workflow.get("version", "")),
+                str(count),
+                str(workflow.get("description") or "—"),
+            )
+        )
+    _print_table(("NAME", "VERSION", "STEPS", "DESCRIPTION"), rows)
+
+
+def _workflow_show_table(workflow: dict[str, object]) -> None:
+    requirements = workflow.get("requirements", {})
+    required_capabilities = (
+        requirements.get("capabilities", []) if isinstance(requirements, dict) else []
+    )
+    capabilities = (
+        ", ".join(str(item) for item in required_capabilities)
+        if isinstance(required_capabilities, list)
+        else ""
+    )
+    steps = workflow.get("steps", [])
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Name", str(workflow.get("name", ""))),
+            ("Version", str(workflow.get("version", ""))),
+            ("Description", str(workflow.get("description") or "—")),
+            ("Capabilities", capabilities or "—"),
+            ("Steps", str(len(steps) if isinstance(steps, list) else 0)),
+        ],
+    )
 
 
 def _power(value: object) -> str:
