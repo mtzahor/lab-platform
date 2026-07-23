@@ -21,5 +21,14 @@
 - Boot marker verification, firmware version extraction, operation artifacts, and stable errors
 - Hardware-independent contract/integration tests plus explicitly gated physical tests
 
+## Phase 3 — shared labs and scheduling (complete)
+
+- Multiple backend instances and globally unique mixed SimLab/physical inventory
+- Timed immediate and future reservations with automatic expiry and safe extension
+- Persistent FIFO queues with atomic promotion and scheduled-reservation protection
+- Persistent operation locks, restart reconciliation, and unified bench timelines
+- Capability-filtered sequential workflows with stored runs and step results
+- Deterministic scheduler, concurrency, mixed-backend, API, CLI, and SimLab scale tests
+
 Authentication, RBAC, multi-Agent coordination, relays, live serial streaming, CI-provider
 integrations, dashboards, and production deployment remain out of scope.

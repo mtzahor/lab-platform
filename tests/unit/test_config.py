@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from lab_platform.config import load_config, validate_config
+from lab_platform.config import (
+    RealBackendSettings,
+    SimLabBackendSettings,
+    load_config,
+    validate_config,
+)
 from pydantic import ValidationError
 
 
@@ -59,3 +64,206 @@ def test_empty_yaml_file_uses_defaults(tmp_path: Path) -> None:
     (tmp_path / "agent.yaml").write_text("", encoding="utf-8")
 
     assert load_config(tmp_path).agent.name == "local-agent"
+
+
+def test_phase2_configuration_is_exposed_as_one_effective_backend(tmp_path: Path) -> None:
+    (tmp_path / "agent.yaml").write_text(
+        "backend:\n  type: simlab\nsimlab:\n  benches: 7\n  speed_multiplier: 50\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.backends == []
+    assert len(config.effective_backends) == 1
+    backend = config.effective_backends[0]
+    assert isinstance(backend, SimLabBackendSettings)
+    assert backend.id == "simlab"
+    assert backend.config.bench_count == 7
+    assert backend.config.speed_multiplier == 50
+
+
+def test_phase3_mixed_backends_are_loaded_from_backends_yaml(tmp_path: Path) -> None:
+    (tmp_path / "backends.yaml").write_text(
+        """backends:
+  - id: virtual-lab
+    type: simlab
+    config:
+      benches: 10
+      bench_prefix: virtual
+      clock_mode: accelerated
+      speed_multiplier: 5
+  - id: local-hardware
+    type: real
+    config:
+      benches:
+        - id: esp32-devkit-01
+          name: ESP32 DevKit V1
+          labels:
+            board: esp32
+            location: home-lab
+reservations:
+  default_duration_minutes: 20
+  maximum_duration_minutes: 120
+scheduler:
+  poll_interval_seconds: 0.5
+workflows:
+  definitions_directory: ./examples/workflows
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert [backend.id for backend in config.backends] == ["virtual-lab", "local-hardware"]
+    simulated = config.backends[0]
+    physical = config.backends[1]
+    assert isinstance(simulated, SimLabBackendSettings)
+    assert simulated.config.bench_count == 10
+    assert simulated.config.bench_prefix == "virtual"
+    assert isinstance(physical, RealBackendSettings)
+    assert physical.config.benches[0].labels == {
+        "board": "esp32",
+        "location": "home-lab",
+    }
+    assert config.reservations.default_duration_minutes == 20
+    assert config.scheduler.poll_interval_seconds == 0.5
+    assert config.workflows.definitions_directory == Path("examples/workflows")
+
+
+def test_simlab_backend_loads_relative_external_config_with_inline_overrides(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "simlab-external.yaml").write_text(
+        "simlab:\n"
+        "  bench_count: 8\n"
+        "  bench_prefix: external\n"
+        "  auto_start: false\n"
+        "  speed_multiplier: 2\n",
+        encoding="utf-8",
+    )
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "backends:\n"
+        "  - id: virtual-lab\n"
+        "    type: simlab\n"
+        "    config:\n"
+        "      config_path: ./simlab-external.yaml\n"
+        "      benches: 3\n"
+        "      speed_multiplier: 5\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    backend = config.backends[0]
+    assert isinstance(backend, SimLabBackendSettings)
+    assert backend.config.config_path == tmp_path / "simlab-external.yaml"
+    assert backend.config.bench_count == 3
+    assert backend.config.bench_prefix == "external"
+    assert backend.config.auto_start is False
+    assert backend.config.speed_multiplier == 5
+
+
+def test_simlab_backend_config_path_accepts_full_platform_config(tmp_path: Path) -> None:
+    external = tmp_path / "external-platform.yaml"
+    external.write_text(
+        "backends:\n"
+        "  - id: selected\n"
+        "    type: simlab\n"
+        "    config:\n"
+        "      benches: 12\n"
+        "      bench_prefix: selected\n"
+        "  - id: fallback\n"
+        "    type: simlab\n"
+        "    config:\n"
+        "      benches: 99\n",
+        encoding="utf-8",
+    )
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "backends:\n"
+        "  - id: selected\n"
+        "    type: simlab\n"
+        "    config:\n"
+        "      config_path: ./external-platform.yaml\n"
+        "      bench_count: 4\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    backend = config.backends[0]
+    assert isinstance(backend, SimLabBackendSettings)
+    assert backend.config.bench_count == 4
+    assert backend.config.bench_prefix == "selected"
+
+
+def test_simlab_backend_config_path_must_exist(tmp_path: Path) -> None:
+    (tmp_path / "agent.yaml").write_text(
+        "backends:\n"
+        "  - id: virtual-lab\n"
+        "    type: simlab\n"
+        "    config:\n"
+        "      config_path: ./missing.yaml\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="config_path does not exist"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "backends_yaml",
+    [
+        """backends:
+  - id: duplicate
+    type: simlab
+  - id: duplicate
+    type: simlab
+""",
+        """backends:
+  - id: hardware-a
+    type: real
+    config:
+      benches:
+        - id: shared-bench
+          name: First
+  - id: hardware-b
+    type: real
+    config:
+      benches:
+        - id: shared-bench
+          name: Second
+""",
+    ],
+)
+def test_phase3_configuration_rejects_duplicate_ids(
+    tmp_path: Path,
+    backends_yaml: str,
+) -> None:
+    (tmp_path / "backends.yaml").write_text(backends_yaml, encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        load_config(tmp_path)
+
+
+def test_reservation_default_duration_cannot_exceed_maximum(tmp_path: Path) -> None:
+    (tmp_path / "agent.yaml").write_text(
+        "reservations:\n  default_duration_minutes: 60\n  maximum_duration_minutes: 30\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [Path("examples/phase3-team-agent.yaml"), Path("examples/simlab-team.yaml")],
+)
+def test_phase3_example_configuration_is_valid(path: Path) -> None:
+    config = load_config(path)
+
+    assert config.backends
+    assert config.effective_backends == tuple(config.backends)

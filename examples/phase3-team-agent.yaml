@@ -1,0 +1,59 @@
+agent:
+  name: local-team-agent
+  host: 127.0.0.1
+  port: 8080
+  log_level: INFO
+
+backends:
+  - id: virtual-lab
+    type: simlab
+    config:
+      config_path: ./simlab-team.yaml
+      benches: 10
+      bench_prefix: virtual
+      auto_start: true
+      clock_mode: accelerated
+      speed_multiplier: 5
+
+  - id: local-hardware
+    type: real
+    config:
+      benches:
+        - id: esp32-devkit-01
+          name: ESP32 DevKit V1
+          target_type: esp32
+          labels:
+            board: esp32
+            location: home-lab
+            purpose: development
+            owner_team: embedded
+          connection:
+            serial_port: auto
+            baud_rate: 115200
+          flash:
+            chip: esp32
+            baud_rate: 460800
+            flash_address: "0x10000"
+          boot:
+            ready_pattern: "^READY$"
+            timeout_seconds: 20
+
+reservations:
+  default_duration_minutes: 30
+  maximum_duration_minutes: 240
+  expiry_grace_seconds: 30
+  queue_enabled: true
+  scheduled_protection_window_minutes: 5
+
+scheduler:
+  poll_interval_seconds: 1
+  automatic_assignment: true
+
+operations:
+  recovery_mode: mark_interrupted_failed
+
+workflows:
+  definitions_directory: ./workflows
+
+database:
+  url: sqlite:///./.lab-platform/lab.db

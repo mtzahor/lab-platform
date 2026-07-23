@@ -40,6 +40,7 @@ class SimLabBackend:
         *,
         enabled: bool = True,
         bench_count: int = 5,
+        bench_prefix: str = "bench",
         clock_mode: str = "accelerated",
         speed_multiplier: float = 20.0,
         flash_duration_seconds: float = 5.0,
@@ -47,6 +48,7 @@ class SimLabBackend:
         self._simulator = SimLab(
             enabled=enabled,
             bench_count=bench_count,
+            bench_prefix=bench_prefix,
             clock_mode=clock_mode,
             speed_multiplier=speed_multiplier,
             flash_duration_seconds=flash_duration_seconds,

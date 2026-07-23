@@ -16,6 +16,14 @@ class ConfigurationError(PlatformError):
     code = "CONFIGURATION_ERROR"
 
 
+class BackendNotFoundError(PlatformError):
+    code = "BACKEND_NOT_FOUND"
+
+
+class BackendUnavailableError(PlatformError):
+    code = "BACKEND_UNAVAILABLE"
+
+
 class BenchNotFoundError(PlatformError):
     code = "BENCH_NOT_FOUND"
 
@@ -34,6 +42,54 @@ class BenchNotReservedError(PlatformError):
 
 class ReservationOwnerMismatchError(PlatformError):
     code = "RESERVATION_OWNER_MISMATCH"
+
+
+class ReservationNotFoundError(PlatformError):
+    code = "RESERVATION_NOT_FOUND"
+
+
+class ReservationTimeConflictError(PlatformError):
+    code = "RESERVATION_TIME_CONFLICT"
+
+
+class ReservationMaxDurationExceededError(PlatformError):
+    code = "RESERVATION_MAX_DURATION_EXCEEDED"
+
+
+class ReservationNotActiveError(PlatformError):
+    code = "RESERVATION_NOT_ACTIVE"
+
+
+class ReservationAlreadyExpiredError(PlatformError):
+    code = "RESERVATION_ALREADY_EXPIRED"
+
+
+class ReservationExtensionConflictError(PlatformError):
+    code = "RESERVATION_EXTENSION_CONFLICT"
+
+
+class QueueDisabledError(PlatformError):
+    code = "QUEUE_DISABLED"
+
+
+class QueueEntryNotFoundError(PlatformError):
+    code = "QUEUE_ENTRY_NOT_FOUND"
+
+
+class QueueOwnerMismatchError(PlatformError):
+    code = "QUEUE_OWNER_MISMATCH"
+
+
+class StaleOperationLockError(PlatformError):
+    code = "STALE_OPERATION_LOCK"
+
+
+class SchedulerFailureError(PlatformError):
+    code = "SCHEDULER_FAILURE"
+
+
+class RecoveryFailureError(PlatformError):
+    code = "RECOVERY_FAILURE"
 
 
 class CapabilityNotSupportedError(PlatformError):

@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -17,6 +18,7 @@ from lab_platform.agent.api.errors import (
     platform_error_handler,
     validation_error_handler,
 )
+from lab_platform.agent.api.phase3 import create_phase3_router
 from lab_platform.agent.runtime import LabAgent
 from lab_platform.core import (
     VERSION,
@@ -25,13 +27,16 @@ from lab_platform.core import (
     InvalidFirmwareFileError,
     PlatformError,
 )
+from lab_platform.core.bench_catalog import BenchRecord
 from lab_platform.models import (
+    BenchSnapshot,
+    BenchStatus,
     FirmwareInput,
     OperationStatus,
     OperationType,
     SerialReadRequest,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.exceptions import HTTPException
 
 
@@ -48,6 +53,17 @@ class OperationAccepted(ApiModel):
     status: OperationStatus
 
 
+class ApiError(ApiModel):
+    code: str
+    message: str
+    details: dict[str, object]
+    request_id: str
+
+
+class ErrorEnvelope(ApiModel):
+    error: ApiError
+
+
 class SerialReadApiRequest(OwnerRequest):
     timeout_seconds: float = Field(default=10, gt=0, le=3600)
     until_pattern: str | None = None
@@ -55,11 +71,24 @@ class SerialReadApiRequest(OwnerRequest):
     include_timestamps: bool = True
 
 
+LabelFilter = Annotated[str, StringConstraints(pattern=r"^[^:=\s]+[:=].+$")]
+
+
 def create_app(agent: LabAgent) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await agent.start_background_workers()
+        try:
+            yield
+        finally:
+            await agent.stop_background_workers()
+
     app = FastAPI(
         title="Lab Platform Agent API",
         version=VERSION,
         description="Versioned local API for reserving and controlling lab benches.",
+        lifespan=lifespan,
+        responses={422: {"model": ErrorEnvelope, "description": "Request validation failed"}},
     )
     logger = logging.getLogger(agent.config.agent.name)
 
@@ -108,8 +137,21 @@ def create_app(agent: LabAgent) -> FastAPI:
         status: str | None = None,
         capability: str | None = None,
         reserved: bool | None = None,
+        online: bool | None = None,
+        available: bool | None = None,
+        label: Annotated[list[LabelFilter] | None, Query()] = None,
     ) -> dict[str, object]:
-        benches = await agent.bench_service.list_benches()
+        await agent.catalog.refresh()
+        by_id = {bench.id: bench for bench in await agent.bench_service.list_benches()}
+        for record in agent.catalog.list():
+            current = by_id.get(record.id)
+            if current is None:
+                by_id[record.id] = _catalog_snapshot(record)
+            elif not record.online:
+                by_id[record.id] = current.model_copy(
+                    update={"status": BenchStatus.OFFLINE, "online": False, "powered": None}
+                )
+        benches = sorted(by_id.values(), key=lambda bench: bench.id)
         if status is not None:
             benches = [bench for bench in benches if bench.status.value == status.lower()]
         if capability is not None:
@@ -120,11 +162,33 @@ def create_app(agent: LabAgent) -> FastAPI:
             ]
         if reserved is not None:
             benches = [bench for bench in benches if (bench.reserved_by is not None) is reserved]
-        return {"items": [bench.model_dump(mode="json") for bench in benches]}
+        if online is not None:
+            benches = [bench for bench in benches if bench.online is online]
+        if available is not None:
+            benches = [
+                bench
+                for bench in benches
+                if (bench.online and bench.reserved_by is None) is available
+            ]
+        labels = _parse_labels(label or [])
+        if labels:
+            benches = [
+                bench
+                for bench in benches
+                if all(
+                    agent.catalog.get(bench.id).labels.get(key) == value
+                    for key, value in labels.items()
+                )
+            ]
+        return {"items": [_bench_payload(agent, bench) for bench in benches]}
 
     @router.get("/benches/{bench_id}")
     async def get_bench(bench_id: str) -> object:
-        return (await agent.bench_service.get_bench(bench_id)).model_dump(mode="json")
+        await agent.catalog.refresh()
+        catalog_record = agent.catalog.get(bench_id)
+        if not catalog_record.online:
+            return _bench_payload(agent, _catalog_snapshot(catalog_record))
+        return _bench_payload(agent, await agent.bench_service.get_bench(bench_id))
 
     @router.post("/benches/{bench_id}/reservation", status_code=201)
     async def reserve(bench_id: str, request: OwnerRequest) -> object:
@@ -181,8 +245,9 @@ def create_app(agent: LabAgent) -> FastAPI:
         return await submit_power(bench_id, request, OperationType.POWER_CYCLE)
 
     @router.post("/benches/{bench_id}/actions/probe")
-    async def probe(bench_id: str) -> object:
-        return (await agent.bench_service.probe(bench_id)).model_dump(mode="json")
+    async def probe(bench_id: str, request: OwnerRequest) -> object:
+        health = await agent.bench_service.probe(bench_id, request.owner)
+        return health.model_dump(mode="json")
 
     @router.post(
         "/benches/{bench_id}/actions/reset",
@@ -278,6 +343,7 @@ def create_app(agent: LabAgent) -> FastAPI:
         return {"items": [event.model_dump(mode="json") for event in events]}
 
     app.include_router(router)
+    app.include_router(create_phase3_router(agent))
 
     @app.get("/health", include_in_schema=False)
     async def legacy_health() -> dict[str, object]:
@@ -296,6 +362,42 @@ def create_app(agent: LabAgent) -> FastAPI:
         return [bench.model_dump(mode="json") for bench in agent.benches()]
 
     return app
+
+
+def _bench_payload(agent: LabAgent, bench: BenchSnapshot) -> dict[str, object]:
+    snapshot = bench.model_dump(mode="json")
+    record = agent.catalog.get(str(snapshot["id"]))
+    return {
+        **snapshot,
+        "backend_id": record.backend_id,
+        "target_type": record.target_type,
+        "health": record.health.value,
+        "labels": record.labels,
+        "last_seen_at": record.last_seen_at.isoformat() if record.last_seen_at else None,
+    }
+
+
+def _catalog_snapshot(record: BenchRecord) -> BenchSnapshot:
+    return BenchSnapshot(
+        id=record.id,
+        name=record.name,
+        status=BenchStatus.OFFLINE,
+        online=False,
+        powered=None,
+        capabilities=sorted(record.capabilities),
+    )
+
+
+def _parse_labels(values: list[str]) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for value in values:
+        key, separator, item = value.partition(":")
+        if not separator:
+            key, separator, item = value.partition("=")
+        if not separator or not key.strip():
+            raise ValueError(f"Invalid bench label filter: {value}")
+        labels[key.strip()] = item
+    return labels
 
 
 async def _store_firmware(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,6 +22,12 @@ class AgentSettings(ConfigModel):
 class SimLabSettings(ConfigModel):
     enabled: bool = True
     benches: int = Field(default=5, ge=0, le=500)
+    bench_prefix: str = Field(
+        default="bench",
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     auto_start: bool = True
     clock_mode: Literal["manual", "accelerated"] = "accelerated"
     speed_multiplier: float = Field(default=20.0, gt=0, le=1000)
@@ -108,6 +114,7 @@ class HardwareBenchSettings(ConfigModel):
     flash: Esp32FlashSettings = Field(default_factory=Esp32FlashSettings)
     firmware: FirmwareFormatSettings = Field(default_factory=FirmwareFormatSettings)
     boot: BootSettings = Field(default_factory=BootSettings)
+    labels: dict[str, str] = Field(default_factory=dict)
 
     @property
     def flash_address(self) -> str:
@@ -115,7 +122,7 @@ class HardwareBenchSettings(ConfigModel):
 
 
 class HardwareSettings(ConfigModel):
-    benches: list[HardwareBenchSettings] = Field(default_factory=list, max_length=1)
+    benches: list[HardwareBenchSettings] = Field(default_factory=list, max_length=500)
 
     @model_validator(mode="after")
     def unique_bench_ids(self) -> HardwareSettings:
@@ -123,6 +130,51 @@ class HardwareSettings(ConfigModel):
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("hardware bench ids must be unique")
         return self
+
+
+class SimLabBackendConfig(ConfigModel):
+    """Configuration for one SimLab backend instance."""
+
+    config_path: Path | None = None
+    enabled: bool = True
+    bench_count: int = Field(
+        default=5,
+        validation_alias=AliasChoices("bench_count", "benches"),
+        ge=0,
+        le=500,
+    )
+    bench_prefix: str = Field(
+        default="bench",
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    auto_start: bool = True
+    clock_mode: Literal["manual", "accelerated"] = "accelerated"
+    speed_multiplier: float = Field(default=20.0, gt=0, le=1000)
+    flash_duration_seconds: float = Field(default=5.0, ge=0, le=3600)
+
+
+class RealBackendConfig(HardwareSettings):
+    """Configuration for one physical-lab backend instance."""
+
+
+class SimLabBackendSettings(ConfigModel):
+    id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    type: Literal["simlab"]
+    config: SimLabBackendConfig = Field(default_factory=SimLabBackendConfig)
+
+
+class RealBackendSettings(ConfigModel):
+    id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    type: Literal["real"]
+    config: RealBackendConfig
+
+
+BackendInstanceSettings: TypeAlias = Annotated[
+    SimLabBackendSettings | RealBackendSettings,
+    Field(discriminator="type"),
+]
 
 
 class DatabaseSettings(ConfigModel):
@@ -137,6 +189,31 @@ class ArtifactSettings(ConfigModel):
 class OperationSettings(ConfigModel):
     poll_interval_ms: int = Field(default=250, ge=10, le=60_000)
     shutdown_timeout_seconds: float = Field(default=10.0, ge=0, le=300)
+    recovery_mode: Literal["mark_interrupted_failed"] = "mark_interrupted_failed"
+
+
+class ReservationSettings(ConfigModel):
+    default_duration_minutes: int = Field(default=30, ge=1, le=10_080)
+    maximum_duration_minutes: int = Field(default=240, ge=1, le=10_080)
+    expiry_grace_seconds: int = Field(default=30, ge=0, le=3600)
+    queue_enabled: bool = True
+    scheduled_protection_window_minutes: int = Field(default=5, ge=0, le=1440)
+
+    @model_validator(mode="after")
+    def default_does_not_exceed_maximum(self) -> ReservationSettings:
+        if self.default_duration_minutes > self.maximum_duration_minutes:
+            raise ValueError("default reservation duration cannot exceed maximum duration")
+        return self
+
+
+class SchedulerSettings(ConfigModel):
+    poll_interval_seconds: float = Field(default=1.0, gt=0, le=3600)
+    automatic_assignment: bool = True
+
+
+class WorkflowSettings(ConfigModel):
+    definitions_directory: Path = Path("./workflows")
+    definition_paths: list[Path] = Field(default_factory=list, max_length=1000)
 
 
 class DevelopmentSettings(ConfigModel):
@@ -146,23 +223,76 @@ class DevelopmentSettings(ConfigModel):
 class PlatformConfig(ConfigModel):
     agent: AgentSettings = Field(default_factory=AgentSettings)
     backend: BackendSettings = Field(default_factory=BackendSettings)
+    backends: list[BackendInstanceSettings] = Field(default_factory=list, max_length=100)
     simlab: SimLabSettings = Field(default_factory=SimLabSettings)
     hardware: HardwareSettings = Field(default_factory=HardwareSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     artifacts: ArtifactSettings = Field(default_factory=ArtifactSettings)
     operations: OperationSettings = Field(default_factory=OperationSettings)
+    reservations: ReservationSettings = Field(default_factory=ReservationSettings)
+    scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    workflows: WorkflowSettings = Field(default_factory=WorkflowSettings)
     development: DevelopmentSettings = Field(default_factory=DevelopmentSettings)
     plugins: list[str] = Field(default_factory=lambda: ["power", "serial", "firmware"])
+
+    @model_validator(mode="after")
+    def globally_unique_configured_ids(self) -> PlatformConfig:
+        backend_ids = [backend.id for backend in self.backends]
+        if len(backend_ids) != len(set(backend_ids)):
+            raise ValueError("backend ids must be unique")
+
+        bench_owners: dict[str, str] = {}
+        for backend in self.backends:
+            if not isinstance(backend, RealBackendSettings):
+                continue
+            for bench in backend.config.benches:
+                owner = bench_owners.setdefault(bench.id, backend.id)
+                if owner != backend.id:
+                    raise ValueError(
+                        f"bench id {bench.id!r} is configured by both {owner!r} and {backend.id!r}"
+                    )
+        return self
+
+    @property
+    def effective_backends(self) -> tuple[BackendInstanceSettings, ...]:
+        """Return Phase 3 definitions, synthesizing one from the Phase 2 fields."""
+
+        if self.backends:
+            return tuple(self.backends)
+        if self.backend.type == "real":
+            return (
+                RealBackendSettings(
+                    id="real",
+                    type="real",
+                    config=RealBackendConfig(benches=self.hardware.benches),
+                ),
+            )
+        return (
+            SimLabBackendSettings(
+                id="simlab",
+                type="simlab",
+                config=SimLabBackendConfig(
+                    enabled=self.simlab.enabled,
+                    bench_count=self.simlab.benches,
+                    bench_prefix=self.simlab.bench_prefix,
+                    auto_start=self.simlab.auto_start,
+                    clock_mode=self.simlab.clock_mode,
+                    speed_multiplier=self.simlab.speed_multiplier,
+                    flash_duration_seconds=self.simlab.flash_duration_seconds,
+                ),
+            ),
+        )
 
 
 def load_config(config_dir: str | Path = "config") -> PlatformConfig:
     root = Path(config_dir)
     if root.is_file():
-        return PlatformConfig.model_validate(dict(_read_yaml_file(root)))
-    data: dict[str, Any] = {}
-    for filename in ("agent.yaml", "simlab.yaml", "hardware.yaml"):
-        data = _deep_merge(data, _read_yaml_file(root / filename))
-    return PlatformConfig.model_validate(data)
+        data = dict(_read_yaml_file(root))
+        return PlatformConfig.model_validate(_expand_backend_config_paths(data, root.parent))
+    merged_data: dict[str, Any] = {}
+    for filename in ("agent.yaml", "simlab.yaml", "hardware.yaml", "backends.yaml"):
+        merged_data = _deep_merge(merged_data, _read_yaml_file(root / filename))
+    return PlatformConfig.model_validate(_expand_backend_config_paths(merged_data, root))
 
 
 def validate_config(config_dir: str | Path = "config") -> PlatformConfig:
@@ -192,3 +322,73 @@ def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str,
         else:
             merged[key] = value
     return merged
+
+
+def _expand_backend_config_paths(data: Mapping[str, Any], base: Path) -> dict[str, Any]:
+    expanded = dict(data)
+    raw_backends = expanded.get("backends")
+    if not isinstance(raw_backends, list):
+        return expanded
+    backends: list[object] = []
+    for raw_backend in raw_backends:
+        if not isinstance(raw_backend, Mapping) or raw_backend.get("type") != "simlab":
+            backends.append(raw_backend)
+            continue
+        raw_config = raw_backend.get("config")
+        if not isinstance(raw_config, Mapping) or not raw_config.get("config_path"):
+            backends.append(raw_backend)
+            continue
+        configured_path = Path(str(raw_config["config_path"]))
+        path = configured_path if configured_path.is_absolute() else base / configured_path
+        if not path.is_file():
+            raise ValueError(f"SimLab config_path does not exist: {path}")
+        external = _normalize_simlab_aliases(
+            _simlab_config_from_file(path, str(raw_backend.get("id", "")))
+        )
+        inline = _normalize_simlab_aliases(
+            {key: value for key, value in raw_config.items() if key != "config_path"}
+        )
+        merged_config = _deep_merge(external, inline)
+        merged_config["config_path"] = path
+        backends.append({**raw_backend, "config": merged_config})
+    expanded["backends"] = backends
+    return expanded
+
+
+def _simlab_config_from_file(path: Path, backend_id: str) -> dict[str, Any]:
+    payload = dict(_read_yaml_file(path))
+    simlab = payload.get("simlab")
+    if isinstance(simlab, Mapping):
+        return dict(simlab)
+    backends = payload.get("backends")
+    if isinstance(backends, list):
+        candidates = [
+            item for item in backends if isinstance(item, Mapping) and item.get("type") == "simlab"
+        ]
+        selected = next((item for item in candidates if item.get("id") == backend_id), None)
+        if selected is None and candidates:
+            selected = candidates[0]
+        if selected is not None and isinstance(selected.get("config"), Mapping):
+            return dict(selected["config"])
+    allowed = {
+        "enabled",
+        "benches",
+        "bench_count",
+        "bench_prefix",
+        "auto_start",
+        "clock_mode",
+        "speed_multiplier",
+        "flash_duration_seconds",
+    }
+    if payload and set(payload).issubset(allowed):
+        return payload
+    raise ValueError(f"SimLab config_path has no SimLab configuration: {path}")
+
+
+def _normalize_simlab_aliases(config: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    if "benches" in normalized:
+        if "bench_count" in normalized:
+            raise ValueError("SimLab configuration must not set both benches and bench_count")
+        normalized["bench_count"] = normalized.pop("benches")
+    return normalized

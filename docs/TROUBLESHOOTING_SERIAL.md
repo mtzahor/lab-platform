@@ -1,7 +1,9 @@
 # Serial troubleshooting
 
-Start with `labctl bench probe esp32-devkit-01 --output json`. The stable error code identifies the
-layer that failed without exposing raw pySerial or subprocess exceptions.
+Start with `labctl bench probe esp32-devkit-01 --owner <owner> --output json`. Online probes require
+that owner's active reservation and hold the persistent operation lock; an offline recovery probe
+uses an exclusive maintenance lock. The stable error code identifies the layer that failed without
+exposing raw pySerial or subprocess exceptions.
 
 | Error | Meaning | Checks |
 | --- | --- | --- |

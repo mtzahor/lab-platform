@@ -5,35 +5,37 @@ Lab Platform uses four layers with dependencies pointing inward.
 | Layer | Packages | Responsibility |
 | --- | --- | --- |
 | Transport | `apps/agent`, `apps/cli` | FastAPI routes, HTTP serialization, CLI presentation |
-| Application | `packages/core/services.py` | Reservation policy, ownership, orchestration, operation lifecycle |
+| Application | `packages/core` services | Catalog, reservation/scheduling policy, workflows, operation lifecycle |
 | Domain | `packages/models`, core protocols/errors | Immutable contracts, state rules, ports, stable errors |
 | Infrastructure | persistence, SimLab adapter, real backend | SQLite, simulator mapping, ESP32 discovery/serial/esptool |
 
 The controlling data flow is:
 
 ```text
-labctl -> /api/v1 -> FastAPI route -> application service -> LabBackend protocol
-                                                        -> repository protocols
-                                      SimLabBackend -----^       ^
-                                      RealLabBackend ----^       ^
-                                      SQLite repositories -------+
+labctl -> /api/v1 -> FastAPI route -> application services -> BackendRegistry
+                                 |             |                 |-- SimLabBackend(s)
+                                 |             |                 `-- RealLabBackend(s)
+                                 |             `-> scheduling/workflow services
+                                 `----------------> SQLite repositories
 ```
 
-Application services and API routes import neither SimLab nor ESP32 code. Backend selection occurs
-only in `create_lab_backend()` in the Agent composition root. `RealLabBackend` delegates neutral
-backend operations to a `PhysicalTarget`; Phase 2's first implementation is `Esp32Target`.
+Application services and API routes import neither SimLab nor ESP32 code. Backend construction
+occurs only in the Agent composition root; routing uses globally unique bench IDs registered at
+startup. `RealLabBackend` delegates neutral backend operations to a `PhysicalTarget`; Phase 2's
+first implementation remains `Esp32Target`.
 
 ## Ownership and concurrency
 
-SQLite is authoritative for reservations, operations, uploaded-firmware and operation-artifact
-metadata, and audit events. A partial unique index allows only one active reservation per bench,
-and another permits
-only one pending/running/cancel-requested operation per bench. Those constraints make reservation
-and operation creation atomic even when HTTP requests arrive concurrently.
+SQLite is authoritative for the bench catalog, timed reservations, queues, operation locks,
+operations, workflow runs, uploaded-firmware and operation-artifact metadata, and audit events.
+Partial unique indexes allow only one active reservation and one operation lock per bench. Time
+range checks and transactional transitions make activation, expiry, and FIFO promotion safe under
+concurrent requests.
 
-Operations execute as in-process asyncio tasks. Their status and progress are persisted after each
-transition. On startup, previously active records are marked failed with `AGENT_RESTARTED`; jobs
-themselves are not resumed.
+Operations and sequential workflows execute as in-process asyncio tasks. Their status and progress
+are persisted after each transition. The scheduler uses an injected UTC clock. On startup,
+previously active work is failed with `AGENT_RESTARTED`, stale locks are cleared, reservations are
+reconciled, and backend inventories are refreshed; jobs themselves are not resumed.
 
 ## Simulator boundary
 

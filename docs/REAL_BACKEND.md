@@ -33,8 +33,10 @@ one unique serial device. Multiple candidates fail with `SERIAL_PORT_AMBIGUOUS`;
 fail with `DEVICE_NOT_FOUND`. An explicit port must either appear in pySerial enumeration or exist
 as a device path.
 
-Startup probes each configured target but does not crash when the board is absent. Target health
-is one of `online`, `offline`, `degraded`, or `unknown`:
+Startup probes each configured target but does not crash when the board is absent. The Agent also
+re-probes idle, unreserved targets on a bounded cadence under a persistent maintenance lock; it
+never runs that health check through an active reservation or operation. Target health is one of
+`online`, `offline`, `degraded`, or `unknown`:
 
 - `online`: the port resolved and esptool successfully read chip information.
 - `offline`: no matching serial device exists.

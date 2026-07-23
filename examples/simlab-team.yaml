@@ -1,0 +1,35 @@
+agent:
+  name: simlab-team-agent
+  host: 127.0.0.1
+  port: 8080
+
+backends:
+  - id: virtual-team-lab
+    type: simlab
+    config:
+      benches: 100
+      bench_prefix: virtual
+      auto_start: true
+      clock_mode: accelerated
+      speed_multiplier: 20
+      flash_duration_seconds: 5
+
+reservations:
+  default_duration_minutes: 30
+  maximum_duration_minutes: 240
+  expiry_grace_seconds: 30
+  queue_enabled: true
+  scheduled_protection_window_minutes: 5
+
+scheduler:
+  poll_interval_seconds: 1
+  automatic_assignment: true
+
+operations:
+  recovery_mode: mark_interrupted_failed
+
+workflows:
+  definitions_directory: ./workflows
+
+database:
+  url: sqlite:///./.lab-platform/simlab-team.db

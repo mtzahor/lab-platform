@@ -1,13 +1,86 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 from lab_platform.agent.cli import main as agent_main
-from lab_platform.agent.runtime import create_agent
-from lab_platform.models import HealthStatus, Operation, OperationStatus, OperationType
+from lab_platform.agent.runtime import LabAgent, create_agent
+from lab_platform.models import (
+    BackendProgress,
+    BenchSnapshot,
+    BenchStatus,
+    FirmwareInput,
+    HealthStatus,
+    Operation,
+    OperationStatus,
+    OperationType,
+    ReservationStatus,
+    SerialLine,
+    SerialReadRequest,
+    TargetHealth,
+    TargetHealthStatus,
+    TimelineCategory,
+    WorkflowRunStatus,
+)
 from lab_platform.persistence import SQLiteDatabase, SQLiteOperationRepository
+from lab_platform.real_backend import RealLabBackend
+from lab_platform.simlab_adapter import SimLabBackend
+
+
+class FakePhysicalBackend:
+    def __init__(self) -> None:
+        self.fail_inventory = False
+        self.actions: list[tuple[str, str]] = []
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def list_benches(self) -> list[BenchSnapshot]:
+        if self.fail_inventory:
+            raise RuntimeError("physical inventory unavailable")
+        return [await self.get_bench("fake-physical-01")]
+
+    async def get_bench(self, bench_id: str) -> BenchSnapshot:
+        return BenchSnapshot(
+            id=bench_id,
+            name="Fake physical ESP32",
+            status=BenchStatus.AVAILABLE,
+            online=True,
+            powered=True,
+            capabilities=["reset", "probe", "serial", "firmware"],
+        )
+
+    async def power_on(self, bench_id: str) -> None:
+        self.actions.append(("power_on", bench_id))
+
+    async def power_off(self, bench_id: str) -> None:
+        self.actions.append(("power_off", bench_id))
+
+    async def power_cycle(self, bench_id: str) -> None:
+        self.actions.append(("power_cycle", bench_id))
+
+    async def reset(self, bench_id: str) -> None:
+        self.actions.append(("reset", bench_id))
+
+    async def probe(self, bench_id: str) -> TargetHealth:
+        return TargetHealth(bench_id=bench_id, status=TargetHealthStatus.ONLINE)
+
+    async def flash_firmware(
+        self, bench_id: str, firmware: FirmwareInput
+    ) -> AsyncIterator[BackendProgress]:
+        self.actions.append(("flash", bench_id))
+        yield BackendProgress(percent=100, message=firmware.filename)
+
+    async def read_serial(
+        self, bench_id: str, request: SerialReadRequest
+    ) -> AsyncIterator[SerialLine]:
+        self.actions.append(("serial", bench_id))
+        yield SerialLine(text=f"timeout={request.timeout_seconds}")
 
 
 def _write_config(root: Path, *, benches: int = 2, enabled: bool = True) -> None:
@@ -34,12 +107,16 @@ def test_agent_starts_backend_database_plugins_and_is_idempotent(tmp_path: Path)
         assert [plugin.name for plugin in agent.plugins()] == ["power"]
         assert agent.health_payload() == {
             "status": "healthy",
-            "version": "0.3.0-alpha",
+            "version": "0.4.0-alpha",
             "backend": "simlab",
             "database": "healthy",
             "benches": {"total": 2, "online": 2},
         }
         assert all(report.status is HealthStatus.HEALTHY for report in agent.health_reports())
+        registered = await agent.event_service.list_events(event_type="BACKEND_REGISTERED")
+        discovered = await agent.event_service.list_events(event_type="BENCH_DISCOVERED")
+        assert [event.payload["backend_id"] for event in registered] == ["simlab"]
+        assert {event.bench_id for event in discovered} == {"bench-01", "bench-02"}
 
         await agent.shutdown()
         await agent.shutdown()
@@ -66,7 +143,7 @@ def test_reservation_and_history_survive_agent_restart(tmp_path: Path) -> None:
         bench = await second.bench_service.get_bench("bench-01")
         assert bench.reserved_by == "michael"
         events = await second.event_service.list_events(bench_id="bench-01")
-        assert [event.type for event in events] == ["BENCH_RESERVED"]
+        assert [event.type for event in events] == ["BENCH_RESERVED", "BENCH_DISCOVERED"]
         await second.shutdown()
 
     asyncio.run(scenario())
@@ -78,7 +155,7 @@ def test_agent_cli_once_and_disabled_backend(
     _write_config(tmp_path, benches=2)
     assert agent_main(["--config-dir", str(tmp_path), "--once"]) == 0
     output = capsys.readouterr().out
-    assert "Lab Agent v0.3.0-alpha" in output
+    assert "Lab Agent v0.4.0-alpha" in output
     assert "✓ SimLab backend started" in output
     assert "✓ 2 benches registered" in output
 
@@ -109,6 +186,241 @@ def test_startup_fails_interrupted_operation_records(tmp_path: Path) -> None:
         assert recovered.error_code == "AGENT_RESTARTED"
         events = await agent.event_service.list_events(event_type="BACKEND_ERROR")
         assert events[0].payload["operations_failed"] == 1
+        await agent.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_agent_composes_multiple_backend_instances(tmp_path: Path) -> None:
+    (tmp_path / "agent.yaml").write_text(
+        "agent:\n  name: mixed-agent\n  log_level: ERROR\nplugins: []\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "backends.yaml").write_text(
+        """backends:
+  - id: virtual-a
+    type: simlab
+    config:
+      benches: 2
+      bench_prefix: alpha
+      speed_multiplier: 100
+  - id: virtual-b
+    type: simlab
+    config:
+      benches: 1
+      bench_prefix: beta
+      speed_multiplier: 100
+""",
+        encoding="utf-8",
+    )
+
+    async def scenario() -> None:
+        agent = create_agent(tmp_path)
+        await agent.start()
+
+        assert agent.backend_registry.backend_ids == ("virtual-a", "virtual-b")
+        assert [bench.name for bench in agent.benches()] == [
+            "alpha-01",
+            "alpha-02",
+            "beta-01",
+        ]
+        assert [record.id for record in agent.catalog.list(backend_id="virtual-b")] == ["beta-01"]
+        assert [record.id for record in agent.catalog.list(labels={"location": "simulation"})] == [
+            "alpha-01",
+            "alpha-02",
+            "beta-01",
+        ]
+        assert agent.health_payload() == {
+            "status": "healthy",
+            "version": "0.4.0-alpha",
+            "backend": "mixed",
+            "backends": {"ids": ["virtual-a", "virtual-b"], "unavailable": []},
+            "database": "healthy",
+            "benches": {"total": 3, "online": 3},
+        }
+
+        virtual_a = agent.backend_registry.get_backend("virtual-a")
+        assert isinstance(virtual_a, SimLabBackend)
+        virtual_a.simulator.set_online("alpha-01", False)
+        refresh = await agent.catalog.refresh()
+        await agent._persist_catalog_refresh(refresh)
+        health_events = await agent.event_service.list_events(
+            bench_id="alpha-01", event_type="BENCH_HEALTH_CHANGED"
+        )
+        assert len(health_events) == 1
+        assert health_events[0].payload == {
+            "backend_id": "virtual-a",
+            "health": "unhealthy",
+            "online": False,
+        }
+
+        await agent.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_agent_routes_simlab_and_fake_physical_and_isolates_backend_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "agent.yaml").write_text(
+        "agent:\n  name: mixed-physical-agent\n  log_level: ERROR\nplugins: []\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "backends.yaml").write_text(
+        """backends:
+  - id: virtual-lab
+    type: simlab
+    config:
+      benches: 10
+      bench_prefix: virtual
+      speed_multiplier: 100
+  - id: fake-physical
+    type: real
+    config:
+      benches:
+        - id: fake-physical-01
+          name: Fake ESP32
+          target_type: esp32
+scheduler:
+  poll_interval_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    physical = FakePhysicalBackend()
+    monkeypatch.setattr(
+        RealLabBackend,
+        "from_config",
+        classmethod(lambda cls, config: physical),
+    )
+
+    async def wait_for(operation: Operation, agent: LabAgent) -> Operation:
+        for _ in range(100):
+            current = await agent.operation_service.get_operation(operation.id)
+            if current.status in {
+                OperationStatus.SUCCEEDED,
+                OperationStatus.FAILED,
+                OperationStatus.CANCELLED,
+            }:
+                return current
+            await asyncio.sleep(0.005)
+        raise AssertionError(f"operation {operation.id} did not complete")
+
+    async def scenario() -> None:
+        agent = create_agent(tmp_path)
+        await agent.start()
+        try:
+            assert agent.backend_registry.backend_ids == ("fake-physical", "virtual-lab")
+            assert len(agent.catalog.list(backend_id="virtual-lab")) == 10
+            assert [record.id for record in agent.catalog.list(backend_id="fake-physical")] == [
+                "fake-physical-01"
+            ]
+
+            await agent.reservation_service.reserve("virtual-01", "alice")
+            await agent.reservation_service.reserve("fake-physical-01", "bob")
+            simulated = await agent.bench_service.reset("virtual-01", "alice")
+            hardware = await agent.bench_service.reset("fake-physical-01", "bob")
+            completed = await asyncio.gather(
+                wait_for(simulated, agent),
+                wait_for(hardware, agent),
+            )
+            assert all(item.status is OperationStatus.SUCCEEDED for item in completed)
+            assert physical.actions == [("reset", "fake-physical-01")]
+
+            physical.fail_inventory = True
+            refresh = await agent.catalog.refresh()
+            assert [failure.backend_id for failure in refresh.backend_failures] == ["fake-physical"]
+            assert all(record.online for record in agent.catalog.list(backend_id="virtual-lab"))
+            assert not agent.catalog.get("fake-physical-01").online
+        finally:
+            await agent.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_workflow_definitions_load_and_release_after_run(tmp_path: Path) -> None:
+    workflow_directory = tmp_path / "workflows"
+    workflow_directory.mkdir()
+    (workflow_directory / "wait.yaml").write_text(
+        """name: wait-smoke
+version: 1
+requirements:
+  capabilities: []
+steps:
+  - action: wait
+    seconds: 0.01
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "probe.yml").write_text(
+        """name: probe-smoke
+version: 1
+requirements:
+  capabilities: [probe]
+steps:
+  - action: probe
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "agent.yaml").write_text(
+        """agent:
+  name: workflow-agent
+  log_level: ERROR
+plugins: []
+simlab:
+  benches: 1
+  speed_multiplier: 100
+scheduler:
+  poll_interval_seconds: 60
+workflows:
+  definitions_directory: ./workflows
+  definition_paths:
+    - ./probe.yml
+""",
+        encoding="utf-8",
+    )
+
+    async def scenario() -> None:
+        agent = create_agent(tmp_path)
+        await agent.start()
+        assert [
+            definition.name for definition in await agent.workflow_service.list_definitions()
+        ] == [
+            "probe-smoke",
+            "wait-smoke",
+        ]
+
+        reservation = await agent.reservation_service.reserve("bench-01", "alice")
+        run = await agent.workflow_service.start(
+            "wait-smoke",
+            bench_id="bench-01",
+            owner="alice",
+        )
+        agent.release_reservation_after_workflow(run.id, reservation.id, "alice")
+        completed = await agent.workflow_service.wait(run.id)
+        assert completed.status is WorkflowRunStatus.SUCCEEDED
+
+        for _ in range(10):
+            if await agent.reservation_service.get_active("bench-01") is None:
+                break
+            await asyncio.sleep(0)
+        released = await agent.reservation_service.get(reservation.id)
+        assert released.status is ReservationStatus.RELEASED
+        timeline = await agent.timeline_repository.list_timeline("bench-01")
+        workflow_events = [
+            entry for entry in timeline if entry.category is TimelineCategory.WORKFLOW
+        ]
+        assert {entry.event_type for entry in workflow_events} >= {"WORKFLOW_COMPLETED"}
+        lock_events = [
+            entry
+            for entry in timeline
+            if entry.event_type in {"OPERATION_LOCK_ACQUIRED", "OPERATION_LOCK_RELEASED"}
+        ]
+        assert {entry.event_type for entry in lock_events} == {
+            "OPERATION_LOCK_ACQUIRED",
+            "OPERATION_LOCK_RELEASED",
+        }
+        assert all(entry.operation_id is None for entry in lock_events)
+
         await agent.shutdown()
 
     asyncio.run(scenario())

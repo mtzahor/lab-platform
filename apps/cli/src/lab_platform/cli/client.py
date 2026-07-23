@@ -39,7 +39,7 @@ class AgentClient:
         if query:
             values = {key: value for key, value in query.items() if value is not None}
             if values:
-                url = f"{url}?{urlencode(values)}"
+                url = f"{url}?{urlencode(values, doseq=True)}"
         return self._request(Request(url, method="GET"))
 
     def post(self, path: str, payload: dict[str, object]) -> object:

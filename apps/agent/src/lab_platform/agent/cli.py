@@ -64,7 +64,11 @@ def _print_startup(agent: LabAgent) -> None:
     print("✓ Configuration loaded")
     print("✓ Logging initialized")
     print("✓ Event bus started")
-    if agent.config.backend.type == "real":
+    backends = agent.config.effective_backends
+    if len(backends) > 1:
+        identifiers = ", ".join(backend.id for backend in backends)
+        print(f"✓ {len(backends)} backends registered: {identifiers}")
+    elif backends[0].type == "real":
         print("✓ RealLabBackend started")
     elif agent.config.simlab.enabled:
         print("✓ SimLab backend started")

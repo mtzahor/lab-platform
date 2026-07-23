@@ -1,6 +1,36 @@
 {
   "components": {
     "schemas": {
+      "ApiError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details",
+          "request_id"
+        ],
+        "title": "ApiError",
+        "type": "object"
+      },
       "Body_flash_api_v1_benches__bench_id__actions_flash_post": {
         "properties": {
           "firmware": {
@@ -33,17 +63,98 @@
         "title": "Body_flash_api_v1_benches__bench_id__actions_flash_post",
         "type": "object"
       },
-      "HTTPValidationError": {
+      "CreateReservationRequest": {
+        "additionalProperties": false,
         "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
+          "bench_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "duration_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Duration Seconds",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "owner": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Owner",
+            "type": "string"
+          },
+          "queue_if_busy": {
+            "default": false,
+            "title": "Queue If Busy",
+            "type": "boolean"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
           }
         },
-        "title": "HTTPValidationError",
+        "required": [
+          "owner",
+          "bench_id",
+          "duration_seconds"
+        ],
+        "title": "CreateReservationRequest",
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "ExtendReservationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Duration Seconds",
+            "type": "integer"
+          },
+          "owner": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Owner",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "duration_seconds"
+        ],
+        "title": "ExtendReservationRequest",
         "type": "object"
       },
       "OperationAccepted": {
@@ -105,6 +216,114 @@
         "title": "OwnerRequest",
         "type": "object"
       },
+      "QueueReservationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Duration Seconds",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "owner": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Owner",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "duration_seconds"
+        ],
+        "title": "QueueReservationRequest",
+        "type": "object"
+      },
+      "ReservationStatus": {
+        "enum": [
+          "queued",
+          "scheduled",
+          "active",
+          "released",
+          "expired",
+          "cancelled",
+          "rejected",
+          "expired_pending_operation"
+        ],
+        "title": "ReservationStatus",
+        "type": "string"
+      },
+      "RunWorkflowRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "inputs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Inputs",
+            "type": "object"
+          },
+          "owner": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Owner",
+            "type": "string"
+          },
+          "release_after": {
+            "default": false,
+            "title": "Release After",
+            "type": "boolean"
+          },
+          "reservation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservation Id"
+          },
+          "reserve_duration_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reserve Duration Seconds"
+          }
+        },
+        "required": [
+          "owner",
+          "bench_id"
+        ],
+        "title": "RunWorkflowRequest",
+        "type": "object"
+      },
       "SerialReadApiRequest": {
         "additionalProperties": false,
         "properties": {
@@ -158,52 +377,24 @@
         "title": "SerialReadApiRequest",
         "type": "object"
       },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
+      "TimelineCategory": {
+        "enum": [
+          "reservation",
+          "operation",
+          "health",
+          "hardware",
+          "system",
+          "workflow"
         ],
-        "title": "ValidationError",
-        "type": "object"
+        "title": "TimelineCategory",
+        "type": "string"
       }
     }
   },
   "info": {
     "description": "Versioned local API for reserving and controlling lab benches.",
     "title": "Lab Platform Agent API",
-    "version": "0.3.0-alpha"
+    "version": "0.4.0-alpha"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -258,6 +449,58 @@
               ],
               "title": "Reserved"
             }
+          },
+          {
+            "in": "query",
+            "name": "online",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Online"
+            }
+          },
+          {
+            "in": "query",
+            "name": "available",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Available"
+            }
+          },
+          {
+            "in": "query",
+            "name": "label",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "pattern": "^[^:=\\s]+[:=].+$",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Label"
+            }
           }
         ],
         "responses": {
@@ -277,11 +520,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "List Benches"
@@ -316,11 +559,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Get Bench"
@@ -365,11 +608,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Flash"
@@ -414,11 +657,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Power Cycle"
@@ -463,11 +706,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Power Off"
@@ -512,11 +755,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Power On"
@@ -536,6 +779,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -551,11 +804,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Probe"
@@ -600,11 +853,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Read Serial"
@@ -649,14 +902,102 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Reset"
+      }
+    },
+    "/api/v1/benches/{bench_id}/queue": {
+      "get": {
+        "operationId": "list_queue_api_v1_benches__bench_id__queue_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Queue Api V1 Benches  Bench Id  Queue Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "List Queue"
+      },
+      "post": {
+        "operationId": "queue_reservation_api_v1_benches__bench_id__queue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueueReservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Queue Reservation Api V1 Benches  Bench Id  Queue Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Queue Reservation"
       }
     },
     "/api/v1/benches/{bench_id}/reservation": {
@@ -691,11 +1032,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Release"
@@ -728,11 +1069,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Get Reservation"
@@ -775,14 +1116,117 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Reserve"
+      }
+    },
+    "/api/v1/benches/{bench_id}/timeline": {
+      "get": {
+        "operationId": "bench_timeline_api_v1_benches__bench_id__timeline_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TimelineCategory"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Bench Timeline Api V1 Benches  Bench Id  Timeline Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Bench Timeline"
       }
     },
     "/api/v1/events": {
@@ -885,11 +1329,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "List Events"
@@ -910,6 +1354,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
           }
         },
         "summary": "Health"
@@ -997,11 +1451,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "List Operations"
@@ -1037,11 +1491,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Get Operation"
@@ -1079,11 +1533,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "List Operation Artifacts"
@@ -1123,11 +1577,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Read Serial Artifact"
@@ -1173,14 +1627,409 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Request validation failed"
           }
         },
         "summary": "Cancel Operation"
+      }
+    },
+    "/api/v1/queue/{queue_entry_id}": {
+      "delete": {
+        "operationId": "cancel_queue_api_v1_queue__queue_entry_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "queue_entry_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Queue Entry Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Cancel Queue"
+      }
+    },
+    "/api/v1/reservations": {
+      "get": {
+        "operationId": "list_reservations_api_v1_reservations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "bench_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bench Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Owner"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ReservationStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "starts_after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Starts After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "starts_before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Starts Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Reservations Api V1 Reservations Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "List Reservations"
+      },
+      "post": {
+        "operationId": "create_reservation_api_v1_reservations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Create Reservation Api V1 Reservations Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Create Reservation"
+      }
+    },
+    "/api/v1/reservations/{reservation_id}": {
+      "get": {
+        "operationId": "get_reservation_api_v1_reservations__reservation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Reservation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Reservation Api V1 Reservations  Reservation Id  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Get Reservation"
+      }
+    },
+    "/api/v1/reservations/{reservation_id}/cancel": {
+      "post": {
+        "operationId": "cancel_reservation_api_v1_reservations__reservation_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Reservation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Cancel Reservation Api V1 Reservations  Reservation Id  Cancel Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Cancel Reservation"
+      }
+    },
+    "/api/v1/reservations/{reservation_id}/extend": {
+      "post": {
+        "operationId": "extend_reservation_api_v1_reservations__reservation_id__extend_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Reservation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendReservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Extend Reservation Api V1 Reservations  Reservation Id  Extend Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Extend Reservation"
+      }
+    },
+    "/api/v1/reservations/{reservation_id}/release": {
+      "post": {
+        "operationId": "release_reservation_api_v1_reservations__reservation_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Reservation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Release Reservation Api V1 Reservations  Reservation Id  Release Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Release Reservation"
       }
     },
     "/api/v1/version": {
@@ -1200,9 +2049,245 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
           }
         },
         "summary": "Version"
+      }
+    },
+    "/api/v1/workflow-runs/{workflow_run_id}": {
+      "get": {
+        "operationId": "get_workflow_run_api_v1_workflow_runs__workflow_run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Workflow Run Api V1 Workflow Runs  Workflow Run Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Get Workflow Run"
+      }
+    },
+    "/api/v1/workflow-runs/{workflow_run_id}/cancel": {
+      "post": {
+        "operationId": "cancel_workflow_run_api_v1_workflow_runs__workflow_run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Cancel Workflow Run Api V1 Workflow Runs  Workflow Run Id  Cancel Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Cancel Workflow Run"
+      }
+    },
+    "/api/v1/workflows": {
+      "get": {
+        "operationId": "list_workflows_api_v1_workflows_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Workflows Api V1 Workflows Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "List Workflows"
+      }
+    },
+    "/api/v1/workflows/{workflow_name}": {
+      "get": {
+        "operationId": "get_workflow_api_v1_workflows__workflow_name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_name",
+            "required": true,
+            "schema": {
+              "title": "Workflow Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Workflow Api V1 Workflows  Workflow Name  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Get Workflow"
+      }
+    },
+    "/api/v1/workflows/{workflow_name}/runs": {
+      "post": {
+        "operationId": "run_workflow_api_v1_workflows__workflow_name__runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_name",
+            "required": true,
+            "schema": {
+              "title": "Workflow Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunWorkflowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Run Workflow Api V1 Workflows  Workflow Name  Runs Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "summary": "Run Workflow"
       }
     }
   }
