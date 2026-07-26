@@ -1,10 +1,17 @@
 from lab_platform.core.agent import AgentCore
+from lab_platform.core.artifacts import ArtifactService, normalize_artifact_name
+from lab_platform.core.auth import ApiTokenService, IssuedApiToken
 from lab_platform.core.backend import LabBackend
 from lab_platform.core.backend_registry import BackendRegistry, RegistryRefreshResult
 from lab_platform.core.bench_catalog import BenchCatalog, BenchMetadata, BenchRecord
 from lab_platform.core.capabilities import CapabilityRegistry
+from lab_platform.core.ci import CiSessionService
 from lab_platform.core.clock import Clock, FakeClock, UtcClock, as_utc
 from lab_platform.core.errors import (
+    ArtifactChecksumMismatchError,
+    ArtifactNotFoundError,
+    ArtifactTooLargeError,
+    AuthenticationRequiredError,
     BackendFailureError,
     BackendNotFoundError,
     BackendTimeoutError,
@@ -14,18 +21,27 @@ from lab_platform.core.errors import (
     BenchNotReservedError,
     BenchOfflineError,
     BenchOperationInProgressError,
+    BenchWaitTimeoutError,
     CapabilityNotSupportedError,
+    CiCleanupError,
+    CiSessionConflictError,
+    CiSessionNotFoundError,
     ConfigurationError,
     FirmwareFileTooLargeError,
+    InvalidApiTokenError,
+    InvalidArtifactError,
     InvalidFirmwareFileError,
+    NoCompatibleBenchError,
     OperationArtifactNotFoundError,
     OperationNotCancellableError,
     OperationNotFoundError,
+    PermissionDeniedError,
     PlatformError,
     QueueDisabledError,
     QueueEntryNotFoundError,
     QueueOwnerMismatchError,
     RecoveryFailureError,
+    RequestBodyTooLargeError,
     ReservationAlreadyExpiredError,
     ReservationExtensionConflictError,
     ReservationMaxDurationExceededError,
@@ -43,6 +59,7 @@ from lab_platform.core.operation_locks import OperationLockService
 from lab_platform.core.queueing import FifoQueuePolicy, QueuePolicy
 from lab_platform.core.recovery import RecoveryService
 from lab_platform.core.reservations import ReservationService as TimedReservationService
+from lab_platform.core.results import build_test_results, render_junit_xml
 from lab_platform.core.scheduler import Scheduler
 from lab_platform.core.scheduling import SchedulingService
 from lab_platform.core.services import (
@@ -68,6 +85,12 @@ from lab_platform.core.workflows import (
 
 __all__ = [
     "AgentCore",
+    "ApiTokenService",
+    "ArtifactChecksumMismatchError",
+    "ArtifactNotFoundError",
+    "ArtifactService",
+    "ArtifactTooLargeError",
+    "AuthenticationRequiredError",
     "BackendFailureError",
     "BackendNotFoundError",
     "BackendRegistry",
@@ -78,12 +101,17 @@ __all__ = [
     "BenchNotReservedError",
     "BenchOfflineError",
     "BenchOperationInProgressError",
+    "BenchWaitTimeoutError",
     "BenchCatalog",
     "BenchMetadata",
     "BenchRecord",
     "BenchService",
     "CapabilityRegistry",
     "CapabilityNotSupportedError",
+    "CiCleanupError",
+    "CiSessionConflictError",
+    "CiSessionNotFoundError",
+    "CiSessionService",
     "ConfigurationError",
     "Clock",
     "EventService",
@@ -94,6 +122,9 @@ __all__ = [
     "FirmwareFileTooLargeError",
     "HealthMonitor",
     "InvalidFirmwareFileError",
+    "InvalidApiTokenError",
+    "InvalidArtifactError",
+    "IssuedApiToken",
     "LabBackend",
     "OperationNotCancellableError",
     "OperationArtifactNotFoundError",
@@ -101,7 +132,9 @@ __all__ = [
     "OperationRunner",
     "OperationLockService",
     "OperationService",
+    "NoCompatibleBenchError",
     "PlatformError",
+    "PermissionDeniedError",
     "ReservationOwnerMismatchError",
     "ReservationAlreadyExpiredError",
     "ReservationExtensionConflictError",
@@ -114,6 +147,7 @@ __all__ = [
     "QueueOwnerMismatchError",
     "QueuePolicy",
     "RecoveryFailureError",
+    "RequestBodyTooLargeError",
     "RecoveryService",
     "ReservationService",
     "RegistryRefreshResult",
@@ -134,6 +168,9 @@ __all__ = [
     "WorkflowRunNotFoundError",
     "WorkflowRunner",
     "WorkflowService",
+    "build_test_results",
+    "normalize_artifact_name",
+    "render_junit_xml",
     "recover_interrupted_operations",
     "as_utc",
     "parse_workflow_yaml",

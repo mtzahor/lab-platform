@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -39,6 +40,11 @@ class ProcessRunner:
 
 
 class AsyncSubprocessRunner(ProcessRunner):
+    def __init__(self, *, maximum_capture_bytes: int = 1024 * 1024) -> None:
+        if maximum_capture_bytes <= 0:
+            raise ValueError("Process output capture limit must be positive")
+        self._maximum_capture_bytes = maximum_capture_bytes
+
     async def run(
         self,
         args: Sequence[str],
@@ -57,13 +63,13 @@ class AsyncSubprocessRunner(ProcessRunner):
         except FileNotFoundError as exc:
             raise ProcessExecutableNotFoundError(str(exc)) from exc
 
-        stdout: list[str] = []
-        stderr: list[str] = []
+        stdout = _BoundedLines(self._maximum_capture_bytes)
+        stderr = _BoundedLines(self._maximum_capture_bytes)
 
         async def pump(
             stream: asyncio.StreamReader | None,
             name: Literal["stdout", "stderr"],
-            destination: list[str],
+            destination: _BoundedLines,
         ) -> None:
             if stream is None:  # pragma: no cover - pipes are requested above
                 return
@@ -90,7 +96,7 @@ class AsyncSubprocessRunner(ProcessRunner):
             await self._terminate(process)
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
-        return ProcessResult(process.returncode or 0, tuple(stdout), tuple(stderr))
+        return ProcessResult(process.returncode or 0, stdout.items, stderr.items)
 
     @staticmethod
     async def _terminate(process: asyncio.subprocess.Process) -> None:
@@ -102,3 +108,29 @@ class AsyncSubprocessRunner(ProcessRunner):
         except TimeoutError:
             process.kill()
             await process.wait()
+
+
+class _BoundedLines:
+    """Keep only the most recent decoded process output within a byte budget."""
+
+    def __init__(self, maximum_bytes: int) -> None:
+        self._maximum_bytes = maximum_bytes
+        self._items: deque[tuple[str, int]] = deque()
+        self._size = 0
+
+    @property
+    def items(self) -> tuple[str, ...]:
+        return tuple(text for text, _size in self._items)
+
+    def append(self, text: str) -> None:
+        encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) + 1 > self._maximum_bytes:
+            available = self._maximum_bytes - 1
+            encoded = encoded[-available:] if available else b""
+            text = encoded.decode("utf-8", errors="replace")
+        size = len(text.encode("utf-8", errors="replace")) + 1
+        self._items.append((text, size))
+        self._size += size
+        while self._items and self._size > self._maximum_bytes:
+            _removed, removed_size = self._items.popleft()
+            self._size -= removed_size

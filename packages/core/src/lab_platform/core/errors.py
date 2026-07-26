@@ -130,3 +130,55 @@ class SimulationFailureError(PlatformError):
 
 class OperationArtifactNotFoundError(PlatformError):
     code = "OPERATION_ARTIFACT_NOT_FOUND"
+
+
+class AuthenticationRequiredError(PlatformError):
+    code = "AUTHENTICATION_REQUIRED"
+
+
+class InvalidApiTokenError(PlatformError):
+    code = "INVALID_API_TOKEN"
+
+
+class PermissionDeniedError(PlatformError):
+    code = "PERMISSION_DENIED"
+
+
+class ArtifactNotFoundError(PlatformError):
+    code = "ARTIFACT_NOT_FOUND"
+
+
+class InvalidArtifactError(PlatformError):
+    code = "INVALID_ARTIFACT"
+
+
+class ArtifactTooLargeError(PlatformError):
+    code = "ARTIFACT_TOO_LARGE"
+
+
+class RequestBodyTooLargeError(PlatformError):
+    code = "REQUEST_BODY_TOO_LARGE"
+
+
+class ArtifactChecksumMismatchError(PlatformError):
+    code = "ARTIFACT_CHECKSUM_MISMATCH"
+
+
+class CiSessionNotFoundError(PlatformError):
+    code = "CI_SESSION_NOT_FOUND"
+
+
+class CiSessionConflictError(PlatformError):
+    code = "CI_SESSION_CONFLICT"
+
+
+class NoCompatibleBenchError(PlatformError):
+    code = "NO_COMPATIBLE_BENCH"
+
+
+class BenchWaitTimeoutError(PlatformError):
+    code = "BENCH_WAIT_TIMEOUT"
+
+
+class CiCleanupError(PlatformError):
+    code = "CI_CLEANUP_FAILED"

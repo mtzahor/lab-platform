@@ -1,0 +1,49 @@
+name: esp32-ci-test
+version: 2
+description: Flash an ESP32-compatible target and verify its boot, self-test, and version markers.
+
+inputs:
+  firmware:
+    type: artifact
+    required: true
+  expected_version:
+    type: string
+    required: true
+  ready_timeout:
+    type: integer
+    default: 20
+
+requirements:
+  capabilities:
+    - firmware
+    - serial
+    - reset
+    - probe
+  labels:
+    board: esp32
+
+steps:
+  - name: Probe target
+    action: probe
+
+  - name: Flash firmware
+    action: flash
+    firmware: "${{ inputs.firmware }}"
+    version: "${{ inputs.expected_version }}"
+
+  - name: Reset target
+    action: reset
+
+  - name: Wait for READY
+    action: read_serial
+    until_pattern: "^READY$"
+    timeout_seconds: "${{ inputs.ready_timeout }}"
+    max_lines: 500
+
+  - name: Verify self-test
+    action: assert_serial
+    pattern: "^SELF_TEST=PASS$"
+
+  - name: Verify firmware version
+    action: assert_serial
+    pattern: "^FIRMWARE_VERSION=${{ inputs.expected_version }}$"

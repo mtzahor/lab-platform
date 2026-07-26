@@ -12,6 +12,10 @@ hardware:
     - id: esp32-devkit-01
       name: Michael ESP32 DevKit V1
       target_type: esp32
+      labels:
+        board: esp32
+        location: local
+        purpose: hardware-ci
       connection:
         serial_port: /dev/cu.usbserial-0001
         baud_rate: 115200

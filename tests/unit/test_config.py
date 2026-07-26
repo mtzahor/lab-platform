@@ -17,8 +17,31 @@ def test_missing_files_use_defaults(tmp_path: Path) -> None:
 
     assert config.agent.name == "local-agent"
     assert config.agent.port == 8080
+    assert config.agent.max_request_body_size_mb == 1
     assert config.simlab.benches == 5
     assert config.plugins == ["power", "serial", "firmware"]
+    assert config.ci.default_reservation_minutes == 30
+    assert config.ci.heartbeat_timeout_seconds == 120
+    assert config.artifacts.max_upload_size_mb == 100
+    assert config.serial.stream_buffer_lines == 500
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "ci:\n  default_reservation_minutes: 121\n  maximum_reservation_minutes: 120\n",
+        "ci:\n  heartbeat_interval_seconds: 120\n  heartbeat_timeout_seconds: 120\n",
+        "ci:\n  session_timeout_seconds: 60\n  workflow_timeout_seconds: 61\n",
+        "artifacts:\n  max_upload_size_mb: 0\n",
+        "agent:\n  max_request_body_size_mb: 0\n",
+        "serial:\n  decode_errors: unsafe\n",
+    ],
+)
+def test_phase4_configuration_rejects_unsafe_limits(tmp_path: Path, contents: str) -> None:
+    (tmp_path / "agent.yaml").write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        load_config(tmp_path)
 
 
 def test_files_are_deep_merged_and_validated(tmp_path: Path) -> None:
@@ -81,6 +104,18 @@ def test_phase2_configuration_is_exposed_as_one_effective_backend(tmp_path: Path
     assert backend.id == "simlab"
     assert backend.config.bench_count == 7
     assert backend.config.speed_multiplier == 50
+
+
+def test_simlab_labels_flow_to_effective_backend(tmp_path: Path) -> None:
+    (tmp_path / "simlab.yaml").write_text(
+        "simlab:\n  labels:\n    board: esp32\n    location: simulation\n",
+        encoding="utf-8",
+    )
+
+    backend = load_config(tmp_path).effective_backends[0]
+
+    assert isinstance(backend, SimLabBackendSettings)
+    assert backend.config.labels == {"board": "esp32", "location": "simulation"}
 
 
 def test_phase3_mixed_backends_are_loaded_from_backends_yaml(tmp_path: Path) -> None:

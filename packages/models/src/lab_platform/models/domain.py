@@ -52,6 +52,7 @@ class ReservationSource(StrEnum):
     CLI = "cli"
     API = "api"
     WORKFLOW = "workflow"
+    CI = "ci"
     SYSTEM = "system"
 
 

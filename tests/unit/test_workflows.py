@@ -162,6 +162,7 @@ def _stack(
     *,
     backend: FakeBackend | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    step_timeout_seconds: float = 600,
 ) -> WorkflowStack:
     database = SQLiteDatabase(path)
     database.initialize()
@@ -179,6 +180,7 @@ def _stack(
         locks,
         clock=lambda: NOW,
         sleep=sleep,
+        step_timeout_seconds=step_timeout_seconds,
     )
     service = WorkflowService(
         repository,
@@ -199,6 +201,47 @@ def _stack(
         runner,
         service,
     )
+
+
+def test_workflow_step_timeout_fails_a_hung_step(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async def blocked_sleep(_seconds: float) -> None:
+            await asyncio.Event().wait()
+
+        stack = _stack(
+            tmp_path / "step-timeout.db",
+            sleep=blocked_sleep,
+            step_timeout_seconds=0.01,
+        )
+        try:
+            await stack.service.register_yaml(
+                """
+name: step-timeout
+version: 1
+requirements: {capabilities: []}
+steps:
+  - name: Hung wait
+    action: wait
+    seconds: 1
+"""
+            )
+            pending = await stack.service.start(
+                "step-timeout",
+                bench_id="bench-01",
+                owner="alice",
+            )
+            completed = await stack.service.wait(pending.id)
+            results = await stack.service.list_step_results(pending.id)
+
+            assert completed.status is WorkflowRunStatus.FAILED
+            assert completed.error_code == "WORKFLOW_STEP_FAILED"
+            assert "configured 0.01 second timeout" in str(completed.error_message)
+            assert results[0].status is WorkflowStepStatus.FAILED
+        finally:
+            await stack.runner.shutdown()
+            stack.database.close()
+
+    asyncio.run(scenario())
 
 
 def test_yaml_parser_is_strict_safe_and_resolves_relative_firmware(tmp_path: Path) -> None:
@@ -334,7 +377,7 @@ steps:
             assert waits == [0.25]
             assert [result.action for result in results] == list(WorkflowAction)
             assert all(result.status is WorkflowStepStatus.SUCCEEDED for result in results)
-            assert results[3].output["matched_line"] == "SELF_TEST=PASS"
+            assert results[3].output == {"pattern": "SELF_TEST=PASS", "matched": True}
             assert [item[1] for item in stack.locks.acquired] == [pending.id]
             assert stack.locks.released == [("bench-01", pending.id)]
             assert [event.type for event in stack.events.items] == [

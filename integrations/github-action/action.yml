@@ -1,0 +1,95 @@
+name: Lab Platform Hardware CI
+description: Run a provider-neutral Lab Platform workflow from GitHub Actions.
+
+inputs:
+  server:
+    description: Base URL of the Lab Platform Agent.
+    required: true
+  token:
+    description: Scoped Lab Platform API token.
+    required: true
+  workflow:
+    description: Registered Lab Platform workflow name.
+    required: true
+  firmware:
+    description: Firmware file to upload as the firmware artifact input.
+    required: true
+  expected-version:
+    description: Version string expected from the target firmware.
+    required: true
+  required-capabilities:
+    description: Comma-separated capability names.
+    required: false
+    default: firmware,serial,reset,probe
+  required-labels:
+    description: Comma-separated key=value bench labels.
+    required: false
+    default: board=esp32
+  allow-simulated:
+    description: Allow selection of a SimLab bench.
+    required: false
+    default: "true"
+  allow-physical:
+    description: Allow selection of a physical bench.
+    required: false
+    default: "false"
+  wait-timeout:
+    description: Maximum time to wait for a compatible bench.
+    required: false
+    default: 10m
+  reservation-duration:
+    description: Requested reservation duration.
+    required: false
+    default: 30m
+  junit-output:
+    description: Destination for JUnit XML results.
+    required: false
+    default: hardware-results.xml
+  artifacts-directory:
+    description: Directory for downloaded hardware-test artifacts.
+    required: false
+    default: hardware-artifacts
+
+outputs:
+  session-id:
+    description: Created CI session identifier.
+    value: ${{ steps.hardware-test.outputs.session-id }}
+  bench-id:
+    description: Selected bench identifier.
+    value: ${{ steps.hardware-test.outputs.bench-id }}
+  workflow-run-id:
+    description: Created workflow run identifier.
+    value: ${{ steps.hardware-test.outputs.workflow-run-id }}
+  result:
+    description: Overall hardware CI result.
+    value: ${{ steps.hardware-test.outputs.result }}
+  artifact-directory:
+    description: Directory containing downloaded artifacts.
+    value: ${{ inputs.artifacts-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+
+    - name: Run hardware CI workflow
+      id: hardware-test
+      shell: bash
+      env:
+        LAB_PLATFORM_SERVER: ${{ inputs.server }}
+        LAB_PLATFORM_TOKEN: ${{ inputs.token }}
+        LAB_ACTION_WORKFLOW: ${{ inputs.workflow }}
+        LAB_ACTION_FIRMWARE: ${{ inputs.firmware }}
+        LAB_ACTION_EXPECTED_VERSION: ${{ inputs.expected-version }}
+        LAB_ACTION_REQUIRED_CAPABILITIES: ${{ inputs.required-capabilities }}
+        LAB_ACTION_REQUIRED_LABELS: ${{ inputs.required-labels }}
+        LAB_ACTION_ALLOW_SIMULATED: ${{ inputs.allow-simulated }}
+        LAB_ACTION_ALLOW_PHYSICAL: ${{ inputs.allow-physical }}
+        LAB_ACTION_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        LAB_ACTION_RESERVATION_DURATION: ${{ inputs.reservation-duration }}
+        LAB_ACTION_JUNIT_OUTPUT: ${{ inputs.junit-output }}
+        LAB_ACTION_ARTIFACTS_DIRECTORY: ${{ inputs.artifacts-directory }}
+      run: '"$GITHUB_ACTION_PATH/entrypoint.sh"'

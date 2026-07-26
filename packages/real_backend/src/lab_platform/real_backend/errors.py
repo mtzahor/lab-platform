@@ -35,6 +35,18 @@ class SerialDisconnectedError(HardwareError):
     code = "SERIAL_DISCONNECTED"
 
 
+class SerialCloseFailedError(HardwareError):
+    code = "SERIAL_CLOSE_FAILED"
+
+
+class SerialMessageTooLargeError(HardwareError):
+    code = "SERIAL_MESSAGE_TOO_LARGE"
+
+
+class SerialCaptureTooLargeError(HardwareError):
+    code = "SERIAL_CAPTURE_TOO_LARGE"
+
+
 class EsptoolNotAvailableError(HardwareError):
     code = "ESPTOOL_NOT_AVAILABLE"
 

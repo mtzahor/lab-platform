@@ -57,17 +57,21 @@ CREATE TABLE IF NOT EXISTS workflow_step_results (
     id TEXT PRIMARY KEY,
     workflow_run_id TEXT NOT NULL,
     step_index INTEGER NOT NULL CHECK (step_index >= 0),
+    name TEXT NOT NULL DEFAULT '',
     action TEXT NOT NULL CHECK (
         action IN ('flash', 'reset', 'read_serial', 'assert_serial', 'wait', 'probe')
     ),
     status TEXT NOT NULL CHECK (
-        status IN ('running', 'succeeded', 'failed', 'cancelled')
+        status IN ('pending', 'running', 'succeeded', 'failed', 'skipped', 'cancelled')
     ),
-    started_at TEXT NOT NULL,
+    started_at TEXT,
     completed_at TEXT,
     output_json TEXT NOT NULL,
     error_code TEXT,
     error_message TEXT,
+    artifact_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (
+        json_valid(artifact_ids_json) AND json_type(artifact_ids_json) = 'array'
+    ),
     UNIQUE (workflow_run_id, step_index),
     FOREIGN KEY (workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
@@ -84,7 +88,88 @@ def initialize_workflow_schema(database: SQLiteDatabase) -> None:
     """
 
     with database.transaction(immediate=True) as connection:
-        connection.executescript(WORKFLOW_SCHEMA_SQL)
+        ensure_workflow_schema(connection)
+
+
+def ensure_workflow_schema(connection: sqlite3.Connection) -> None:
+    """Create workflow tables and upgrade pre-Phase-4 step-result storage.
+
+    SQLite cannot relax a ``NOT NULL`` constraint or extend a ``CHECK`` in place,
+    so the step table is rebuilt when the old Phase 3 shape is detected. The copy
+    preserves every existing result and supplies deterministic defaults for the
+    newly persisted display name and artifact references.
+    """
+
+    connection.executescript(WORKFLOW_SCHEMA_SQL)
+    if not _workflow_step_results_need_rebuild(connection):
+        return
+    _rebuild_workflow_step_results(connection)
+
+
+def _workflow_step_results_need_rebuild(connection: sqlite3.Connection) -> bool:
+    columns = {
+        row[1]: row for row in connection.execute("PRAGMA table_info(workflow_step_results)")
+    }
+    if "name" not in columns or "artifact_ids_json" not in columns:
+        return True
+    if columns["started_at"][3]:
+        return True
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workflow_step_results'"
+    ).fetchone()
+    table_sql = str(row[0]).casefold() if row is not None else ""
+    return "'pending'" not in table_sql or "'skipped'" not in table_sql
+
+
+def _rebuild_workflow_step_results(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_step_results)")}
+    name_expression = "COALESCE(name, '')" if "name" in columns else "''"
+    artifact_expression = (
+        "COALESCE(artifact_ids_json, '[]')" if "artifact_ids_json" in columns else "'[]'"
+    )
+    connection.execute("DROP TABLE IF EXISTS workflow_step_results_phase4")
+    connection.execute(
+        """
+        CREATE TABLE workflow_step_results_phase4 (
+            id TEXT PRIMARY KEY,
+            workflow_run_id TEXT NOT NULL,
+            step_index INTEGER NOT NULL CHECK (step_index >= 0),
+            name TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL CHECK (
+                action IN ('flash', 'reset', 'read_serial', 'assert_serial', 'wait', 'probe')
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'pending', 'running', 'succeeded', 'failed', 'skipped', 'cancelled'
+                )
+            ),
+            started_at TEXT,
+            completed_at TEXT,
+            output_json TEXT NOT NULL,
+            error_code TEXT,
+            error_message TEXT,
+            artifact_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(artifact_ids_json) AND json_type(artifact_ids_json) = 'array'
+            ),
+            UNIQUE (workflow_run_id, step_index),
+            FOREIGN KEY (workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO workflow_step_results_phase4 "
+        "(id, workflow_run_id, step_index, name, action, status, started_at, completed_at, "
+        "output_json, error_code, error_message, artifact_ids_json) "
+        f"SELECT id, workflow_run_id, step_index, {name_expression}, action, status, "  # noqa: S608
+        "started_at, completed_at, output_json, error_code, error_message, "
+        f"{artifact_expression} FROM workflow_step_results"  # noqa: S608
+    )
+    connection.execute("DROP TABLE workflow_step_results")
+    connection.execute("ALTER TABLE workflow_step_results_phase4 RENAME TO workflow_step_results")
+    connection.execute(
+        "CREATE INDEX workflow_step_results_run "
+        "ON workflow_step_results(workflow_run_id, step_index)"
+    )
 
 
 class SQLiteWorkflowRepository:
@@ -205,8 +290,9 @@ class SQLiteWorkflowRepository:
             with self._database.transaction(immediate=True) as connection:
                 connection.execute(
                     "INSERT INTO workflow_step_results "
-                    "(id, workflow_run_id, step_index, action, status, started_at, completed_at, "
-                    "output_json, error_code, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(id, workflow_run_id, step_index, name, action, status, started_at, "
+                    "completed_at, output_json, error_code, error_message, artifact_ids_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _step_result_values(result),
                 )
         except sqlite3.IntegrityError as exc:
@@ -220,17 +306,19 @@ class SQLiteWorkflowRepository:
     async def update_step_result(self, result: WorkflowStepResult) -> WorkflowStepResult:
         with self._database.transaction(immediate=True) as connection:
             cursor = connection.execute(
-                "UPDATE workflow_step_results SET action = ?, status = ?, started_at = ?, "
-                "completed_at = ?, output_json = ?, error_code = ?, error_message = ? "
-                "WHERE id = ?",
+                "UPDATE workflow_step_results SET name = ?, action = ?, status = ?, "
+                "started_at = ?, completed_at = ?, output_json = ?, error_code = ?, "
+                "error_message = ?, artifact_ids_json = ? WHERE id = ?",
                 (
+                    result.name,
                     result.action.value,
                     result.status.value,
-                    result.started_at.isoformat(),
+                    _datetime_value(result.started_at),
                     _datetime_value(result.completed_at),
                     json.dumps(result.output, sort_keys=True, default=str),
                     result.error_code,
                     result.error_message,
+                    json.dumps([str(item) for item in result.artifact_ids]),
                     str(result.id),
                 ),
             )
@@ -305,13 +393,15 @@ def _step_result_values(result: WorkflowStepResult) -> tuple[object, ...]:
         str(result.id),
         str(result.workflow_run_id),
         result.step_index,
+        result.name,
         result.action.value,
         result.status.value,
-        result.started_at.isoformat(),
+        _datetime_value(result.started_at),
         _datetime_value(result.completed_at),
         json.dumps(result.output, sort_keys=True, default=str),
         result.error_code,
         result.error_message,
+        json.dumps([str(item) for item in result.artifact_ids]),
     )
 
 
@@ -338,13 +428,15 @@ def _step_result_from_row(row: sqlite3.Row) -> WorkflowStepResult:
         id=UUID(row["id"]),
         workflow_run_id=UUID(row["workflow_run_id"]),
         step_index=row["step_index"],
+        name=row["name"],
         action=WorkflowAction(row["action"]),
         status=WorkflowStepStatus(row["status"]),
-        started_at=datetime.fromisoformat(row["started_at"]),
+        started_at=_parse_datetime(row["started_at"]),
         completed_at=_parse_datetime(row["completed_at"]),
         output=json.loads(row["output_json"]),
         error_code=row["error_code"],
         error_message=row["error_message"],
+        artifact_ids=[UUID(item) for item in json.loads(row["artifact_ids_json"])],
     )
 
 

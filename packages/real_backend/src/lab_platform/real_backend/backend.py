@@ -40,13 +40,27 @@ class RealLabBackend:
         process_runner: ProcessRunner | None = None,
         serial_port_provider: SerialPortProvider | None = None,
         serial_factory: SerialFactory | None = None,
+        serial_decode_errors: str = "replace",
+        serial_capture_max_bytes: int = 50 * 1024 * 1024,
+        serial_message_max_bytes: int = 1024 * 1024,
     ) -> RealLabBackend:
         if not config.benches:
             raise ConfigurationError("The real backend requires one configured hardware bench.")
         runner = process_runner or AsyncSubprocessRunner()
         discovery = SerialPortDiscovery(serial_port_provider)
         reader = (
-            Esp32SerialReader(serial_factory) if serial_factory is not None else Esp32SerialReader()
+            Esp32SerialReader(
+                serial_factory,
+                decode_errors=serial_decode_errors,
+                maximum_capture_bytes=serial_capture_max_bytes,
+                maximum_message_bytes=serial_message_max_bytes,
+            )
+            if serial_factory is not None
+            else Esp32SerialReader(
+                decode_errors=serial_decode_errors,
+                maximum_capture_bytes=serial_capture_max_bytes,
+                maximum_message_bytes=serial_message_max_bytes,
+            )
         )
         targets: dict[str, PhysicalTarget] = {}
         for bench in config.benches:

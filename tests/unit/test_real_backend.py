@@ -23,7 +23,10 @@ from lab_platform.real_backend.errors import (
     FirmwareVerificationFailedError,
     ProcessExecutableNotFoundError,
     ProcessExecutionTimeoutError,
+    SerialCaptureTooLargeError,
+    SerialCloseFailedError,
     SerialDisconnectedError,
+    SerialMessageTooLargeError,
     SerialPermissionDeniedError,
     SerialPortAmbiguousError,
     SerialPortBusyError,
@@ -139,19 +142,28 @@ class CancellableRoutingRunner(ProcessRunner):
 
 
 class FakeSerialHandle:
-    def __init__(self, lines: list[bytes], error: OSError | None = None) -> None:
+    def __init__(
+        self,
+        lines: list[bytes],
+        error: OSError | None = None,
+        close_error: OSError | None = None,
+    ) -> None:
         self.lines = lines
         self.error = error
+        self.close_error = close_error
         self.closed = False
 
-    def readline(self) -> bytes:
+    def readline(self, size: int = -1) -> bytes:
         if self.lines:
-            return self.lines.pop(0)
+            line = self.lines.pop(0)
+            return line if size < 0 else line[:size]
         if self.error is not None:
             raise self.error
         return b""
 
     def close(self) -> None:
+        if self.close_error is not None:
+            raise self.close_error
         self.closed = True
 
 
@@ -162,10 +174,11 @@ class FakeSerialFactory:
         *,
         open_error: Exception | None = None,
         read_error: OSError | None = None,
+        close_error: OSError | None = None,
     ) -> None:
         self.lines = lines or []
         self.open_error = open_error
-        self.handle = FakeSerialHandle(self.lines.copy(), read_error)
+        self.handle = FakeSerialHandle(self.lines.copy(), read_error, close_error)
 
     def __call__(self, *, port: str, baudrate: int, timeout: float) -> FakeSerialHandle:
         if self.open_error is not None:
@@ -298,7 +311,10 @@ def test_flasher_maps_progress_and_translates_failures(tmp_path: Path) -> None:
                 "/dev/ttyUSB0", firmware
             )
         ]
-        assert [item.percent for item in progress] == [30, 85, 90]
+        assert [item.percent for item in progress] == [20, 30, 85, 90]
+        assert [line.text for line in output] == [
+            item.message.rpartition(": ")[2] for item in progress
+        ]
 
         with pytest.raises(EsptoolFlashFailedError):
             async for _ in Esp32Flasher(
@@ -355,6 +371,41 @@ def test_serial_reader_success_timeout_and_error_translation() -> None:
                     read_error=OSError(errno.EIO, "disconnected"),
                 )
             ).read("/dev/ttyUSB0", 115200, SerialReadRequest(timeout_seconds=0.1))
+        with pytest.raises(SerialCloseFailedError) as close_failure:
+            await Esp32SerialReader(
+                FakeSerialFactory(
+                    [b"READY\n"],
+                    close_error=OSError(errno.EIO, "close failed"),
+                )
+            ).read(
+                "/dev/ttyUSB0",
+                115200,
+                SerialReadRequest(timeout_seconds=0.1, until_pattern="READY"),
+            )
+        assert close_failure.value.details["captured_lines"][0]["text"] == "READY"
+
+        with pytest.raises(SerialMessageTooLargeError):
+            await Esp32SerialReader(
+                FakeSerialFactory([b"message-too-long\n"]),
+                maximum_message_bytes=4,
+            ).read(
+                "/dev/ttyUSB0",
+                115200,
+                SerialReadRequest(timeout_seconds=0.1),
+            )
+        with pytest.raises(SerialCaptureTooLargeError) as capture_failure:
+            await Esp32SerialReader(
+                FakeSerialFactory([b"one\n", b"two\n", b"three\n"]),
+                maximum_capture_bytes=8,
+            ).read(
+                "/dev/ttyUSB0",
+                115200,
+                SerialReadRequest(timeout_seconds=0.1, max_lines=3),
+            )
+        assert [line["text"] for line in capture_failure.value.details["captured_lines"]] == [
+            "one",
+            "two",
+        ]
 
     asyncio.run(scenario())
 
@@ -515,6 +566,12 @@ def test_async_process_runner_streams_times_out_and_cancels() -> None:
         )
         assert result.returncode == 0
         assert {line.stream for line in captured} == {"stdout", "stderr"}
+
+        bounded = await AsyncSubprocessRunner(maximum_capture_bytes=13).run(
+            [sys.executable, "-c", "print('first'); print('second'); print('third')"],
+            timeout_seconds=2,
+        )
+        assert bounded.stdout == ("second", "third")
 
         with pytest.raises(ProcessExecutionTimeoutError):
             await runner.run(

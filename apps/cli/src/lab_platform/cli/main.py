@@ -5,13 +5,28 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
+import threading
 import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import yaml
+from lab_platform.cli.ci_environment import detect_ci_environment
+from lab_platform.cli.ci_exit_codes import (
+    CiExitCode,
+    exit_code_for_error,
+    exit_code_for_status,
+)
+from lab_platform.cli.ci_summary import (
+    CiSummaryStep,
+    HardwareCiSummary,
+    append_github_summary,
+)
 from lab_platform.cli.client import AgentApiError, AgentClient, AgentConnectionError
 from lab_platform.config import validate_config
 from pydantic import ValidationError
@@ -19,6 +34,18 @@ from pydantic import ValidationError
 DEFAULT_SERVER = "http://127.0.0.1:8080"
 DEFAULT_MAX_FIRMWARE_BYTES = 100 * 1024 * 1024
 _DURATION_PART = re.compile(r"(?P<value>\d+)(?P<unit>[hms])", re.IGNORECASE)
+_CI_ASSIGNMENT_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "cleanup_pending", "completed"}
+)
+_CI_WORKFLOW_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+class _CiArtifactUploadError(RuntimeError):
+    """A local artifact could not be prepared for a CI upload."""
+
+
+class _CiBenchWaitTimeout(RuntimeError):
+    """The client-side bench wait deadline elapsed before assignment."""
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -27,12 +54,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _dispatch(args)
     except AgentApiError as exc:
         print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
+        if args.command == "ci":
+            return int(exit_code_for_error(exc.code, http_status=exc.status))
         return _api_exit_code(exc)
     except AgentConnectionError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if args.command == "ci":
+            return int(CiExitCode.CLIENT_OR_PROTOCOL_ERROR)
         return 6
+    except _CiArtifactUploadError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return int(CiExitCode.ARTIFACT_UPLOAD_FAILED)
+    except KeyboardInterrupt:
+        print("Hardware CI cancelled.", file=sys.stderr)
+        return int(CiExitCode.WORKFLOW_CANCELLED)
     except (OSError, ValueError, ValidationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if args.command == "ci":
+            return int(CiExitCode.CLIENT_OR_PROTOCOL_ERROR)
         return 1
 
 
@@ -66,6 +105,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _reservation_command(client, args)
     if args.command == "workflow":
         return _workflow_command(client, args)
+    if args.command == "token":
+        return _token_command(client, args)
+    if args.command == "ci":
+        return _ci_command(client, args)
     if args.command == "operation":
         return _operation_command(client, args)
     if args.command == "event":
@@ -313,7 +356,1087 @@ def _workflow_command(client: AgentClient, args: argparse.Namespace) -> int:
         else:
             print(f"Cancellation requested for workflow run {args.workflow_run_id}.")
         return 0
+    if command == "results":
+        if args.format == "junit":
+            content: object = client.get_text(
+                f"/api/v1/workflow-runs/{args.workflow_run_id}/results/junit"
+            )
+            if args.output is not None:
+                _write_atomic(args.output, str(content).encode("utf-8"))
+            else:
+                print(content, end="" if str(content).endswith("\n") else "\n")
+        else:
+            content = client.get(f"/api/v1/workflow-runs/{args.workflow_run_id}/results")
+            if args.output is not None:
+                _write_atomic(
+                    args.output,
+                    (json.dumps(content, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                )
+            else:
+                _print_json(content)
+        return 0
     raise AssertionError("unreachable workflow command")
+
+
+def _token_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = args.token_command
+    if command == "create":
+        payload = client.post(
+            "/api/v1/tokens",
+            {
+                "name": args.name,
+                "owner": args.owner,
+                "scopes": args.scope,
+                "expires_at": args.expires_at,
+            },
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            token = _require_mapping(payload, "API token")
+            print(f"Token ID: {token.get('id', '')}")
+            print(f"Owner:    {token.get('owner', '')}")
+            print(f"Token:    {token.get('token', '')}")
+            print("Store this token now; it will not be shown again.")
+        return 0
+    if command == "list":
+        payload = client.get("/api/v1/tokens")
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            items = _require_list(_require_mapping(payload, "tokens").get("items"), "tokens")
+            rows: list[tuple[str, ...]] = []
+            for item in items:
+                token = _require_mapping(item, "token")
+                rows.append(
+                    (
+                        str(token.get("id", "")),
+                        str(token.get("name", "")),
+                        str(token.get("owner", "")),
+                        "Revoked" if token.get("revoked_at") else "Active",
+                    )
+                )
+            _print_table(("ID", "NAME", "OWNER", "STATUS"), rows)
+        return 0
+    if command == "revoke":
+        payload = client.post(f"/api/v1/tokens/{args.token_id}/revoke", {})
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            print(f"Revoked API token {args.token_id}.")
+        return 0
+    raise AssertionError("unreachable token command")
+
+
+def _ci_command(client: AgentClient, args: argparse.Namespace) -> int:
+    if args.ci_command == "session":
+        return _ci_session_command(client, args)
+    if args.ci_command == "run":
+        return _ci_run(client, args)
+    if args.ci_command == "upload":
+        try:
+            checksum = args.sha256 or _validate_firmware(args.path)[0]
+        except (OSError, ValueError) as exc:
+            raise _CiArtifactUploadError(str(exc)) from exc
+        payload = client.upload_artifact(
+            "/api/v1/artifacts",
+            args.path,
+            name=args.name or args.path.name,
+            artifact_type=args.artifact_type,
+            ci_session_id=args.session_id,
+            checksum=checksum,
+            idempotency_key=args.idempotency_key,
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            artifact = _require_mapping(payload, "artifact")
+            print(f"Artifact uploaded: {artifact.get('id', '')}")
+        return 0
+    if args.ci_command == "artifacts":
+        payload = client.get(f"/api/v1/ci/sessions/{args.session_id}/artifacts")
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            _ci_artifact_table(
+                _require_list(_require_mapping(payload, "artifacts").get("items"), "artifacts")
+            )
+        return 0
+    if args.ci_command == "download":
+        _write_atomic(
+            args.output,
+            client.download(f"/api/v1/artifacts/{args.artifact_id}/content"),
+        )
+        print(f"Downloaded artifact to {args.output}.")
+        return 0
+    raise AssertionError("unreachable CI command")
+
+
+def _ci_session_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = args.ci_session_command
+    if command == "create":
+        environment = detect_ci_environment()
+        payload: dict[str, object] = dict(environment.as_payload())
+        for key, value in {
+            "external_run_id": args.external_run_id,
+            "repository": args.repository,
+            "ref": args.ref,
+            "commit_sha": args.commit_sha,
+            "actor": args.actor,
+        }.items():
+            if value is not None:
+                payload[key] = value
+        payload["bench_request"] = _ci_bench_request(args)
+        response = client.post(
+            "/api/v1/ci/sessions",
+            payload,
+            idempotency_key=args.idempotency_key or environment.idempotency_key,
+        )
+        _print_ci_session(response, args.output)
+        return 0
+    session_id = str(args.session_id)
+    if command == "show":
+        _print_ci_session(client.get(f"/api/v1/ci/sessions/{session_id}"), args.output)
+        return 0
+    if command == "watch":
+        return _watch_ci_session(client, session_id, args)
+    if command == "cancel":
+        current = _require_mapping(client.get(f"/api/v1/ci/sessions/{session_id}"), "CI session")
+        response = _cancel_and_finalize_ci_session(
+            client,
+            session_id,
+            idempotency_key=args.idempotency_key,
+            session=current,
+        )
+        if response is not None:
+            _print_ci_session(response, args.output)
+            return int(_ci_exit_for_session(response))
+        return int(CiExitCode.WORKFLOW_CANCELLED)
+    if command == "finalize":
+        current = _require_mapping(client.get(f"/api/v1/ci/sessions/{session_id}"), "CI session")
+        response = client.post(
+            f"/api/v1/ci/sessions/{session_id}/finalize",
+            {},
+            idempotency_key=args.idempotency_key,
+            timeout=_ci_cleanup_request_timeout(current),
+        )
+        _print_ci_session(response, args.output)
+        return int(_ci_exit_for_session(_require_mapping(response, "CI session")))
+    raise AssertionError("unreachable CI session command")
+
+
+def _ci_run(client: AgentClient, args: argparse.Namespace) -> int:
+    environment = detect_ci_environment()
+    session_id: str | None = None
+    session_configuration: dict[str, object] | None = None
+    workflow_run_id: str | None = None
+    finalized = False
+    heartbeat: _CiHeartbeatWorker | None = None
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def terminate(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    def stop_heartbeat() -> None:
+        nonlocal heartbeat
+        if heartbeat is not None:
+            heartbeat.stop()
+            heartbeat = None
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        created = _require_mapping(
+            client.post(
+                "/api/v1/ci/sessions",
+                {
+                    **environment.as_payload(),
+                    "bench_request": _ci_bench_request(args),
+                },
+                idempotency_key=environment.idempotency_key,
+            ),
+            "CI session",
+        )
+        session_id = str(created.get("id", ""))
+        session_configuration = created
+        if not session_id:
+            raise ValueError("Agent did not return a CI session ID")
+        if str(created.get("status", "")).casefold() != "completed":
+            heartbeat = _CiHeartbeatWorker(
+                client,
+                session_id,
+                interval_seconds=_ci_heartbeat_interval(created),
+            )
+            heartbeat.start()
+        created_status = str(created.get("status", "")).casefold()
+        if args.output == "table":
+            verb = "resumed" if created_status in {"running", "completed"} else "created"
+            print(f"CI session {verb}: {session_id}")
+        session = created
+        if created_status in {"created", "waiting_for_bench"}:
+            if args.output == "table":
+                print("Finding compatible bench...")
+            session = _wait_for_ci_assignment(client, session_id, args)
+            session_configuration = session
+        session_status = str(session.get("status", "")).casefold()
+        if session_status == "completed":
+            stop_heartbeat()
+            finalized = True
+            return _finish_ci_run(
+                client,
+                session,
+                workflow_run_id=_optional_text(session.get("workflow_run_id")),
+                args=args,
+            )
+
+        terminal = session
+        if session_status == "reserved":
+            if args.output == "table":
+                print(f"Assigned: {session.get('bench_id', '')}")
+            artifact_references: dict[str, dict[str, str]] = {}
+            for specification in args.artifact:
+                name, path_text = _key_value(specification, "artifact")
+                path = Path(path_text)
+                try:
+                    checksum, _size = _validate_firmware(path)
+                except (OSError, ValueError) as exc:
+                    raise _CiArtifactUploadError(str(exc)) from exc
+                artifact = _require_mapping(
+                    client.upload_artifact(
+                        "/api/v1/artifacts",
+                        path,
+                        name=path.name,
+                        artifact_type="firmware" if name == "firmware" else "input",
+                        ci_session_id=session_id,
+                        checksum=checksum,
+                        idempotency_key=f"{environment.idempotency_key}:artifact:{name}",
+                    ),
+                    "artifact",
+                )
+                artifact_id = str(artifact.get("id", ""))
+                if not artifact_id:
+                    raise ValueError("Agent did not return an artifact ID")
+                artifact_references[name] = {"artifact_id": artifact_id}
+                if args.output == "table":
+                    print(f"Uploaded {path.name}.")
+
+            workflow_inputs: dict[str, object] = dict(_workflow_inputs(args.input))
+            workflow_inputs.update(artifact_references)
+            running = _require_mapping(
+                client.post(
+                    f"/api/v1/ci/sessions/{session_id}/run",
+                    {"workflow_name": args.workflow, "inputs": workflow_inputs},
+                    idempotency_key=f"{environment.idempotency_key}:workflow",
+                ),
+                "CI workflow",
+            )
+            workflow_run_id = _optional_text(running.get("workflow_run_id"))
+            if workflow_run_id is None:
+                raise ValueError("Agent did not return a workflow run ID")
+            terminal = _watch_ci_workflow(client, session_id, workflow_run_id, args)
+            session_configuration = terminal
+        elif session_status == "running":
+            workflow_run_id = _optional_text(session.get("workflow_run_id"))
+            if workflow_run_id is None:
+                raise ValueError("Running CI session did not include a workflow run ID")
+            if args.output == "table":
+                print(f"Resuming workflow run: {workflow_run_id}")
+            terminal = _watch_ci_workflow(client, session_id, workflow_run_id, args)
+            session_configuration = terminal
+        elif session_status not in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+            raise ValueError(
+                f"Agent returned unexpected CI session status: {session_status or 'missing'}"
+            )
+
+        if workflow_run_id is None:
+            workflow_run_id = _optional_text(terminal.get("workflow_run_id"))
+        terminal_status = str(terminal.get("status", "")).casefold()
+        finalized_payload = terminal
+        stop_heartbeat()
+        if terminal_status != "completed":
+            finalized_payload = _require_mapping(
+                client.post(
+                    f"/api/v1/ci/sessions/{session_id}/finalize",
+                    {},
+                    idempotency_key=f"{environment.idempotency_key}:finalize",
+                    timeout=_ci_cleanup_request_timeout(terminal),
+                ),
+                "finalized CI session",
+            )
+        finalized = True
+        return _finish_ci_run(
+            client,
+            finalized_payload,
+            workflow_run_id=workflow_run_id,
+            args=args,
+        )
+    except _CiBenchWaitTimeout as exc:
+        stop_heartbeat()
+        cancelled: dict[str, object] | None = None
+        if session_id is not None:
+            cancelled = _cancel_and_finalize_ci_session(
+                client,
+                session_id,
+                session=session_configuration,
+                best_effort=True,
+            )
+        print(f"error: {exc}", file=sys.stderr)
+        if cancelled is not None and _ci_exit_for_session(cancelled) is CiExitCode.CLEANUP_FAILED:
+            return int(CiExitCode.CLEANUP_FAILED)
+        return int(CiExitCode.BENCH_WAIT_TIMEOUT)
+    except KeyboardInterrupt:
+        stop_heartbeat()
+        cancelled = None
+        if session_id is not None:
+            cancelled = _cancel_and_finalize_ci_session(
+                client,
+                session_id,
+                session=session_configuration,
+                best_effort=True,
+            )
+        if cancelled is not None:
+            return _finish_ci_run(
+                client,
+                cancelled,
+                workflow_run_id=workflow_run_id or _optional_text(cancelled.get("workflow_run_id")),
+                args=args,
+            )
+        return int(CiExitCode.WORKFLOW_CANCELLED)
+    except Exception:
+        stop_heartbeat()
+        if session_id is not None and not finalized:
+            _cancel_and_finalize_ci_session(
+                client,
+                session_id,
+                session=session_configuration,
+                best_effort=True,
+            )
+        raise
+    finally:
+        stop_heartbeat()
+        signal.signal(signal.SIGTERM, previous_term)
+
+
+def _watch_ci_session(
+    client: AgentClient,
+    session_id: str,
+    args: argparse.Namespace,
+) -> int:
+    interval = _ci_poll_interval(args)
+    previous: tuple[object, object] | None = None
+    latest: dict[str, object] | None = None
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def terminate(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        while True:
+            latest = _require_mapping(client.get(f"/api/v1/ci/sessions/{session_id}"), "CI session")
+            current = (latest.get("status"), latest.get("bench_id"))
+            if current != previous and args.output == "table":
+                print(
+                    f"{str(latest.get('status', '')).replace('_', ' ').title()}"
+                    + (f" — {latest.get('bench_id')}" if latest.get("bench_id") else "")
+                )
+            if str(latest.get("status", "")).casefold() == "completed":
+                if args.output == "json":
+                    _print_json(latest)
+                return int(_ci_exit_for_session(latest))
+            client.post(f"/api/v1/ci/sessions/{session_id}/heartbeat", {})
+            previous = current
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        cancelled = _cancel_and_finalize_ci_session(
+            client,
+            session_id,
+            session=latest,
+            best_effort=True,
+        )
+        if cancelled is not None:
+            _print_ci_session(cancelled, args.output)
+            return int(_ci_exit_for_session(cancelled))
+        return int(CiExitCode.WORKFLOW_CANCELLED)
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+
+class _CiHeartbeatWorker:
+    """Maintain a session heartbeat while the synchronous CLI performs I/O."""
+
+    def __init__(
+        self,
+        client: AgentClient,
+        session_id: str,
+        *,
+        interval_seconds: float,
+    ) -> None:
+        self._client = client
+        self._session_id = session_id
+        self._interval_seconds = interval_seconds
+        self._request_timeout_seconds = min(5.0, max(1.0, interval_seconds / 2))
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"labctl-ci-heartbeat-{session_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._thread.join(timeout=self._request_timeout_seconds + 0.5)
+
+    def _run(self) -> None:
+        while not self._stopped.wait(self._interval_seconds):
+            try:
+                self._client.post(
+                    f"/api/v1/ci/sessions/{self._session_id}/heartbeat",
+                    {},
+                    timeout=self._request_timeout_seconds,
+                )
+            except (AgentApiError, AgentConnectionError, ValueError):
+                # The foreground request reports actionable transport/API errors.
+                # Heartbeats continue so a transient failure can recover.
+                continue
+
+
+def _finish_ci_run(
+    client: AgentClient,
+    finalized_session: dict[str, object],
+    *,
+    workflow_run_id: str | None,
+    args: argparse.Namespace,
+) -> int:
+    exit_code = _ci_exit_for_session(
+        finalized_session,
+        workflow_run_id=workflow_run_id,
+        client=client,
+    )
+    best_effort_diagnostics = exit_code is not CiExitCode.SUCCESS
+    _download_ci_outputs(
+        client,
+        finalized_session,
+        workflow_run_id=workflow_run_id,
+        junit_output=args.junit_output,
+        artifacts_directory=args.artifacts_directory,
+        output=args.output,
+        best_effort=best_effort_diagnostics,
+    )
+    try:
+        _publish_ci_integration_outputs(client, finalized_session, workflow_run_id, args)
+    except (AgentApiError, AgentConnectionError, OSError, ValueError) as exc:
+        if not best_effort_diagnostics:
+            raise
+        print(
+            f"warning: diagnostics publication incomplete: {exc}",
+            file=sys.stderr,
+        )
+    if args.output == "json":
+        _print_json(finalized_session)
+    else:
+        print(
+            "Cleanup complete."
+            if finalized_session.get("cleanup_status") == "succeeded"
+            else "Cleanup failed."
+        )
+        outcome = str(finalized_session.get("outcome", ""))
+        print(f"Hardware CI: {outcome.replace('_', ' ').title()}")
+    return int(exit_code)
+
+
+def _ci_bench_request(args: argparse.Namespace) -> dict[str, object]:
+    capabilities: set[str] = set()
+    for specification in args.require:
+        kind, value = _key_value(specification, "requirement")
+        if kind != "capability":
+            raise ValueError("CI requirements must use capability=<name>")
+        capabilities.add(value.casefold())
+
+    required_labels = _key_value_map(args.label, "label")
+    preferred_labels = _key_value_map(args.prefer_label, "preferred label")
+    if not args.allow_simulated and not args.allow_physical:
+        raise ValueError("at least one of simulated or physical benches must be allowed")
+    return {
+        "explicit_bench_id": args.bench,
+        "required_capabilities": sorted(capabilities),
+        "required_labels": required_labels,
+        "preferred_labels": preferred_labels,
+        "allow_simulated": bool(args.allow_simulated),
+        "allow_physical": bool(args.allow_physical),
+        "maximum_wait_seconds": parse_duration(str(args.wait_timeout)),
+        "reservation_duration_seconds": parse_duration(str(args.reservation_duration)),
+    }
+
+
+def _wait_for_ci_assignment(
+    client: AgentClient,
+    session_id: str,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    deadline = time.monotonic() + parse_duration(str(args.wait_timeout))
+    interval = _ci_poll_interval(args)
+    previous_status: str | None = None
+    while True:
+        session = _require_mapping(
+            client.get(f"/api/v1/ci/sessions/{session_id}"),
+            "CI session",
+        )
+        status = str(session.get("status", "")).casefold()
+        if status == "reserved":
+            return session
+        if status in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+            if status == "completed":
+                return session
+            return _require_mapping(
+                client.post(
+                    f"/api/v1/ci/sessions/{session_id}/finalize",
+                    {},
+                    idempotency_key=f"ci-session:{session_id}:client-finalize",
+                    timeout=_ci_cleanup_request_timeout(session),
+                ),
+                "finalized CI session",
+            )
+        if status not in {"created", "waiting_for_bench"}:
+            raise ValueError(f"Agent returned unexpected CI session status: {status or 'missing'}")
+        if args.output == "table" and status != previous_status:
+            print(status.replace("_", " ").title())
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _CiBenchWaitTimeout("Timed out waiting for a compatible bench")
+        client.post(f"/api/v1/ci/sessions/{session_id}/heartbeat", {})
+        previous_status = status
+        time.sleep(min(interval, remaining))
+
+
+def _watch_ci_workflow(
+    client: AgentClient,
+    session_id: str,
+    workflow_run_id: str,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    previous_steps: dict[int, str] = {}
+    previous_run_status: str | None = None
+    interval = _ci_poll_interval(args)
+    while True:
+        run = _require_mapping(
+            client.get(f"/api/v1/workflow-runs/{workflow_run_id}"),
+            "workflow run",
+        )
+        run_status = str(run.get("status", "")).casefold()
+        if not run_status:
+            raise ValueError("Agent returned a workflow run without a status")
+        steps = _require_list(run.get("steps", []), "workflow steps")
+        if args.output == "table":
+            _print_ci_progress(steps, previous_steps)
+            if not steps and run_status != previous_run_status:
+                print(f"Workflow: {run_status.replace('_', ' ').title()}")
+
+        session = _require_mapping(
+            client.get(f"/api/v1/ci/sessions/{session_id}"),
+            "CI session",
+        )
+        session_status = str(session.get("status", "")).casefold()
+        if run_status in _CI_WORKFLOW_TERMINAL_STATUSES:
+            return session
+        if session_status in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+            return session
+        if run_status not in {"pending", "running", "cancel_requested"}:
+            raise ValueError(f"Agent returned unexpected workflow status: {run_status}")
+        client.post(f"/api/v1/ci/sessions/{session_id}/heartbeat", {})
+        previous_run_status = run_status
+        time.sleep(interval)
+
+
+def _print_ci_progress(steps: list[object], previous: dict[int, str]) -> None:
+    total = len(steps)
+    for fallback_index, item in enumerate(steps):
+        step = _require_mapping(item, "workflow step")
+        raw_index = step.get("step_index")
+        index = raw_index if isinstance(raw_index, int) else fallback_index
+        status = str(step.get("status", "")).casefold()
+        if not status or previous.get(index) == status:
+            continue
+        if status != "pending":
+            name = str(step.get("name") or step.get("action") or f"Step {index + 1}")
+            print(f"[{index + 1}/{total}] {name} — {status.replace('_', ' ').title()}")
+        previous[index] = status
+
+
+def _cancel_and_finalize_ci_session(
+    client: AgentClient,
+    session_id: str,
+    *,
+    idempotency_key: str | None = None,
+    wait_seconds: float = 2.0,
+    poll_interval: float = 0.2,
+    session: dict[str, object] | None = None,
+    best_effort: bool = False,
+) -> dict[str, object] | None:
+    latest: dict[str, object] | None = None
+    failure: Exception | None = None
+    cleanup_timeout = _ci_cleanup_request_timeout(session)
+    try:
+        latest = _require_mapping(
+            client.post(
+                f"/api/v1/ci/sessions/{session_id}/cancel",
+                {},
+                timeout=cleanup_timeout,
+            ),
+            "cancelled CI session",
+        )
+    except (AgentApiError, AgentConnectionError, ValueError) as exc:
+        failure = exc
+
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while latest is not None and time.monotonic() < deadline:
+        status = str(latest.get("status", "")).casefold()
+        if status in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+            break
+        try:
+            latest = _require_mapping(
+                client.get(f"/api/v1/ci/sessions/{session_id}"),
+                "CI session",
+            )
+        except (AgentApiError, AgentConnectionError, ValueError):
+            break
+        if str(latest.get("status", "")).casefold() in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+            break
+        time.sleep(min(max(0.01, poll_interval), max(0.0, deadline - time.monotonic())))
+
+    try:
+        latest = _require_mapping(
+            client.post(
+                f"/api/v1/ci/sessions/{session_id}/finalize",
+                {},
+                idempotency_key=idempotency_key
+                or f"ci-session:{session_id}:client-cancel-finalize",
+                timeout=cleanup_timeout,
+            ),
+            "finalized CI session",
+        )
+    except (AgentApiError, AgentConnectionError, ValueError) as exc:
+        if failure is None:
+            failure = exc
+
+    if failure is not None and not best_effort:
+        raise failure
+    return latest
+
+
+def _download_ci_outputs(
+    client: AgentClient,
+    session: dict[str, object],
+    *,
+    workflow_run_id: str | None,
+    junit_output: Path | None,
+    artifacts_directory: Path | None,
+    output: str,
+    best_effort: bool = False,
+) -> list[str]:
+    downloaded: list[str] = []
+    if junit_output is not None and workflow_run_id is not None:
+        try:
+            junit = client.get_text(f"/api/v1/workflow-runs/{workflow_run_id}/results/junit")
+            _write_atomic(junit_output, junit.encode("utf-8"))
+        except (AgentApiError, AgentConnectionError, OSError, ValueError) as exc:
+            if not best_effort:
+                raise
+            _warn_incomplete_diagnostics("JUnit XML", exc)
+
+    if artifacts_directory is None and (junit_output is None or workflow_run_id is not None):
+        return downloaded
+    session_id = str(session.get("id", ""))
+    if not session_id:
+        error = ValueError("Agent did not return a CI session ID for artifact download")
+        if not best_effort:
+            raise error
+        _warn_incomplete_diagnostics("artifact listing", error)
+        return downloaded
+    try:
+        payload = _require_mapping(
+            client.get(f"/api/v1/ci/sessions/{session_id}/artifacts"),
+            "CI artifacts",
+        )
+        artifacts = _require_list(payload.get("items"), "CI artifacts")
+    except (AgentApiError, AgentConnectionError, OSError, ValueError) as exc:
+        if not best_effort:
+            raise
+        _warn_incomplete_diagnostics("artifact listing", exc)
+        return downloaded
+    if junit_output is not None and workflow_run_id is None:
+        try:
+            junit_artifact = next(
+                (
+                    _require_mapping(item, "artifact")
+                    for item in artifacts
+                    if _require_mapping(item, "artifact").get("artifact_type") == "junit"
+                ),
+                None,
+            )
+            if junit_artifact is None:
+                raise ValueError("Finalized CI session did not provide a JUnit artifact")
+            junit_artifact_id = str(junit_artifact.get("id", ""))
+            if not junit_artifact_id:
+                raise ValueError("Agent returned a JUnit artifact without an ID")
+            _write_atomic(
+                junit_output,
+                client.download(f"/api/v1/artifacts/{junit_artifact_id}/content"),
+            )
+        except (AgentApiError, AgentConnectionError, OSError, ValueError) as exc:
+            if not best_effort:
+                raise
+            _warn_incomplete_diagnostics("JUnit artifact", exc)
+
+    if artifacts_directory is None:
+        return downloaded
+    try:
+        artifacts_directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        if not best_effort:
+            raise
+        _warn_incomplete_diagnostics("artifact directory", exc)
+        return downloaded
+    seen_names: set[str] = set()
+    if output == "table" and artifacts:
+        print("Downloading artifacts:")
+    for item in artifacts:
+        try:
+            artifact = _require_mapping(item, "artifact")
+            artifact_id = str(artifact.get("id", ""))
+            if not artifact_id:
+                raise ValueError("Agent returned an artifact without an ID")
+            name = _safe_artifact_filename(str(artifact.get("name", "")))
+            if name in seen_names:
+                path = Path(name)
+                suffix = f"-{artifact_id[:8]}"
+                name = f"{path.stem}{suffix}{path.suffix}"
+                counter = 2
+                while name in seen_names:
+                    name = f"{path.stem}{suffix}-{counter}{path.suffix}"
+                    counter += 1
+            seen_names.add(name)
+            _write_atomic(
+                artifacts_directory / name,
+                client.download(f"/api/v1/artifacts/{artifact_id}/content"),
+            )
+            downloaded.append(name)
+            if output == "table":
+                print(f"✓ {name}")
+        except (AgentApiError, AgentConnectionError, OSError, ValueError) as exc:
+            if not best_effort:
+                raise
+            _warn_incomplete_diagnostics("artifact download", exc)
+    return downloaded
+
+
+def _warn_incomplete_diagnostics(kind: str, error: Exception) -> None:
+    print(
+        f"warning: diagnostics download incomplete ({kind}): {error}",
+        file=sys.stderr,
+    )
+
+
+def _publish_ci_integration_outputs(
+    client: AgentClient,
+    session: dict[str, object],
+    workflow_run_id: str | None,
+    args: argparse.Namespace,
+) -> None:
+    steps: list[CiSummaryStep] = []
+    artifact_names: list[str] = []
+    if workflow_run_id is not None:
+        try:
+            workflow = _require_mapping(
+                client.get(f"/api/v1/workflow-runs/{workflow_run_id}"),
+                "workflow run",
+            )
+            for item in _require_list(workflow.get("steps", []), "workflow steps"):
+                step = _require_mapping(item, "workflow step")
+                steps.append(
+                    CiSummaryStep(
+                        name=str(step.get("name") or step.get("action") or "Workflow step"),
+                        status=str(step.get("status", "unknown")),
+                    )
+                )
+        except (AgentApiError, AgentConnectionError, ValueError):
+            pass
+
+    session_id = str(session.get("id", ""))
+    if session_id:
+        try:
+            artifacts = _require_mapping(
+                client.get(f"/api/v1/ci/sessions/{session_id}/artifacts"),
+                "CI artifacts",
+            )
+            artifact_names = [
+                str(_require_mapping(item, "artifact").get("name", ""))
+                for item in _require_list(artifacts.get("items"), "CI artifacts")
+            ]
+        except (AgentApiError, AgentConnectionError, ValueError):
+            pass
+
+    inputs = _workflow_inputs(args.input)
+    outcome = str(session.get("outcome") or session.get("status") or "unknown")
+    append_github_summary(
+        HardwareCiSummary(
+            status=outcome.replace("_", " ").title(),
+            bench_id=_optional_text(session.get("bench_id")),
+            backend=_optional_text(session.get("backend")),
+            firmware=inputs.get("expected_version"),
+            duration_seconds=_ci_duration_seconds(session),
+            steps=tuple(steps),
+            artifacts=tuple(name for name in artifact_names if name),
+            cleanup_status=_optional_text(session.get("cleanup_status")),
+        )
+    )
+    _append_github_outputs(
+        {
+            "session-id": session_id,
+            "bench-id": str(session.get("bench_id") or ""),
+            "workflow-run-id": workflow_run_id or "",
+            "result": outcome,
+            "artifact-directory": (
+                str(args.artifacts_directory) if args.artifacts_directory is not None else ""
+            ),
+        }
+    )
+
+
+def _ci_exit_for_session(
+    session: dict[str, object],
+    *,
+    workflow_run_id: str | None = None,
+    client: AgentClient | None = None,
+) -> CiExitCode:
+    status = str(session.get("status", "")).casefold()
+    cleanup_status = str(session.get("cleanup_status", "")).casefold()
+    if cleanup_status == "failed" or (status == "completed" and cleanup_status != "succeeded"):
+        return CiExitCode.CLEANUP_FAILED
+
+    error_code = _ci_session_error_code(session)
+    if error_code is not None:
+        mapped = exit_code_for_error(error_code)
+        if mapped is not CiExitCode.CLIENT_OR_PROTOCOL_ERROR:
+            return mapped
+
+    outcome = str(session.get("outcome") or "").casefold()
+    if not outcome or outcome == "pending":
+        outcome = status
+    if outcome == "infrastructure_error":
+        return CiExitCode.BACKEND_UNAVAILABLE
+    if outcome == "failed" and client is not None and workflow_run_id:
+        workflow_code = _workflow_failure_exit_code(client, workflow_run_id)
+        if workflow_code is not None:
+            return workflow_code
+    if outcome in {
+        "succeeded",
+        "success",
+        "passed",
+        "failed",
+        "cancel_requested",
+        "cancelled",
+        "canceled",
+        "timed_out",
+        "timeout",
+        "abandoned",
+    }:
+        return exit_code_for_status(
+            outcome,
+            cleanup_succeeded=True,
+            error_code=error_code,
+        )
+    return CiExitCode.CLIENT_OR_PROTOCOL_ERROR
+
+
+def _workflow_failure_exit_code(
+    client: AgentClient,
+    workflow_run_id: str,
+) -> CiExitCode | None:
+    try:
+        workflow = _require_mapping(
+            client.get(f"/api/v1/workflow-runs/{workflow_run_id}"),
+            "workflow run",
+        )
+        error_code = _optional_text(workflow.get("error_code"))
+        if error_code is not None:
+            mapped = exit_code_for_error(error_code)
+            if mapped is not CiExitCode.CLIENT_OR_PROTOCOL_ERROR:
+                return mapped
+        payload = _require_mapping(
+            client.get(f"/api/v1/workflow-runs/{workflow_run_id}/results"),
+            "workflow results",
+        )
+        results = _require_list(payload.get("results"), "workflow results")
+    except (AgentApiError, AgentConnectionError, ValueError):
+        return None
+    statuses = {
+        str(_require_mapping(item, "test result").get("status", "")).casefold() for item in results
+    }
+    if "failed" in statuses:
+        return CiExitCode.HARDWARE_TEST_FAILED
+    if "error" in statuses:
+        return CiExitCode.WORKFLOW_FAILED
+    return None
+
+
+def _ci_session_error_code(session: dict[str, object]) -> str | None:
+    explicit = _optional_text(session.get("error_code"))
+    if explicit is not None:
+        return explicit
+    errors = session.get("errors")
+    if not isinstance(errors, list):
+        return None
+    for item in errors:
+        if not isinstance(item, str):
+            continue
+        candidate = item.partition(":")[0].strip()
+        if candidate and candidate.upper() == candidate and " " not in candidate:
+            return candidate
+    return None
+
+
+def _print_ci_session(payload: object, output: str) -> None:
+    session = _require_mapping(payload, "CI session")
+    if output == "json":
+        _print_json(session)
+        return
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Session", str(session.get("id", ""))),
+            ("Status", str(session.get("status", "")).replace("_", " ").title()),
+            ("Outcome", str(session.get("outcome", "")).replace("_", " ").title()),
+            ("Bench", str(session.get("bench_id") or "—")),
+            ("Workflow run", str(session.get("workflow_run_id") or "—")),
+            (
+                "Cleanup",
+                str(session.get("cleanup_status", "")).replace("_", " ").title(),
+            ),
+        ],
+    )
+
+
+def _ci_artifact_table(items: list[object]) -> None:
+    rows: list[tuple[str, ...]] = []
+    for item in items:
+        artifact = _require_mapping(item, "artifact")
+        rows.append(
+            (
+                str(artifact.get("id", "")),
+                str(artifact.get("name", "")),
+                str(artifact.get("artifact_type", "")),
+                str(artifact.get("size_bytes", "")),
+                str(artifact.get("sha256", "")),
+            )
+        )
+    _print_table(("ID", "NAME", "TYPE", "SIZE", "SHA-256"), rows)
+
+
+def _key_value(value: str, kind: str) -> tuple[str, str]:
+    key, separator, item_value = value.partition("=")
+    key = key.strip()
+    item_value = item_value.strip()
+    if not separator or not key or not item_value:
+        raise ValueError(f"{kind} must use key=value: {value}")
+    return key, item_value
+
+
+def _key_value_map(values: list[str], kind: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        key, item_value = _key_value(value, kind)
+        result[key] = item_value
+    return result
+
+
+def _safe_artifact_filename(value: str) -> str:
+    if not value or value in {".", ".."} or "/" in value or "\\" in value or "\x00" in value:
+        raise ValueError(f"Agent returned unsafe artifact name: {value!r}")
+    return value
+
+
+def _write_atomic(destination: Path, content: bytes) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _append_github_outputs(values: dict[str, str]) -> None:
+    destination = os.environ.get("GITHUB_OUTPUT")
+    if destination is None or not destination.strip():
+        return
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        for key, value in values.items():
+            if "\n" not in value and "\r" not in value:
+                stream.write(f"{key}={value}\n")
+                continue
+            delimiter = f"lab_platform_{uuid4().hex}"
+            stream.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
+def _ci_duration_seconds(session: dict[str, object]) -> float | None:
+    started = _parse_ci_datetime(session.get("started_at") or session.get("created_at"))
+    completed = _parse_ci_datetime(session.get("completed_at"))
+    if started is None or completed is None:
+        return None
+    return max(0.0, (completed - started).total_seconds())
+
+
+def _parse_ci_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _ci_poll_interval(args: argparse.Namespace) -> float:
+    interval = float(args.interval)
+    if interval <= 0:
+        raise ValueError("CI polling interval must be greater than zero")
+    return interval
+
+
+def _ci_heartbeat_interval(session: dict[str, object]) -> float:
+    return _ci_configured_seconds(session, "heartbeat_interval_seconds", default=30.0)
+
+
+def _ci_cleanup_request_timeout(session: dict[str, object] | None) -> float:
+    return _ci_configured_seconds(session, "cleanup_timeout_seconds", default=60.0) + 10.0
+
+
+def _ci_configured_seconds(
+    session: dict[str, object] | None,
+    name: str,
+    *,
+    default: float,
+) -> float:
+    value = None if session is None else session.get(name)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int | float) and value > 0:
+        return float(value)
+    return default
 
 
 def _watch_workflow(client: AgentClient, args: argparse.Namespace) -> int:
@@ -420,6 +1543,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="labctl")
     parser.add_argument("--server", "--url", dest="server", default=None)
     parser.add_argument("--config", type=Path, default=Path("~/.config/lab-platform/cli.yaml"))
+    parser.add_argument(
+        "--token-env",
+        default="LAB_PLATFORM_TOKEN",
+        help="Environment variable containing the API token (default: %(default)s).",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     _read_parser(commands.add_parser("version"))
@@ -521,6 +1649,65 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow_cancel = _read_parser(workflows.add_parser("cancel"))
     workflow_cancel.add_argument("workflow_run_id")
     workflow_cancel.add_argument("--owner", required=True)
+    workflow_results = workflows.add_parser("results")
+    workflow_results.add_argument("workflow_run_id")
+    workflow_results.add_argument("--format", choices=("json", "junit"), default="json")
+    workflow_results.add_argument("--output", type=Path)
+
+    token = commands.add_parser("token", help="Manage machine API tokens.")
+    token_commands = token.add_subparsers(dest="token_command", required=True)
+    token_create = _read_parser(token_commands.add_parser("create"))
+    token_create.add_argument("--name", required=True)
+    token_create.add_argument("--owner", required=True)
+    token_create.add_argument("--scope", action="append", required=True)
+    token_create.add_argument("--expires-at")
+    _read_parser(token_commands.add_parser("list"))
+    token_revoke = _read_parser(token_commands.add_parser("revoke"))
+    token_revoke.add_argument("token_id")
+
+    ci = commands.add_parser("ci", help="Run provider-neutral hardware CI sessions.")
+    ci_commands = ci.add_subparsers(dest="ci_command", required=True)
+    ci_session = ci_commands.add_parser("session")
+    ci_session_commands = ci_session.add_subparsers(dest="ci_session_command", required=True)
+    ci_session_create = _read_parser(ci_session_commands.add_parser("create"))
+    _add_ci_bench_request_arguments(ci_session_create)
+    ci_session_create.add_argument("--external-run-id")
+    ci_session_create.add_argument("--repository")
+    ci_session_create.add_argument("--ref")
+    ci_session_create.add_argument("--commit-sha")
+    ci_session_create.add_argument("--actor")
+    ci_session_create.add_argument("--idempotency-key")
+    ci_session_show = _read_parser(ci_session_commands.add_parser("show"))
+    ci_session_show.add_argument("session_id")
+    ci_session_watch = _read_parser(ci_session_commands.add_parser("watch"))
+    ci_session_watch.add_argument("session_id")
+    ci_session_watch.add_argument("--interval", type=float, default=2.0)
+    for name in ("cancel", "finalize"):
+        mutation = _read_parser(ci_session_commands.add_parser(name))
+        mutation.add_argument("session_id")
+        mutation.add_argument("--idempotency-key")
+
+    ci_run = _read_parser(ci_commands.add_parser("run"))
+    ci_run.add_argument("--workflow", required=True)
+    ci_run.add_argument("--artifact", action="append", default=[])
+    ci_run.add_argument("--input", action="append", default=[])
+    _add_ci_bench_request_arguments(ci_run)
+    ci_run.add_argument("--junit-output", type=Path)
+    ci_run.add_argument("--artifacts-directory", type=Path)
+    ci_run.add_argument("--interval", type=float, default=2.0)
+
+    ci_upload = _read_parser(ci_commands.add_parser("upload"))
+    ci_upload.add_argument("session_id")
+    ci_upload.add_argument("path", type=Path)
+    ci_upload.add_argument("--name")
+    ci_upload.add_argument("--artifact-type", default="firmware")
+    ci_upload.add_argument("--sha256")
+    ci_upload.add_argument("--idempotency-key")
+    ci_artifacts = _read_parser(ci_commands.add_parser("artifacts"))
+    ci_artifacts.add_argument("session_id")
+    ci_download = ci_commands.add_parser("download")
+    ci_download.add_argument("artifact_id")
+    ci_download.add_argument("--output", type=Path, required=True)
 
     operation = commands.add_parser("operation", help="Inspect asynchronous operations.")
     operations = operation.add_subparsers(dest="operation_command", required=True)
@@ -552,13 +1739,33 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_ci_bench_request_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--bench")
+    parser.add_argument("--require", action="append", default=[])
+    parser.add_argument("--label", action="append", default=[])
+    parser.add_argument("--prefer-label", action="append", default=[])
+    parser.add_argument(
+        "--allow-simulated",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--allow-physical",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--wait-timeout", default="10m")
+    parser.add_argument("--reservation-duration", default="30m")
+
+
 def _read_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--output", choices=("table", "json"), default="table")
     return parser
 
 
 def _client(args: argparse.Namespace) -> AgentClient:
-    return AgentClient(_resolve_server(args))
+    token_env = str(getattr(args, "token_env", "LAB_PLATFORM_TOKEN"))
+    return AgentClient(_resolve_server(args), token=os.environ.get(token_env))
 
 
 def _resolve_server(args: argparse.Namespace) -> str:
