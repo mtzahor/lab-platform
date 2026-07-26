@@ -1,0 +1,34 @@
+hardware-test:
+  stage: test
+  image: python:3.11
+  tags:
+    - lab-network
+  before_script:
+    - python -m pip install lab-platform==0.5.0a0
+  script:
+    - >-
+      labctl ci run
+      --workflow esp32-ci-test
+      --artifact firmware=build/firmware.bin
+      --input expected_version=$CI_COMMIT_SHA
+      --require capability=firmware
+      --require capability=serial
+      --require capability=reset
+      --require capability=probe
+      --label board=esp32
+      --allow-simulated
+      --allow-physical
+      --wait-timeout 10m
+      --reservation-duration 30m
+      --junit-output hardware-results.xml
+      --artifacts-directory hardware-artifacts
+  artifacts:
+    when: always
+    paths:
+      - hardware-results.xml
+      - hardware-artifacts/
+    reports:
+      junit: hardware-results.xml
+
+# Configure LAB_PLATFORM_SERVER and masked/protected LAB_PLATFORM_TOKEN CI/CD variables.
+# The token is consumed from the environment and must not be added to the script arguments.

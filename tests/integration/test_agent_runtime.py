@@ -107,7 +107,7 @@ def test_agent_starts_backend_database_plugins_and_is_idempotent(tmp_path: Path)
         assert [plugin.name for plugin in agent.plugins()] == ["power"]
         assert agent.health_payload() == {
             "status": "healthy",
-            "version": "0.4.0-alpha",
+            "version": "0.5.0-alpha",
             "backend": "simlab",
             "database": "healthy",
             "benches": {"total": 2, "online": 2},
@@ -155,7 +155,7 @@ def test_agent_cli_once_and_disabled_backend(
     _write_config(tmp_path, benches=2)
     assert agent_main(["--config-dir", str(tmp_path), "--once"]) == 0
     output = capsys.readouterr().out
-    assert "Lab Agent v0.4.0-alpha" in output
+    assert "Lab Agent v0.5.0-alpha" in output
     assert "✓ SimLab backend started" in output
     assert "✓ 2 benches registered" in output
 
@@ -232,7 +232,7 @@ def test_agent_composes_multiple_backend_instances(tmp_path: Path) -> None:
         ]
         assert agent.health_payload() == {
             "status": "healthy",
-            "version": "0.4.0-alpha",
+            "version": "0.5.0-alpha",
             "backend": "mixed",
             "backends": {"ids": ["virtual-a", "virtual-b"], "unavailable": []},
             "database": "healthy",

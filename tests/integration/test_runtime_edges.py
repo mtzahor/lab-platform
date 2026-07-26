@@ -122,9 +122,9 @@ def test_background_workers_are_idempotent_and_record_failures(
         agent = create_agent(tmp_path)
         await agent.start()
         try:
-            assert len(agent._background_tasks) == 2
+            assert len(agent._background_tasks) == 3
             await agent.start_background_workers()
-            assert len(agent._background_tasks) == 2
+            assert len(agent._background_tasks) == 3
 
             async def fail_refresh() -> object:
                 raise RuntimeError("inventory refresh exploded")

@@ -1,0 +1,49 @@
+name: ESP32 Hardware Test
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hardware-test:
+    runs-on: ubuntu-latest
+    env:
+      LAB_PLATFORM_SERVER: ${{ secrets.LAB_PLATFORM_SERVER }}
+      LAB_PLATFORM_TOKEN: ${{ secrets.LAB_PLATFORM_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build deterministic demo firmware
+        shell: bash
+        run: |
+          mkdir -p build
+          cp examples/firmware/demo.bin build/firmware.bin
+
+      - name: Run hardware test
+        id: hardware
+        if: ${{ env.LAB_PLATFORM_SERVER != '' && env.LAB_PLATFORM_TOKEN != '' }}
+        uses: ./integrations/github-action
+        with:
+          server: ${{ env.LAB_PLATFORM_SERVER }}
+          token: ${{ env.LAB_PLATFORM_TOKEN }}
+          workflow: esp32-ci-test
+          firmware: build/firmware.bin
+          expected-version: ${{ github.sha }}
+          required-labels: board=esp32,location=simulation
+          allow-simulated: "true"
+          allow-physical: "false"
+          wait-timeout: 10m
+
+      - name: Publish hardware-test results
+        uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.hardware.outcome != 'skipped' }}
+        with:
+          name: hardware-test-results
+          path: |
+            hardware-results.xml
+            hardware-artifacts/
+          if-no-files-found: warn

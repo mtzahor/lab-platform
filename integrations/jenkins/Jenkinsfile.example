@@ -1,0 +1,47 @@
+pipeline {
+    agent { label 'lab-network' }
+
+    environment {
+        LAB_PLATFORM_SERVER = credentials('lab-platform-server')
+        LAB_PLATFORM_TOKEN = credentials('lab-platform-token')
+    }
+
+    stages {
+        stage('Build firmware') {
+            steps {
+                sh './scripts/build-firmware.sh'
+            }
+        }
+
+        stage('Hardware test') {
+            steps {
+                sh '''
+                    set +x
+                    labctl ci run \
+                      --workflow esp32-ci-test \
+                      --artifact "firmware=build/firmware.bin" \
+                      --input "expected_version=${GIT_COMMIT}" \
+                      --require capability=firmware \
+                      --require capability=serial \
+                      --require capability=reset \
+                      --require capability=probe \
+                      --label board=esp32 \
+                      --allow-simulated \
+                      --allow-physical \
+                      --wait-timeout 10m \
+                      --reservation-duration 30m \
+                      --junit-output hardware-results.xml \
+                      --artifacts-directory hardware-artifacts
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            junit allowEmptyResults: true, testResults: 'hardware-results.xml'
+            archiveArtifacts allowEmptyArchive: true,
+                artifacts: 'hardware-results.xml,hardware-artifacts/**/*'
+        }
+    }
+}

@@ -31,6 +31,85 @@
         "title": "ApiError",
         "type": "object"
       },
+      "ApiTokenScope": {
+        "enum": [
+          "benches:read",
+          "reservations:write",
+          "workflows:run",
+          "operations:read",
+          "artifacts:read",
+          "artifacts:write",
+          "ci:sessions"
+        ],
+        "title": "ApiTokenScope",
+        "type": "string"
+      },
+      "BenchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_physical": {
+            "default": true,
+            "title": "Allow Physical",
+            "type": "boolean"
+          },
+          "allow_simulated": {
+            "default": true,
+            "title": "Allow Simulated",
+            "type": "boolean"
+          },
+          "explicit_bench_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Explicit Bench Id"
+          },
+          "maximum_wait_seconds": {
+            "default": 600,
+            "maximum": 86400.0,
+            "minimum": 0.0,
+            "title": "Maximum Wait Seconds",
+            "type": "integer"
+          },
+          "preferred_labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Preferred Labels",
+            "type": "object"
+          },
+          "required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Capabilities",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "required_labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Required Labels",
+            "type": "object"
+          },
+          "reservation_duration_seconds": {
+            "default": 1800,
+            "exclusiveMinimum": 0.0,
+            "maximum": 604800.0,
+            "title": "Reservation Duration Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "BenchRequest",
+        "type": "object"
+      },
       "Body_flash_api_v1_benches__bench_id__actions_flash_post": {
         "properties": {
           "firmware": {
@@ -61,6 +140,131 @@
           "firmware"
         ],
         "title": "Body_flash_api_v1_benches__bench_id__actions_flash_post",
+        "type": "object"
+      },
+      "Body_upload_artifact_api_v1_artifacts_post": {
+        "properties": {
+          "artifact_type": {
+            "default": "firmware",
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "ci_session_id": {
+            "format": "uuid",
+            "title": "Ci Session Id",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          }
+        },
+        "required": [
+          "file",
+          "ci_session_id"
+        ],
+        "title": "Body_upload_artifact_api_v1_artifacts_post",
+        "type": "object"
+      },
+      "CiProvider": {
+        "enum": [
+          "github_actions",
+          "gitlab_ci",
+          "jenkins",
+          "local",
+          "unknown"
+        ],
+        "title": "CiProvider",
+        "type": "string"
+      },
+      "CreateCiSessionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "bench_request": {
+            "$ref": "#/components/schemas/BenchRequest"
+          },
+          "commit_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Sha"
+          },
+          "external_run_id": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "External Run Id",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/CiProvider",
+            "default": "unknown"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository"
+          }
+        },
+        "required": [
+          "external_run_id"
+        ],
+        "title": "CreateCiSessionRequest",
         "type": "object"
       },
       "CreateReservationRequest": {
@@ -120,6 +324,51 @@
           "duration_seconds"
         ],
         "title": "CreateReservationRequest",
+        "type": "object"
+      },
+      "CreateTokenRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "owner": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Owner",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/ApiTokenScope"
+            },
+            "minItems": 1,
+            "title": "Scopes",
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "name",
+          "owner",
+          "scopes"
+        ],
+        "title": "CreateTokenRequest",
         "type": "object"
       },
       "ErrorEnvelope": {
@@ -265,6 +514,39 @@
         "title": "ReservationStatus",
         "type": "string"
       },
+      "RunCiWorkflowRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "additionalProperties": true,
+            "title": "Inputs",
+            "type": "object"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "workflow_name": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Workflow Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_name"
+        ],
+        "title": "RunCiWorkflowRequest",
+        "type": "object"
+      },
       "RunWorkflowRequest": {
         "additionalProperties": false,
         "properties": {
@@ -389,15 +671,187 @@
         "title": "TimelineCategory",
         "type": "string"
       }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "description": "Phase 4 scoped API token.",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
     "description": "Versioned local API for reserving and controlling lab benches.",
     "title": "Lab Platform Agent API",
-    "version": "0.4.0-alpha"
+    "version": "0.5.0-alpha"
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/artifacts": {
+      "post": {
+        "operationId": "upload_artifact_api_v1_artifacts_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_artifact_api_v1_artifacts_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Upload Artifact Api V1 Artifacts Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Upload Artifact",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}": {
+      "get": {
+        "operationId": "artifact_metadata_api_v1_artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Artifact Metadata Api V1 Artifacts  Artifact Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Artifact Metadata",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
+    "/api/v1/artifacts/{artifact_id}/content": {
+      "get": {
+        "operationId": "artifact_content_api_v1_artifacts__artifact_id__content_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Artifact file content."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Artifact Content",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
     "/api/v1/benches": {
       "get": {
         "operationId": "list_benches_api_v1_benches_get",
@@ -527,6 +981,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Benches"
       }
     },
@@ -566,6 +1025,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Bench"
       }
     },
@@ -615,6 +1079,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Flash"
       }
     },
@@ -664,6 +1133,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Power Cycle"
       }
     },
@@ -713,6 +1187,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Power Off"
       }
     },
@@ -762,6 +1241,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Power On"
       }
     },
@@ -811,6 +1295,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Probe"
       }
     },
@@ -860,6 +1349,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Read Serial"
       }
     },
@@ -909,6 +1403,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Reset"
       }
     },
@@ -950,6 +1449,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Queue"
       },
       "post": {
@@ -997,6 +1501,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Queue Reservation"
       }
     },
@@ -1039,6 +1548,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Release"
       },
       "get": {
@@ -1076,6 +1590,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Reservation"
       },
       "post": {
@@ -1123,6 +1642,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Reserve"
       }
     },
@@ -1226,7 +1750,420 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Bench Timeline"
+      }
+    },
+    "/api/v1/ci/sessions": {
+      "post": {
+        "operationId": "create_session_api_v1_ci_sessions_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCiSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Session Api V1 Ci Sessions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Create Session",
+        "tags": [
+          "ci-sessions"
+        ]
+      }
+    },
+    "/api/v1/ci/sessions/{session_id}": {
+      "get": {
+        "operationId": "get_session_api_v1_ci_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Session Api V1 Ci Sessions  Session Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Get Session",
+        "tags": [
+          "ci-sessions"
+        ]
+      }
+    },
+    "/api/v1/ci/sessions/{session_id}/artifacts": {
+      "get": {
+        "operationId": "session_artifacts_api_v1_ci_sessions__session_id__artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Session Artifacts Api V1 Ci Sessions  Session Id  Artifacts Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Session Artifacts",
+        "tags": [
+          "artifacts"
+        ]
+      }
+    },
+    "/api/v1/ci/sessions/{session_id}/cancel": {
+      "post": {
+        "operationId": "cancel_session_api_v1_ci_sessions__session_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Session Api V1 Ci Sessions  Session Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Cancel Session",
+        "tags": [
+          "ci-sessions"
+        ]
+      }
+    },
+    "/api/v1/ci/sessions/{session_id}/finalize": {
+      "post": {
+        "operationId": "finalize_session_api_v1_ci_sessions__session_id__finalize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Finalize Session Api V1 Ci Sessions  Session Id  Finalize Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Finalize Session",
+        "tags": [
+          "ci-sessions"
+        ]
+      }
+    },
+    "/api/v1/ci/sessions/{session_id}/heartbeat": {
+      "post": {
+        "operationId": "heartbeat_session_api_v1_ci_sessions__session_id__heartbeat_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Heartbeat Session Api V1 Ci Sessions  Session Id  Heartbeat Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Heartbeat Session",
+        "tags": [
+          "ci-sessions"
+        ]
+      }
+    },
+    "/api/v1/ci/sessions/{session_id}/run": {
+      "post": {
+        "operationId": "run_session_workflow_api_v1_ci_sessions__session_id__run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCiWorkflowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Session Workflow Api V1 Ci Sessions  Session Id  Run Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Run Session Workflow",
+        "tags": [
+          "ci-sessions"
+        ]
       }
     },
     "/api/v1/events": {
@@ -1336,6 +2273,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Events"
       }
     },
@@ -1458,6 +2400,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Operations"
       }
     },
@@ -1498,6 +2445,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Operation"
       }
     },
@@ -1540,6 +2492,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Operation Artifacts"
       }
     },
@@ -1584,6 +2541,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Read Serial Artifact"
       }
     },
@@ -1634,6 +2596,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Cancel Operation"
       }
     },
@@ -1677,6 +2644,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Cancel Queue"
       }
     },
@@ -1803,6 +2775,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Reservations"
       },
       "post": {
@@ -1839,6 +2816,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Create Reservation"
       }
     },
@@ -1879,6 +2861,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Reservation"
       }
     },
@@ -1929,6 +2916,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Cancel Reservation"
       }
     },
@@ -1979,6 +2971,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Extend Reservation"
       }
     },
@@ -2029,7 +3026,146 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Release Reservation"
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "operationId": "list_tokens_api_v1_tokens_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Tokens Api V1 Tokens Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "List Tokens",
+        "tags": [
+          "tokens"
+        ]
+      },
+      "post": {
+        "operationId": "create_token_api_v1_tokens_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Token Api V1 Tokens Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Create Token",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/api/v1/tokens/{token_id}/revoke": {
+      "post": {
+        "operationId": "revoke_token_api_v1_tokens__token_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Token Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revoke Token Api V1 Tokens  Token Id  Revoke Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Revoke Token",
+        "tags": [
+          "tokens"
+        ]
       }
     },
     "/api/v1/version": {
@@ -2103,6 +3239,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Workflow Run"
       }
     },
@@ -2153,7 +3294,110 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Cancel Workflow Run"
+      }
+    },
+    "/api/v1/workflow-runs/{workflow_run_id}/results": {
+      "get": {
+        "operationId": "workflow_results_api_v1_workflow_runs__workflow_run_id__results_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Workflow Results Api V1 Workflow Runs  Workflow Run Id  Results Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Workflow Results",
+        "tags": [
+          "workflow-results"
+        ]
+      }
+    },
+    "/api/v1/workflow-runs/{workflow_run_id}/results/junit": {
+      "get": {
+        "operationId": "workflow_results_junit_api_v1_workflow_runs__workflow_run_id__results_junit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "JUnit XML test report."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Workflow Results Junit",
+        "tags": [
+          "workflow-results"
+        ]
       }
     },
     "/api/v1/workflows": {
@@ -2183,6 +3427,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Workflows"
       }
     },
@@ -2238,6 +3487,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Workflow"
       }
     },
@@ -2287,6 +3541,11 @@
             "description": "Request validation failed"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Run Workflow"
       }
     }

@@ -25,6 +25,8 @@ from lab_platform.core import (
     OperationRunner,
     OperationService,
 )
+from lab_platform.core.artifacts import ArtifactService
+from lab_platform.core.auth import ApiTokenService
 from lab_platform.core.backend import LabBackend
 from lab_platform.core.backend_registry import BackendFailure, BackendRegistry
 from lab_platform.core.bench_catalog import (
@@ -33,6 +35,7 @@ from lab_platform.core.bench_catalog import (
     BenchRecord,
     CatalogRefreshResult,
 )
+from lab_platform.core.ci import CiSessionService
 from lab_platform.core.clock import Clock, UtcClock
 from lab_platform.core.operation_locks import OperationLockService
 from lab_platform.core.recovery import RecoveryService
@@ -58,10 +61,13 @@ from lab_platform.models import (
     TargetHealth,
 )
 from lab_platform.persistence import (
+    SQLiteApiTokenRepository,
     SQLiteArtifactRepository,
     SQLiteCatalogRepository,
+    SQLiteCiSessionRepository,
     SQLiteDatabase,
     SQLiteEventRepository,
+    SQLiteGenericArtifactRepository,
     SQLiteOperationArtifactRepository,
     SQLiteOperationLockRepository,
     SQLiteOperationRepository,
@@ -212,6 +218,9 @@ class LabAgent:
         recovery_service: RecoveryService,
         workflow_service: WorkflowService,
         workflow_runner: WorkflowRunner,
+        token_service: ApiTokenService,
+        artifact_service: ArtifactService,
+        ci_session_service: CiSessionService,
         event_repository: SQLiteEventRepository,
         probe_health_recorder: _ProbeHealthRecorder,
         workflow_directory: Path,
@@ -231,6 +240,9 @@ class LabAgent:
         self.scheduling_service = scheduling_service
         self.recovery_service = recovery_service
         self.workflow_service = workflow_service
+        self.token_service = token_service
+        self.artifact_service = artifact_service
+        self.ci_session_service = ci_session_service
         self.artifacts_directory = artifacts_directory
         self._logger = logger
         self._catalog_repository = catalog_repository
@@ -310,6 +322,7 @@ class LabAgent:
                 interrupted_operations=recovered_operations
             )
             recovered_workflows = await self.workflow_service.recover_interrupted()
+            recovered_ci_sessions = await self.ci_session_service.recover_incomplete()
             await self._set_health(
                 "operations",
                 HealthStatus.HEALTHY,
@@ -326,6 +339,11 @@ class LabAgent:
                 "workflows",
                 HealthStatus.HEALTHY,
                 f"Loaded {loaded_workflows} definitions; recovered {recovered_workflows} runs",
+            )
+            await self._set_health(
+                "ci",
+                HealthStatus.HEALTHY,
+                f"Recovered {recovered_ci_sessions} incomplete CI sessions",
             )
             await self._set_health("agent", HealthStatus.HEALTHY, "Agent ready")
             self._started = True
@@ -371,6 +389,7 @@ class LabAgent:
         for worker, name in (
             (self._scheduler_loop(), "lab-platform-scheduler"),
             (self._health_probe_loop(), "lab-platform-health-probes"),
+            (self._ci_maintenance_loop(), "lab-platform-ci-maintenance"),
         ):
             task = loop.create_task(worker, name=name)
             self._background_tasks.add(task)
@@ -477,6 +496,25 @@ class LabAgent:
                 raise
             except Exception:
                 self._logger.exception("Periodic bench health probing failed")
+
+    async def _ci_maintenance_loop(self) -> None:
+        interval = self.config.ci.reaper_poll_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.ci_session_service.process_maintenance()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("CI session maintenance failed")
+            try:
+                expired = await self.artifact_service.expire_due(limit=500)
+                if expired:
+                    self._logger.info("Expired %d retained CI artifacts", expired)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("Artifact retention maintenance failed")
 
     async def _probe_idle_benches(self) -> None:
         """Refresh target health without colliding with reservations or operations."""
@@ -810,7 +848,18 @@ def create_backend_registry(config: PlatformConfig) -> BackendRegistry:
                 flash_duration_seconds=backend_config.flash_duration_seconds,
             )
         elif isinstance(definition, RealBackendSettings):
-            backends[definition.id] = RealLabBackend.from_config(definition.config)
+            serial_capture_max_bytes = _serial_artifact_max_bytes(config)
+            if (
+                config.serial.decode_errors == "replace"
+                and serial_capture_max_bytes == 50 * 1024 * 1024
+            ):
+                backends[definition.id] = RealLabBackend.from_config(definition.config)
+            else:
+                backends[definition.id] = RealLabBackend.from_config(
+                    definition.config,
+                    serial_decode_errors=config.serial.decode_errors,
+                    serial_capture_max_bytes=serial_capture_max_bytes,
+                )
         else:  # pragma: no cover - discriminated configuration union is exhaustive
             raise ConfigurationError(f"Unsupported backend type: {definition.type}")
     return BackendRegistry(backends)
@@ -838,6 +887,9 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
     operations = SQLiteOperationRepository(database)
     events = SQLiteEventRepository(database)
     artifacts = SQLiteArtifactRepository(database)
+    generic_artifacts = SQLiteGenericArtifactRepository(database)
+    api_tokens = SQLiteApiTokenRepository(database)
+    ci_sessions = SQLiteCiSessionRepository(database)
     operation_artifacts = SQLiteOperationArtifactRepository(database)
     workflow_repository = SQLiteWorkflowRepository(database, initialize_schema=False)
     registry = create_backend_registry(config)
@@ -846,6 +898,19 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
     probe_health_recorder = _ProbeHealthRecorder(catalog, catalog_repository, events, clock)
 
     artifact_path = _relative_to_storage(config.artifacts.directory, storage_root)
+    token_service = ApiTokenService(api_tokens, events, clock=clock.now)
+    artifact_service = ArtifactService(
+        generic_artifacts,
+        artifact_path / "ci",
+        maximum_size_bytes=config.artifacts.max_upload_size_mb * 1024 * 1024,
+        events=events,
+        clock=clock.now,
+        retention_seconds=(
+            config.artifacts.retention_days * 86_400
+            if config.artifacts.retention_days is not None
+            else None
+        ),
+    )
     reservation_service = TimedReservationService(
         timed_reservations,
         queues,
@@ -924,6 +989,11 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
         clock=clock.now,
         probe_result_handler=probe_health_recorder.record,
         probe_failure_handler=probe_health_recorder.failure,
+        step_timeout_seconds=config.ci.step_timeout_seconds,
+        artifact_service=artifact_service,
+        serial_buffer_lines=config.serial.stream_buffer_lines,
+        serial_artifact_max_bytes=_serial_artifact_max_bytes(config),
+        serial_redact_patterns=config.serial.redact_patterns,
     )
     workflow_service = WorkflowService(
         workflow_repository,
@@ -933,6 +1003,24 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
         events,
         workflow_locks,
         clock=clock.now,
+    )
+    ci_session_service = CiSessionService(
+        ci_sessions,
+        workflow_service,
+        reservation_service,
+        operation_locks,
+        artifact_service,
+        events,
+        catalog,
+        clock=clock.now,
+        heartbeat_interval_seconds=config.ci.heartbeat_interval_seconds,
+        heartbeat_timeout_seconds=config.ci.heartbeat_timeout_seconds,
+        session_timeout_seconds=config.ci.session_timeout_seconds,
+        workflow_timeout_seconds=config.ci.workflow_timeout_seconds,
+        maximum_reservation_seconds=config.ci.maximum_reservation_minutes * 60,
+        cleanup_timeout_seconds=config.ci.cleanup_timeout_seconds,
+        serial_artifact_max_bytes=_serial_artifact_max_bytes(config),
+        backend_types={definition.id: definition.type for definition in config.effective_backends},
     )
     operation_service = OperationService(
         operations,
@@ -974,6 +1062,9 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
         recovery_service=recovery_service,
         workflow_service=workflow_service,
         workflow_runner=workflow_runner,
+        token_service=token_service,
+        artifact_service=artifact_service,
+        ci_session_service=ci_session_service,
         event_repository=events,
         probe_health_recorder=probe_health_recorder,
         workflow_directory=_relative_to_storage(
@@ -999,6 +1090,7 @@ def _catalog_metadata(config: PlatformConfig) -> dict[str, BenchMetadata]:
                         "board": "virtual",
                         "location": "simulation",
                         "purpose": "testing",
+                        **definition.config.labels,
                     },
                 )
         elif isinstance(definition, RealBackendSettings):
@@ -1012,6 +1104,17 @@ def _catalog_metadata(config: PlatformConfig) -> dict[str, BenchMetadata]:
 
 def _relative_to_storage(path: Path, storage_root: Path) -> Path:
     return path if path.is_absolute() else storage_root / path
+
+
+def _serial_artifact_max_bytes(config: PlatformConfig) -> int:
+    return (
+        min(
+            config.serial.artifact_max_size_mb,
+            config.artifacts.max_upload_size_mb,
+        )
+        * 1024
+        * 1024
+    )
 
 
 def _database_path(url: str, storage_root: Path) -> Path:

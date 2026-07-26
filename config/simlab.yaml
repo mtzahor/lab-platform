@@ -5,3 +5,7 @@ simlab:
   clock_mode: accelerated
   speed_multiplier: 20
   flash_duration_seconds: 5
+  labels:
+    board: esp32
+    location: simulation
+    purpose: hardware-ci

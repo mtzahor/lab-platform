@@ -4,7 +4,7 @@ import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -33,9 +33,11 @@ class WorkflowRunStatus(StrEnum):
 
 
 class WorkflowStepStatus(StrEnum):
+    PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    SKIPPED = "skipped"
     CANCELLED = "cancelled"
 
 
@@ -55,8 +57,57 @@ ACTIVE_WORKFLOW_RUN_STATUSES = frozenset(
 )
 
 
+class WorkflowInputType(StrEnum):
+    STRING = "string"
+    INTEGER = "integer"
+    BOOLEAN = "boolean"
+    ARTIFACT = "artifact"
+
+
+class ArtifactReference(WorkflowModel):
+    artifact_id: UUID
+
+
+class WorkflowInputModel(WorkflowModel):
+    required: bool = False
+
+    @model_validator(mode="after")
+    def required_input_cannot_have_a_default(self) -> WorkflowInputModel:
+        if self.required and getattr(self, "default", None) is not None:
+            raise ValueError("a required workflow input cannot declare a default")
+        return self
+
+
+class StringWorkflowInput(WorkflowInputModel):
+    type: Literal["string"]
+    default: str | None = None
+
+
+class IntegerWorkflowInput(WorkflowInputModel):
+    type: Literal["integer"]
+    default: int | None = None
+
+
+class BooleanWorkflowInput(WorkflowInputModel):
+    type: Literal["boolean"]
+    default: bool | None = None
+
+
+class ArtifactWorkflowInput(WorkflowInputModel):
+    type: Literal["artifact"]
+    default: ArtifactReference | None = None
+
+
+WorkflowInput: TypeAlias = Annotated[
+    StringWorkflowInput | IntegerWorkflowInput | BooleanWorkflowInput | ArtifactWorkflowInput,
+    Field(discriminator="type"),
+]
+WorkflowInputDefinition = WorkflowInput
+
+
 class WorkflowRequirements(WorkflowModel):
     capabilities: list[str] = Field(default_factory=list)
+    labels: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("capabilities", mode="before")
     @classmethod
@@ -73,48 +124,105 @@ class WorkflowRequirements(WorkflowModel):
             normalized.append(capability)
         return normalized
 
+    @field_validator("labels", mode="before")
+    @classmethod
+    def normalize_labels(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                raise ValueError("workflow label names must be non-empty strings")
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                raise ValueError("workflow label values must be non-empty strings")
+            normalized[raw_key.strip()] = raw_value.strip()
+        return normalized
 
-class FlashWorkflowStep(WorkflowModel):
+
+class WorkflowStepModel(WorkflowModel):
+    name: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class FlashWorkflowStep(WorkflowStepModel):
     action: Literal["flash"]
     firmware: Path
     version: str | None = None
 
 
-class ResetWorkflowStep(WorkflowModel):
+class ResetWorkflowStep(WorkflowStepModel):
     action: Literal["reset"]
 
 
-class ReadSerialWorkflowStep(WorkflowModel):
+class ReadSerialWorkflowStep(WorkflowStepModel):
     action: Literal["read_serial"]
     until_pattern: str | None = None
-    timeout_seconds: float = Field(default=10, gt=0, le=3600)
-    max_lines: int | None = Field(default=500, ge=1, le=100_000)
+    timeout_seconds: float | str = 10.0
+    max_lines: int | str | None = 500
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def validate_timeout(cls, value: float | str) -> float | str:
+        return _validate_templated_number(
+            value,
+            field="timeout_seconds",
+            minimum=0,
+            maximum=3600,
+            integer=False,
+        )
+
+    @field_validator("max_lines")
+    @classmethod
+    def validate_max_lines(cls, value: int | str | None) -> int | str | None:
+        if value is None:
+            return None
+        return cast(
+            int | str,
+            _validate_templated_number(
+                value,
+                field="max_lines",
+                minimum=0,
+                maximum=100_000,
+                integer=True,
+            ),
+        )
 
     @field_validator("until_pattern")
     @classmethod
     def validate_until_pattern(cls, value: str | None) -> str | None:
-        if value is not None:
+        if value is not None and "${" not in value:
             _compile_pattern(value)
         return value
 
 
-class AssertSerialWorkflowStep(WorkflowModel):
+class AssertSerialWorkflowStep(WorkflowStepModel):
     action: Literal["assert_serial"]
     pattern: str = Field(min_length=1)
 
     @field_validator("pattern")
     @classmethod
     def validate_pattern(cls, value: str) -> str:
-        _compile_pattern(value)
+        if "${" not in value:
+            _compile_pattern(value)
         return value
 
 
-class WaitWorkflowStep(WorkflowModel):
+class WaitWorkflowStep(WorkflowStepModel):
     action: Literal["wait"]
-    seconds: float = Field(gt=0, le=3600)
+    seconds: float | str
+
+    @field_validator("seconds")
+    @classmethod
+    def validate_seconds(cls, value: float | str) -> float | str:
+        return _validate_templated_number(
+            value,
+            field="seconds",
+            minimum=0,
+            maximum=3600,
+            integer=False,
+        )
 
 
-class ProbeWorkflowStep(WorkflowModel):
+class ProbeWorkflowStep(WorkflowStepModel):
     action: Literal["probe"]
 
 
@@ -133,8 +241,19 @@ class WorkflowDefinition(WorkflowModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
     version: int = Field(ge=1)
     description: str | None = None
+    inputs: dict[str, WorkflowInput] = Field(default_factory=dict)
     requirements: WorkflowRequirements
     steps: list[WorkflowStep] = Field(min_length=1)
+
+    @field_validator("inputs", mode="before")
+    @classmethod
+    def validate_input_names(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        for name in value:
+            if not isinstance(name, str) or _INPUT_NAME.fullmatch(name) is None:
+                raise ValueError(f"invalid workflow input name: {name!r}")
+        return value
 
     @model_validator(mode="after")
     def require_declared_step_capabilities(self) -> WorkflowDefinition:
@@ -175,13 +294,15 @@ class WorkflowStepResult(WorkflowModel):
     id: UUID = Field(default_factory=uuid4)
     workflow_run_id: UUID
     step_index: int = Field(ge=0)
+    name: str = Field(default="", max_length=500)
     action: WorkflowAction
     status: WorkflowStepStatus
-    started_at: datetime
+    started_at: datetime | None = None
     completed_at: datetime | None = None
     output: dict[str, Any] = Field(default_factory=dict)
     error_code: str | None = None
     error_message: str | None = None
+    artifact_ids: list[UUID] = Field(default_factory=list)
 
     @field_validator("started_at", "completed_at")
     @classmethod
@@ -206,9 +327,34 @@ def _compile_pattern(pattern: str) -> None:
         raise ValueError(f"invalid regular expression: {exc}") from exc
 
 
+def _validate_templated_number(
+    value: float | int | str,
+    *,
+    field: str,
+    minimum: float,
+    maximum: float,
+    integer: bool,
+) -> float | int | str:
+    if isinstance(value, str):
+        if "${" in value:
+            return value
+        expected = "an integer" if integer else "a number"
+        raise ValueError(f"{field} must be {expected} or an input placeholder")
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be numeric")
+    if integer and not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer or an input placeholder")
+    if value <= minimum or value > maximum:
+        raise ValueError(f"{field} must be greater than {minimum:g} and at most {maximum:g}")
+    return value
+
+
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Workflow timestamps must be timezone-aware")
     return value.astimezone(UTC)
+
+
+_INPUT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

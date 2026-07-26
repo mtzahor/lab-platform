@@ -3,6 +3,7 @@ agent:
   host: 127.0.0.1
   port: 8080
   log_level: INFO
+  max_request_body_size_mb: 1
 
 backend:
   type: simlab
@@ -13,6 +14,23 @@ database:
 artifacts:
   directory: ./.lab-platform/artifacts
   max_firmware_size_mb: 100
+  max_upload_size_mb: 100
+
+ci:
+  default_reservation_minutes: 30
+  maximum_reservation_minutes: 120
+  heartbeat_interval_seconds: 30
+  heartbeat_timeout_seconds: 120
+  bench_wait_timeout_seconds: 600
+  session_timeout_seconds: 3600
+  workflow_timeout_seconds: 1800
+  step_timeout_seconds: 600
+  cleanup_timeout_seconds: 60
+
+serial:
+  stream_buffer_lines: 500
+  artifact_max_size_mb: 50
+  decode_errors: replace
 
 operations:
   poll_interval_ms: 250

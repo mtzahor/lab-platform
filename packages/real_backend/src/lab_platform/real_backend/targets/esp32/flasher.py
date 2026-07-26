@@ -48,7 +48,7 @@ class Esp32Flasher:
         self._runner = runner
 
     async def flash(self, port: str, firmware: FirmwareInput) -> AsyncIterator[BackendProgress]:
-        queue: asyncio.Queue[ProcessLine] = asyncio.Queue()
+        queue: asyncio.Queue[ProcessLine] = asyncio.Queue(maxsize=256)
 
         async def capture(line: ProcessLine) -> None:
             await queue.put(line)
@@ -69,11 +69,12 @@ class Esp32Flasher:
                     continue
                 parsed = parse_esptool_progress(output.text)
                 if parsed is None:
-                    continue
-                percent, message = parsed
-                if percent > last_percent:
-                    last_percent = percent
-                    yield BackendProgress(percent=percent, message=message)
+                    message = f"esptool {output.stream}: {output.text}"
+                else:
+                    percent, stage = parsed
+                    last_percent = max(last_percent, percent)
+                    message = f"{stage} — esptool {output.stream}: {output.text}"
+                yield BackendProgress(percent=last_percent, message=message)
             result = await task
         except asyncio.CancelledError:
             task.cancel()
@@ -87,6 +88,10 @@ class Esp32Flasher:
             raise EsptoolTimeoutError(
                 f"esptool exceeded {self._config.flash.timeout_seconds:g} seconds."
             ) from exc
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         if result.returncode != 0:
             raise EsptoolFlashFailedError(
                 _failure_message(result),

@@ -17,6 +17,7 @@ class AgentSettings(ConfigModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8080, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    max_request_body_size_mb: int = Field(default=1, ge=1, le=1024)
 
 
 class SimLabSettings(ConfigModel):
@@ -32,6 +33,7 @@ class SimLabSettings(ConfigModel):
     clock_mode: Literal["manual", "accelerated"] = "accelerated"
     speed_multiplier: float = Field(default=20.0, gt=0, le=1000)
     flash_duration_seconds: float = Field(default=5.0, ge=0, le=3600)
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 class BackendSettings(ConfigModel):
@@ -153,6 +155,7 @@ class SimLabBackendConfig(ConfigModel):
     clock_mode: Literal["manual", "accelerated"] = "accelerated"
     speed_multiplier: float = Field(default=20.0, gt=0, le=1000)
     flash_duration_seconds: float = Field(default=5.0, ge=0, le=3600)
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 class RealBackendConfig(HardwareSettings):
@@ -184,6 +187,38 @@ class DatabaseSettings(ConfigModel):
 class ArtifactSettings(ConfigModel):
     directory: Path = Path("./.lab-platform/artifacts")
     max_firmware_size_mb: int = Field(default=100, ge=1, le=4096)
+    max_upload_size_mb: int = Field(default=100, ge=1, le=4096)
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class CiSettings(ConfigModel):
+    default_reservation_minutes: int = Field(default=30, ge=1, le=10_080)
+    maximum_reservation_minutes: int = Field(default=120, ge=1, le=10_080)
+    heartbeat_interval_seconds: int = Field(default=30, ge=1, le=3600)
+    heartbeat_timeout_seconds: int = Field(default=120, ge=2, le=86_400)
+    bench_wait_timeout_seconds: int = Field(default=600, ge=0, le=86_400)
+    session_timeout_seconds: int = Field(default=3600, ge=1, le=604_800)
+    workflow_timeout_seconds: int = Field(default=1800, ge=1, le=604_800)
+    step_timeout_seconds: int = Field(default=600, ge=1, le=86_400)
+    cleanup_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    reaper_poll_interval_seconds: float = Field(default=5.0, gt=0, le=3600)
+
+    @model_validator(mode="after")
+    def validate_ci_limits(self) -> CiSettings:
+        if self.default_reservation_minutes > self.maximum_reservation_minutes:
+            raise ValueError("default CI reservation duration cannot exceed maximum duration")
+        if self.heartbeat_interval_seconds >= self.heartbeat_timeout_seconds:
+            raise ValueError("CI heartbeat interval must be shorter than heartbeat timeout")
+        if self.workflow_timeout_seconds > self.session_timeout_seconds:
+            raise ValueError("CI workflow timeout cannot exceed session timeout")
+        return self
+
+
+class SerialStreamSettings(ConfigModel):
+    stream_buffer_lines: int = Field(default=500, ge=1, le=100_000)
+    artifact_max_size_mb: int = Field(default=50, ge=1, le=4096)
+    decode_errors: Literal["replace", "strict", "ignore"] = "replace"
+    redact_patterns: list[str] = Field(default_factory=list, max_length=100)
 
 
 class OperationSettings(ConfigModel):
@@ -228,6 +263,8 @@ class PlatformConfig(ConfigModel):
     hardware: HardwareSettings = Field(default_factory=HardwareSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     artifacts: ArtifactSettings = Field(default_factory=ArtifactSettings)
+    ci: CiSettings = Field(default_factory=CiSettings)
+    serial: SerialStreamSettings = Field(default_factory=SerialStreamSettings)
     operations: OperationSettings = Field(default_factory=OperationSettings)
     reservations: ReservationSettings = Field(default_factory=ReservationSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
@@ -279,6 +316,7 @@ class PlatformConfig(ConfigModel):
                     clock_mode=self.simlab.clock_mode,
                     speed_multiplier=self.simlab.speed_multiplier,
                     flash_duration_seconds=self.simlab.flash_duration_seconds,
+                    labels=self.simlab.labels,
                 ),
             ),
         )
@@ -379,6 +417,7 @@ def _simlab_config_from_file(path: Path, backend_id: str) -> dict[str, Any]:
         "clock_mode",
         "speed_multiplier",
         "flash_duration_seconds",
+        "labels",
     }
     if payload and set(payload).issubset(allowed):
         return payload
