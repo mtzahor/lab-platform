@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
+from uuid import UUID
 
 import pytest
+from fastapi.testclient import TestClient
+from lab_platform.agent.api import create_app
 from lab_platform.agent.cli import main as agent_main
 from lab_platform.agent.runtime import LabAgent, create_agent
+from lab_platform.core.errors import ConfigurationError
 from lab_platform.models import (
     BackendProgress,
     BenchSnapshot,
@@ -107,7 +112,7 @@ def test_agent_starts_backend_database_plugins_and_is_idempotent(tmp_path: Path)
         assert [plugin.name for plugin in agent.plugins()] == ["power"]
         assert agent.health_payload() == {
             "status": "healthy",
-            "version": "0.5.0-alpha",
+            "version": "0.6.0-alpha",
             "backend": "simlab",
             "database": "healthy",
             "benches": {"total": 2, "online": 2},
@@ -123,6 +128,139 @@ def test_agent_starts_backend_database_plugins_and_is_idempotent(tmp_path: Path)
         assert agent.benches() == []
         assert agent.plugins() == []
         assert agent.health_payload()["status"] == "warning"
+
+    asyncio.run(scenario())
+
+
+def test_http_lifespan_owns_full_unstarted_agent_lifecycle(tmp_path: Path) -> None:
+    _write_config(tmp_path, benches=1)
+    agent = create_agent(tmp_path)
+
+    def is_started() -> bool:
+        return agent.started
+
+    assert not is_started()
+    with TestClient(create_app(agent)) as client:
+        assert is_started()
+        assert client.get("/api/v1/health").status_code == 200
+        assert any(not task.done() for task in agent._background_tasks)
+
+    assert not is_started()
+    assert agent._background_tasks == set()
+
+
+def test_managed_http_application_rejects_a_prestarted_agent(tmp_path: Path) -> None:
+    _write_config(tmp_path, benches=1)
+    agent = create_agent(tmp_path)
+    asyncio.run(agent.start())
+    try:
+        with pytest.raises(ConfigurationError, match="requires an unstarted Agent"):
+            create_app(agent)
+    finally:
+        asyncio.run(agent.shutdown())
+
+
+def test_failed_distributed_start_rolls_back_and_can_retry(tmp_path: Path) -> None:
+    _write_config(tmp_path, benches=1)
+
+    class DistributedRuntime:
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+            self.started = False
+
+        async def start(self) -> None:
+            if self.fail:
+                raise RuntimeError("distributed startup failed")
+            self.started = True
+
+        async def stop(self) -> None:
+            self.started = False
+
+        async def publish_inventory(self, *, force: bool = False) -> UUID:
+            del force
+            return UUID(int=1)
+
+    async def scenario() -> None:
+        agent = create_agent(tmp_path)
+        attempts = 0
+
+        def factory(_agent: LabAgent) -> DistributedRuntime:
+            nonlocal attempts
+            attempts += 1
+            return DistributedRuntime(fail=attempts == 1)
+
+        def is_started() -> bool:
+            return agent.started
+
+        agent._distributed_runtime_factory = cast(Any, factory)
+        with pytest.raises(RuntimeError, match="distributed startup failed"):
+            await agent.start()
+        assert not is_started()
+
+        await agent.start()
+        assert is_started()
+        assert attempts == 2
+        await agent.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_catalog_refresh_publishes_changed_inventory_to_distributed_runtime(
+    tmp_path: Path,
+) -> None:
+    _write_config(tmp_path, benches=1)
+
+    class DistributedRuntime:
+        started = True
+        publishes = 0
+
+        async def publish_inventory(self, *, force: bool = False) -> UUID:
+            assert not force
+            self.publishes += 1
+            return UUID(int=self.publishes)
+
+    async def scenario() -> None:
+        agent = create_agent(tmp_path)
+        await agent.start()
+        distributed = DistributedRuntime()
+        agent.distributed_runtime = cast(Any, distributed)
+        await agent.refresh_catalog()
+        assert distributed.publishes == 1
+        agent.distributed_runtime = None
+        await agent.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_probe_health_success_survives_inventory_publish_backpressure(tmp_path: Path) -> None:
+    _write_config(tmp_path, benches=1)
+
+    class FailingPublisher:
+        started = True
+
+        async def publish_inventory(self, *, force: bool = False) -> UUID:
+            del force
+            raise RuntimeError("outgoing inventory queue is full")
+
+    async def scenario() -> None:
+        agent = create_agent(tmp_path)
+        await agent.start()
+        agent.distributed_runtime = cast(Any, FailingPublisher())
+        await agent._probe_health_recorder.record(
+            TargetHealth(
+                bench_id="bench-01",
+                status=TargetHealthStatus.OFFLINE,
+            )
+        )
+
+        record = agent.catalog.get("bench-01")
+        assert not record.online
+        failures = await agent.event_service.list_events(event_type="INVENTORY_SYNC_FAILED")
+        assert len(failures) == 1
+        assert failures[0].payload["error"] == "outgoing inventory queue is full"
+
+        agent.distributed_runtime = None
+        await agent.shutdown()
 
     asyncio.run(scenario())
 
@@ -155,7 +293,7 @@ def test_agent_cli_once_and_disabled_backend(
     _write_config(tmp_path, benches=2)
     assert agent_main(["--config-dir", str(tmp_path), "--once"]) == 0
     output = capsys.readouterr().out
-    assert "Lab Agent v0.5.0-alpha" in output
+    assert "Lab Agent v0.6.0-alpha" in output
     assert "✓ SimLab backend started" in output
     assert "✓ 2 benches registered" in output
 
@@ -232,7 +370,7 @@ def test_agent_composes_multiple_backend_instances(tmp_path: Path) -> None:
         ]
         assert agent.health_payload() == {
             "status": "healthy",
-            "version": "0.5.0-alpha",
+            "version": "0.6.0-alpha",
             "backend": "mixed",
             "backends": {"ids": ["virtual-a", "virtual-b"], "unavailable": []},
             "database": "healthy",

@@ -165,7 +165,7 @@ def test_v4_upgrade_preserves_workflow_rows_and_installs_phase4_schema(
             assert (
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
                 == SCHEMA_VERSION
-                == 5
+                == 8
             )
             tables = {
                 row[0]
@@ -476,6 +476,7 @@ def test_atomic_selection_uses_preference_then_lru_and_explicit_bench(
                 required_capabilities={"firmware", "serial"},
                 required_labels={"board": "esp32"},
                 preferred_labels={"tier": "preferred"},
+                allow_physical=True,
             )
             first_assignment = await repository.assign_compatible_bench(
                 first.id, preferred, now=NOW
@@ -491,6 +492,7 @@ def test_atomic_selection_uses_preference_then_lru_and_explicit_bench(
                 BenchRequest(
                     required_capabilities={"firmware", "serial"},
                     required_labels={"board": "esp32"},
+                    allow_physical=True,
                 ),
                 now=NOW + timedelta(minutes=1),
             )

@@ -73,7 +73,7 @@ labctl ci run \
   --require capability=probe \
   --label board=esp32 \
   --allow-simulated \
-  --allow-physical \
+  --no-allow-physical \
   --wait-timeout 10m \
   --reservation-duration 30m \
   --junit-output hardware-results.xml \
@@ -106,7 +106,6 @@ labctl ci run \
 Explicit physical ESP32 selection:
 
 ```console
-LAB_PLATFORM_ENABLE_HARDWARE_TESTS=1 \
 labctl ci run \
   --bench esp32-devkit-01 \
   --workflow esp32-ci-test \
@@ -119,8 +118,10 @@ labctl ci run \
 ```
 
 The explicit bench still has to be online and satisfy the workflow requirements. Physical tests
-are opt-in; normal development and CI tests use SimLab. Configure the physical bench with
-`labels: {board: esp32}` to match the shared workflow.
+are opt-in; normal development and CI tests use SimLab. The CLI safety boundary is the explicit
+bench plus `--no-allow-simulated --allow-physical`. `LAB_PLATFORM_ENABLE_HARDWARE_TESTS=1` gates
+only the local physical pytest suite and is not consulted by `labctl`. Configure the physical
+bench with `labels: {board: esp32}` to match the shared workflow.
 
 ## Lifecycle guarantees
 

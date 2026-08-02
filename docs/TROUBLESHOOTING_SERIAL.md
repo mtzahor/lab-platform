@@ -1,8 +1,10 @@
 # Serial troubleshooting
 
-Start with `labctl bench probe esp32-devkit-01 --owner <owner> --output json`. Online probes require
-that owner's active reservation and hold the persistent operation lock; an offline recovery probe
-uses an exclusive maintenance lock. The stable error code identifies the layer that failed without
+Start with `labctl bench probe BENCH_ID --owner <owner> --output json`. Against a standalone Agent,
+an online probe requires that owner's active reservation. The Phase 5 control-plane probe is a
+read-only distributed command and does not require a central reservation. Both paths hold an Agent
+operation lock and apply local capability/health/safety checks; an offline recovery probe uses an
+exclusive maintenance lock. The stable error code identifies the layer that failed without
 exposing raw pySerial or subprocess exceptions.
 
 | Error | Meaning | Checks |

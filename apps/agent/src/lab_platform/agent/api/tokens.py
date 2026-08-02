@@ -12,6 +12,16 @@ if TYPE_CHECKING:
     from lab_platform.agent.runtime import LabAgent
 
 
+# Agent administration scopes belong to the Phase 5 control-plane API.  Keep the
+# local Agent's bootstrap/admin contract compatible with the Phase 4 scope set so
+# adding control-plane-only scopes cannot invalidate existing administrators.
+_LOCAL_AGENT_ADMIN_SCOPES = frozenset(
+    scope
+    for scope in ApiTokenScope
+    if scope not in {ApiTokenScope.AGENTS_READ, ApiTokenScope.AGENTS_ADMIN}
+)
+
+
 class TokenApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -32,14 +42,14 @@ class CreateTokenRequest(TokenApiModel):
 
 def create_token_router(agent: "LabAgent") -> APIRouter:
     router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
-    authorize_admin = require_legacy_scopes(agent, *tuple(ApiTokenScope))
+    authorize_admin = require_legacy_scopes(agent, *_LOCAL_AGENT_ADMIN_SCOPES)
 
     @router.post("", status_code=status.HTTP_201_CREATED)
     async def create_token(
         request: CreateTokenRequest,
         administrator: Annotated[ApiToken | None, Depends(authorize_admin)],
     ) -> dict[str, object]:
-        if administrator is None and request.scopes != set(ApiTokenScope):
+        if administrator is None and not _LOCAL_AGENT_ADMIN_SCOPES.issubset(request.scopes):
             raise PermissionDeniedError(
                 "The first bootstrap token must grant every supported scope."
             )
@@ -90,5 +100,5 @@ def _is_active_administrator(token: ApiToken) -> bool:
     return (
         token.revoked_at is None
         and (token.expires_at is None or token.expires_at > now)
-        and token.scopes == set(ApiTokenScope)
+        and _LOCAL_AGENT_ADMIN_SCOPES.issubset(token.scopes)
     )

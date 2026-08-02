@@ -38,6 +38,9 @@ _CI_ASSIGNMENT_TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "timed_out", "cleanup_pending", "completed"}
 )
 _CI_WORKFLOW_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+_DISTRIBUTED_CI_RETRYABLE_ERRORS = frozenset(
+    {"NO_COMPATIBLE_BENCH", "AGENT_OFFLINE", "AGENT_DEGRADED", "AGENT_DRAINING"}
+)
 
 
 class _CiArtifactUploadError(RuntimeError):
@@ -99,6 +102,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         else:
             _bench_list(client, args)
         return 0
+    if args.command == "agent":
+        return _agent_command(client, args)
     if args.command == "bench":
         return _bench_command(client, args)
     if args.command == "reservation":
@@ -123,6 +128,106 @@ def _dispatch(args: argparse.Namespace) -> int:
         _print_collection(payload, args.output, _event_table)
         return 0
     raise AssertionError("unreachable command")
+
+
+def _agent_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = args.agent_command
+    if command == "list":
+        payload = client.get(
+            "/api/v1/agents",
+            {
+                "status": args.status.upper() if args.status is not None else None,
+                "location": args.location,
+                "label": args.label,
+                "version": args.version,
+            },
+        )
+        _print_collection(payload, args.output, _agent_table)
+        return 0
+    if command == "show":
+        payload = client.get(f"/api/v1/agents/{args.agent_id}")
+        _print_read_payload(payload, args.output, _agent_show_table)
+        return 0
+    if command == "enrollment-token":
+        return _agent_enrollment_token_command(client, args)
+    if command == "timeline":
+        payload = client.get(
+            f"/api/v1/agents/{args.agent_id}/timeline",
+            {
+                "severity": (args.severity.upper() if args.severity is not None else None),
+                "event_type": args.event_type,
+                "since": args.since,
+                "limit": args.limit,
+            },
+        )
+        _print_collection(payload, args.output, _agent_timeline_table)
+        return 0
+
+    path = f"/api/v1/agents/{args.agent_id}"
+    body: dict[str, object] = {}
+    if command == "drain":
+        path += "/drain"
+        body["cancel_queued_work"] = args.cancel_queued_work
+    elif command == "undrain":
+        path += "/undrain"
+    elif command == "revoke":
+        path += "/revoke"
+    elif command == "refresh":
+        path += "/actions/refresh-inventory"
+    else:
+        raise AssertionError("unreachable Agent command")
+    payload = client.post(path, body)
+    if args.output == "json":
+        _print_json(payload)
+    elif command == "refresh":
+        response = _require_mapping(payload, "inventory refresh")
+        print(f"Inventory refresh requested: {response.get('request_id', '')}")
+    else:
+        _print_agent_mutation(payload, command)
+    return 0
+
+
+def _agent_enrollment_token_command(
+    client: AgentClient,
+    args: argparse.Namespace,
+) -> int:
+    command = args.enrollment_token_command
+    if command == "list":
+        payload = client.get("/api/v1/agents/enrollment-tokens")
+        _print_collection(payload, args.output, _enrollment_token_table)
+        return 0
+    if command == "create":
+        payload = client.post(
+            "/api/v1/agents/enrollment-tokens",
+            {
+                "name": args.name,
+                "expires_at": args.expires_at,
+                "expires_in_seconds": (
+                    None if args.expires_at is not None else parse_duration(args.expires_in)
+                ),
+                "allowed_labels": _key_value_map(args.allowed_label, "allowed Agent label"),
+            },
+        )
+        token = _require_mapping(payload, "enrollment token")
+        if args.output == "json":
+            _print_json(token)
+        else:
+            print("Enrollment token created (shown once).")
+            print(f"Token ID: {token.get('id', '')}")
+            print(f"Expires:  {token.get('expires_at', '')}")
+            print(f"Token:    {token.get('token', '')}")
+        return 0
+    if command == "revoke":
+        client.delete(
+            f"/api/v1/agents/enrollment-tokens/{args.token_id}",
+            {},
+        )
+        if args.output == "json":
+            _print_json({"token_id": args.token_id, "revoked": True})
+        else:
+            print(f"Revoked enrollment token {args.token_id}.")
+        return 0
+    raise AssertionError("unreachable enrollment-token command")
 
 
 def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
@@ -172,7 +277,21 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
             f"/api/v1/benches/{args.bench_id}/actions/probe",
             {"owner": args.owner},
         )
-        _print_read_payload(payload, args.output, _probe_table)
+        probe = _require_mapping(payload, "probe")
+        operation_id = _optional_text(probe.get("operation_id"))
+        if operation_id is None:
+            _print_read_payload(probe, args.output, _probe_table)
+        else:
+            operation = _wait_for_terminal(client, operation_id)
+            if str(operation.get("status", "")).casefold() != "succeeded":
+                print(
+                    f"probe failed [{operation.get('error_code')}]: "
+                    f"{operation.get('error_message')}",
+                    file=sys.stderr,
+                )
+                return 7
+            result = _require_mapping(operation.get("result"), "probe result")
+            _print_read_payload(result, args.output, _probe_table)
     elif command == "serial" and args.serial_command == "read":
         payload = client.post(
             f"/api/v1/benches/{args.bench_id}/actions/read-serial",
@@ -186,7 +305,7 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
         accepted = _require_mapping(payload, "operation")
         operation_id = str(accepted.get("operation_id", ""))
         operation = _wait_for_terminal(client, operation_id)
-        if operation.get("status") != "succeeded":
+        if str(operation.get("status", "")).casefold() != "succeeded":
             print(
                 f"serial read failed [{operation.get('error_code')}]: "
                 f"{operation.get('error_message')}",
@@ -231,16 +350,21 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
 def _reservation_command(client: AgentClient, args: argparse.Namespace) -> int:
     command = args.reservation_command
     if command == "list":
+        query: dict[str, object] = {
+            "bench_id": args.bench_id,
+            "owner": args.owner,
+            "status": args.status,
+            "starts_after": args.starts_after,
+            "starts_before": args.starts_before,
+            "limit": args.limit,
+        }
+        if args.state:
+            query["state"] = [state.upper() for state in args.state]
+        if args.agent_id:
+            query["agent_id"] = args.agent_id
         payload = client.get(
             "/api/v1/reservations",
-            {
-                "bench_id": args.bench_id,
-                "owner": args.owner,
-                "status": args.status,
-                "starts_after": args.starts_after,
-                "starts_before": args.starts_before,
-                "limit": args.limit,
-            },
+            query,
         )
         _print_collection(payload, args.output, _reservation_table)
         return 0
@@ -249,18 +373,48 @@ def _reservation_command(client: AgentClient, args: argparse.Namespace) -> int:
         _print_read_payload(payload, args.output, _reservation_show_table)
         return 0
     if command == "create":
-        payload = client.post(
-            "/api/v1/reservations",
-            {
+        if "/" in args.bench_id or args.lease_ttl is not None or args.metadata:
+            if args.start is not None or args.queue_if_busy:
+                raise ValueError(
+                    "distributed reservations do not support --start or --queue-if-busy"
+                )
+            idempotency_key = args.idempotency_key or f"labctl:reservation:{uuid4()}"
+            request: dict[str, object] = {
+                "bench_id": args.bench_id,
+                "owner": args.owner,
+                "reservation_duration_seconds": parse_duration(args.duration),
+                "lease_ttl_seconds": (
+                    parse_duration(args.lease_ttl) if args.lease_ttl is not None else None
+                ),
+                "idempotency_key": idempotency_key,
+                "metadata": _key_value_map(args.metadata, "reservation metadata"),
+            }
+        else:
+            request = {
                 "bench_id": args.bench_id,
                 "owner": args.owner,
                 "starts_at": args.start,
                 "duration_seconds": parse_duration(args.duration),
                 "queue_if_busy": args.queue_if_busy,
                 "idempotency_key": args.idempotency_key,
+            }
+        payload = client.post("/api/v1/reservations", request)
+        _print_reservation(payload, args.output)
+        return 0
+    if command == "renew":
+        idempotency_key = args.idempotency_key or f"labctl:reservation-renew:{uuid4()}"
+        payload = client.post(
+            f"/api/v1/reservations/{args.reservation_id}/renew",
+            {
+                "owner": args.owner,
+                "expected_lease_version": args.expected_lease_version,
+                "idempotency_key": idempotency_key,
+                "lease_ttl_seconds": (
+                    parse_duration(args.lease_ttl) if args.lease_ttl is not None else None
+                ),
             },
         )
-        _print_reservation(payload, args.output)
+        _print_reservation(payload, args.output, action="renewed")
         return 0
     if command == "extend":
         payload = client.post(
@@ -270,9 +424,18 @@ def _reservation_command(client: AgentClient, args: argparse.Namespace) -> int:
         _print_reservation(payload, args.output)
         return 0
     if command == "release":
+        body: dict[str, object] = {"owner": args.owner}
+        if args.expected_lease_version is not None:
+            idempotency_key = args.idempotency_key or f"labctl:reservation-release:{uuid4()}"
+            body.update(
+                {
+                    "expected_lease_version": args.expected_lease_version,
+                    "idempotency_key": idempotency_key,
+                }
+            )
         payload = client.post(
             f"/api/v1/reservations/{args.reservation_id}/release",
-            {"owner": args.owner},
+            body,
         )
         _print_reservation(payload, args.output, action="released")
         return 0
@@ -323,11 +486,63 @@ def _workflow_command(client: AgentClient, args: argparse.Namespace) -> int:
         payload = client.get(f"/api/v1/workflows/{args.workflow_name}")
         _print_read_payload(payload, args.output, _workflow_show_table)
         return 0
+    if command == "register":
+        definition = yaml.safe_load(args.definition.read_text(encoding="utf-8"))
+        if not isinstance(definition, dict):
+            raise ValueError("workflow definition must be a YAML or JSON mapping")
+        payload = client.post("/api/v1/workflows", cast(dict[str, object], definition))
+        _print_read_payload(payload, args.output, _workflow_show_table)
+        return 0
     if command == "run":
         inputs = _workflow_inputs(args.input)
-        payload = client.post(
-            f"/api/v1/workflows/{args.workflow_name}/runs",
-            {
+        distributed = (
+            args.bench_id is None
+            or "/" in args.bench_id
+            or args.version is not None
+            or args.kind is not None
+            or args.location is not None
+            or bool(args.bench_label)
+            or bool(args.agent_label)
+            or args.reservation_duration is not None
+            or args.lease_ttl is not None
+            or args.command_timeout is not None
+            or args.idempotency_key is not None
+        )
+        if distributed:
+            if args.reservation_id is not None or args.release_after:
+                raise ValueError(
+                    "distributed workflow runs own their lease; --reservation-id and "
+                    "--release-after are not supported"
+                )
+            idempotency_key = args.idempotency_key or f"labctl:workflow:{uuid4()}"
+            request = {
+                "version": args.version,
+                "owner": args.owner,
+                "idempotency_key": idempotency_key,
+                "inputs": inputs,
+                "bench_id": args.bench_id,
+                "kind": args.kind.upper() if args.kind is not None else None,
+                "location": args.location,
+                "bench_labels": _key_value_map(args.bench_label, "bench label"),
+                "agent_labels": _key_value_map(args.agent_label, "Agent label"),
+                "reservation_duration_seconds": (
+                    parse_duration(args.reservation_duration)
+                    if args.reservation_duration is not None
+                    else parse_duration(args.reserve)
+                    if args.reserve is not None
+                    else None
+                ),
+                "lease_ttl_seconds": (
+                    parse_duration(args.lease_ttl) if args.lease_ttl is not None else None
+                ),
+                "command_timeout_seconds": (
+                    parse_duration(args.command_timeout)
+                    if args.command_timeout is not None
+                    else 3600
+                ),
+            }
+        else:
+            request = {
                 "bench_id": args.bench_id,
                 "owner": args.owner,
                 "reservation_id": args.reservation_id,
@@ -336,13 +551,35 @@ def _workflow_command(client: AgentClient, args: argparse.Namespace) -> int:
                 ),
                 "release_after": args.release_after,
                 "inputs": inputs,
-            },
-        )
+            }
+        request_key = request.get("idempotency_key")
+        if request_key is None:
+            payload = client.post(
+                f"/api/v1/workflows/{args.workflow_name}/runs",
+                request,
+            )
+        else:
+            payload = client.post(
+                f"/api/v1/workflows/{args.workflow_name}/runs",
+                request,
+                idempotency_key=str(request_key),
+            )
         if args.output == "json":
             _print_json(payload)
         else:
             run = _require_mapping(payload, "workflow run")
-            print(f"Workflow run created: {run.get('id', '')}")
+            operation = run.get("operation")
+            operation_data = (
+                cast(dict[str, object], operation) if isinstance(operation, dict) else {}
+            )
+            run_id = run.get("id") or operation_data.get("id")
+            print(f"Workflow run created: {run_id or ''}")
+            agent = run.get("agent")
+            if isinstance(agent, dict):
+                print(f"Agent: {agent.get('name') or agent.get('slug') or agent.get('id', '')}")
+            bench = run.get("bench")
+            if isinstance(bench, dict):
+                print(f"Bench: {bench.get('id', '')}")
         return 0
     if command == "watch":
         return _watch_workflow(client, args)
@@ -568,11 +805,12 @@ def _ci_run(client: AgentClient, args: argparse.Namespace) -> int:
             )
             heartbeat.start()
         created_status = str(created.get("status", "")).casefold()
+        distributed_ci = "distributed_workflow" in created
         if args.output == "table":
             verb = "resumed" if created_status in {"running", "completed"} else "created"
             print(f"CI session {verb}: {session_id}")
         session = created
-        if created_status in {"created", "waiting_for_bench"}:
+        if not distributed_ci and created_status in {"created", "waiting_for_bench"}:
             if args.output == "table":
                 print("Finding compatible bench...")
             session = _wait_for_ci_assignment(client, session_id, args)
@@ -589,8 +827,10 @@ def _ci_run(client: AgentClient, args: argparse.Namespace) -> int:
             )
 
         terminal = session
-        if session_status == "reserved":
-            if args.output == "table":
+        if session_status == "reserved" or (
+            distributed_ci and session_status in {"created", "waiting_for_bench"}
+        ):
+            if args.output == "table" and session.get("bench_id"):
                 print(f"Assigned: {session.get('bench_id', '')}")
             artifact_references: dict[str, dict[str, str]] = {}
             for specification in args.artifact:
@@ -600,18 +840,31 @@ def _ci_run(client: AgentClient, args: argparse.Namespace) -> int:
                     checksum, _size = _validate_firmware(path)
                 except (OSError, ValueError) as exc:
                     raise _CiArtifactUploadError(str(exc)) from exc
-                artifact = _require_mapping(
-                    client.upload_artifact(
+                artifact_type = "firmware" if name == "firmware" else "input"
+                artifact_key = f"{environment.idempotency_key}:artifact:{name}"
+                if distributed_ci:
+                    artifact_response = client.upload_artifact(
+                        "/api/v1/artifacts",
+                        path,
+                        fields={
+                            "owner_type": "ci_session",
+                            "owner_id": session_id,
+                            "artifact_type": artifact_type,
+                            "expected_sha256": checksum,
+                            "idempotency_key": artifact_key,
+                        },
+                    )
+                else:
+                    artifact_response = client.upload_artifact(
                         "/api/v1/artifacts",
                         path,
                         name=path.name,
-                        artifact_type="firmware" if name == "firmware" else "input",
+                        artifact_type=artifact_type,
                         ci_session_id=session_id,
                         checksum=checksum,
-                        idempotency_key=f"{environment.idempotency_key}:artifact:{name}",
-                    ),
-                    "artifact",
-                )
+                        idempotency_key=artifact_key,
+                    )
+                artifact = _require_mapping(artifact_response, "artifact")
                 artifact_id = str(artifact.get("id", ""))
                 if not artifact_id:
                     raise ValueError("Agent did not return an artifact ID")
@@ -621,26 +874,59 @@ def _ci_run(client: AgentClient, args: argparse.Namespace) -> int:
 
             workflow_inputs: dict[str, object] = dict(_workflow_inputs(args.input))
             workflow_inputs.update(artifact_references)
-            running = _require_mapping(
-                client.post(
-                    f"/api/v1/ci/sessions/{session_id}/run",
-                    {"workflow_name": args.workflow, "inputs": workflow_inputs},
-                    idempotency_key=f"{environment.idempotency_key}:workflow",
-                ),
-                "CI workflow",
+            run_payload = {"workflow_name": args.workflow, "inputs": workflow_inputs}
+            workflow_key = f"{environment.idempotency_key}:workflow"
+            running = (
+                _start_distributed_ci_workflow(
+                    client,
+                    session_id,
+                    run_payload,
+                    idempotency_key=workflow_key,
+                    args=args,
+                )
+                if distributed_ci
+                else _require_mapping(
+                    client.post(
+                        f"/api/v1/ci/sessions/{session_id}/run",
+                        run_payload,
+                        idempotency_key=workflow_key,
+                    ),
+                    "CI workflow",
+                )
             )
-            workflow_run_id = _optional_text(running.get("workflow_run_id"))
-            if workflow_run_id is None:
-                raise ValueError("Agent did not return a workflow run ID")
-            terminal = _watch_ci_workflow(client, session_id, workflow_run_id, args)
+            if distributed_ci:
+                running_status = str(running.get("status", "")).casefold()
+                if running_status in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+                    terminal = running
+                else:
+                    operation_id = _optional_text(running.get("operation_id"))
+                    if operation_id is None:
+                        raise ValueError("Control plane did not return a distributed operation ID")
+                    if args.output == "table":
+                        print(f"Assigned: {running.get('bench_id', '')}")
+                        print(f"Remote operation: {operation_id}")
+                    terminal = _watch_distributed_ci_workflow(client, session_id, args)
+            else:
+                workflow_run_id = _optional_text(running.get("workflow_run_id"))
+                if workflow_run_id is None:
+                    raise ValueError("Agent did not return a workflow run ID")
+                terminal = _watch_ci_workflow(client, session_id, workflow_run_id, args)
             session_configuration = terminal
         elif session_status == "running":
-            workflow_run_id = _optional_text(session.get("workflow_run_id"))
-            if workflow_run_id is None:
-                raise ValueError("Running CI session did not include a workflow run ID")
-            if args.output == "table":
-                print(f"Resuming workflow run: {workflow_run_id}")
-            terminal = _watch_ci_workflow(client, session_id, workflow_run_id, args)
+            if distributed_ci:
+                operation_id = _optional_text(session.get("operation_id"))
+                if operation_id is None:
+                    raise ValueError("Running distributed CI session has no operation ID")
+                if args.output == "table":
+                    print(f"Resuming remote operation: {operation_id}")
+                terminal = _watch_distributed_ci_workflow(client, session_id, args)
+            else:
+                workflow_run_id = _optional_text(session.get("workflow_run_id"))
+                if workflow_run_id is None:
+                    raise ValueError("Running CI session did not include a workflow run ID")
+                if args.output == "table":
+                    print(f"Resuming workflow run: {workflow_run_id}")
+                terminal = _watch_ci_workflow(client, session_id, workflow_run_id, args)
             session_configuration = terminal
         elif session_status not in _CI_ASSIGNMENT_TERMINAL_STATUSES:
             raise ValueError(
@@ -653,14 +939,24 @@ def _ci_run(client: AgentClient, args: argparse.Namespace) -> int:
         finalized_payload = terminal
         stop_heartbeat()
         if terminal_status != "completed":
-            finalized_payload = _require_mapping(
-                client.post(
-                    f"/api/v1/ci/sessions/{session_id}/finalize",
-                    {},
+            finalized_payload = (
+                _finalize_distributed_ci_session(
+                    client,
+                    session_id,
+                    session=terminal,
                     idempotency_key=f"{environment.idempotency_key}:finalize",
-                    timeout=_ci_cleanup_request_timeout(terminal),
-                ),
-                "finalized CI session",
+                    poll_interval=_ci_poll_interval(args),
+                )
+                if distributed_ci
+                else _require_mapping(
+                    client.post(
+                        f"/api/v1/ci/sessions/{session_id}/finalize",
+                        {},
+                        idempotency_key=f"{environment.idempotency_key}:finalize",
+                        timeout=_ci_cleanup_request_timeout(terminal),
+                    ),
+                    "finalized CI session",
+                )
             )
         finalized = True
         return _finish_ci_run(
@@ -859,7 +1155,7 @@ def _ci_bench_request(args: argparse.Namespace) -> dict[str, object]:
     preferred_labels = _key_value_map(args.prefer_label, "preferred label")
     if not args.allow_simulated and not args.allow_physical:
         raise ValueError("at least one of simulated or physical benches must be allowed")
-    return {
+    request: dict[str, object] = {
         "explicit_bench_id": args.bench,
         "required_capabilities": sorted(capabilities),
         "required_labels": required_labels,
@@ -869,6 +1165,12 @@ def _ci_bench_request(args: argparse.Namespace) -> dict[str, object]:
         "maximum_wait_seconds": parse_duration(str(args.wait_timeout)),
         "reservation_duration_seconds": parse_duration(str(args.reservation_duration)),
     }
+    agent_labels = _key_value_map(args.agent_label, "Agent label")
+    if agent_labels:
+        request["required_agent_labels"] = agent_labels
+    if args.preferred_location is not None:
+        request["preferred_location"] = args.preferred_location
+    return request
 
 
 def _wait_for_ci_assignment(
@@ -909,6 +1211,123 @@ def _wait_for_ci_assignment(
         client.post(f"/api/v1/ci/sessions/{session_id}/heartbeat", {})
         previous_status = status
         time.sleep(min(interval, remaining))
+
+
+def _start_distributed_ci_workflow(
+    client: AgentClient,
+    session_id: str,
+    payload: dict[str, object],
+    *,
+    idempotency_key: str,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Retry central selection without requiring the CLI to know an Agent route."""
+
+    deadline = time.monotonic() + parse_duration(str(args.wait_timeout))
+    interval = _ci_poll_interval(args)
+    announced_wait = False
+    while True:
+        try:
+            return _require_mapping(
+                client.post(
+                    f"/api/v1/ci/sessions/{session_id}/run",
+                    payload,
+                    idempotency_key=idempotency_key,
+                ),
+                "distributed CI workflow",
+            )
+        except AgentApiError as exc:
+            if exc.code not in _DISTRIBUTED_CI_RETRYABLE_ERRORS:
+                raise
+            current = _require_mapping(
+                client.get(f"/api/v1/ci/sessions/{session_id}"),
+                "CI session",
+            )
+            status = str(current.get("status", "")).casefold()
+            if status in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+                return current
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _CiBenchWaitTimeout(
+                    "Timed out waiting for a compatible distributed bench"
+                ) from exc
+            if args.output == "table" and not announced_wait:
+                print("Waiting for an online compatible Agent and bench...")
+                announced_wait = True
+            client.post(f"/api/v1/ci/sessions/{session_id}/heartbeat", {})
+            time.sleep(min(interval, remaining))
+
+
+def _watch_distributed_ci_workflow(
+    client: AgentClient,
+    session_id: str,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    interval = _ci_poll_interval(args)
+    previous: tuple[object, object, object] | None = None
+    while True:
+        session = _require_mapping(
+            client.get(f"/api/v1/ci/sessions/{session_id}"),
+            "CI session",
+        )
+        status = str(session.get("status", "")).casefold()
+        if not status:
+            raise ValueError("Control plane returned a CI session without a status")
+        operation_id = _optional_text(session.get("operation_id"))
+        progress: object = None
+        message: object = None
+        if operation_id is not None:
+            operation = _require_mapping(
+                client.get(f"/api/v1/operations/{operation_id}"),
+                "distributed operation",
+            )
+            progress = operation.get("progress")
+            message = operation.get("message")
+        current = (status, progress, message)
+        if args.output == "table" and current != previous:
+            detail = f" — {message}" if message else ""
+            percent = f" ({progress}%)" if isinstance(progress, int) else ""
+            print(f"Remote workflow: {status.replace('_', ' ').title()}{percent}{detail}")
+        if status in _CI_ASSIGNMENT_TERMINAL_STATUSES:
+            return session
+        if status not in {"created", "waiting_for_bench", "reserved", "running"}:
+            raise ValueError(f"Control plane returned unexpected CI status: {status}")
+        client.post(f"/api/v1/ci/sessions/{session_id}/heartbeat", {})
+        previous = current
+        time.sleep(interval)
+
+
+def _finalize_distributed_ci_session(
+    client: AgentClient,
+    session_id: str,
+    *,
+    session: dict[str, object],
+    idempotency_key: str,
+    poll_interval: float,
+) -> dict[str, object]:
+    """Wait until control-plane cleanup has synchronized every remote artifact."""
+
+    timeout = _ci_cleanup_request_timeout(session)
+    deadline = time.monotonic() + timeout
+    while True:
+        current = _require_mapping(
+            client.post(
+                f"/api/v1/ci/sessions/{session_id}/finalize",
+                {},
+                idempotency_key=idempotency_key,
+                timeout=timeout,
+            ),
+            "finalized CI session",
+        )
+        status = str(current.get("status", "")).casefold()
+        if status == "completed":
+            return current
+        if status != "cleanup_pending":
+            raise ValueError(f"Control plane returned unexpected cleanup status: {status}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AgentConnectionError("Timed out waiting for remote CI artifact finalization")
+        time.sleep(min(max(0.01, poll_interval), remaining))
 
 
 def _watch_ci_workflow(
@@ -1450,7 +1869,7 @@ def _watch_workflow(client: AgentClient, args: argparse.Namespace) -> int:
             step = payload.get("current_step")
             prefix = f"Step {int(step) + 1}: " if isinstance(step, int) else ""
             print(f"{prefix}{str(payload.get('status', '')).replace('_', ' ').title()}")
-        status = str(payload.get("status", ""))
+        status = str(payload.get("status", "")).casefold()
         if status in {"succeeded", "failed", "cancelled"}:
             if args.output == "json":
                 _print_json(payload)
@@ -1479,6 +1898,14 @@ def _operation_command(client: AgentClient, args: argparse.Namespace) -> int:
         )
         _print_collection(payload, args.output, _operation_table)
         return 0
+    if command == "reconcile":
+        payload = client.post(f"/api/v1/operations/{args.operation_id}/reconcile", {})
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            response = _require_mapping(payload, "operation reconciliation")
+            print(f"Reconciliation requested: {response.get('request_id', '')}")
+        return 0
     if command == "cancel":
         payload = client.post(
             f"/api/v1/operations/{args.operation_id}/cancel", {"owner": args.owner}
@@ -1503,7 +1930,7 @@ def _watch_operation(client: AgentClient, args: argparse.Namespace) -> int:
         if args.output == "table" and current != last:
             progress = _integer(payload.get("progress"))
             print(f"[{progress:3d}%] {payload.get('message') or payload.get('status', '')}")
-        status = str(payload.get("status", ""))
+        status = str(payload.get("status", "")).casefold()
         if status in {"succeeded", "failed", "cancelled"}:
             if args.output == "json":
                 _print_json(payload)
@@ -1519,22 +1946,34 @@ def _wait_for_terminal(
 ) -> dict[str, object]:
     while True:
         operation = _require_mapping(client.get(f"/api/v1/operations/{operation_id}"), "operation")
-        if operation.get("status") in {"succeeded", "failed", "cancelled"}:
+        if str(operation.get("status", "")).casefold() in {
+            "succeeded",
+            "failed",
+            "cancelled",
+        }:
             return operation
         time.sleep(interval)
 
 
 def _bench_list(client: AgentClient, args: argparse.Namespace) -> None:
+    query: dict[str, object] = {
+        "status": getattr(args, "status", None),
+        "capability": getattr(args, "capability", None),
+        "reserved": getattr(args, "reserved", None),
+        "online": True if getattr(args, "online", False) else None,
+        "available": True if getattr(args, "available", False) else None,
+        "label": getattr(args, "label", None),
+    }
+    for key, value in (
+        ("agent_id", getattr(args, "agent_id", None)),
+        ("location", getattr(args, "location", None)),
+        ("agent_label", getattr(args, "agent_label", None)),
+    ):
+        if value is not None and value != () and value != []:
+            query[key] = value
     payload = client.get(
         "/api/v1/benches",
-        {
-            "status": getattr(args, "status", None),
-            "capability": getattr(args, "capability", None),
-            "reserved": getattr(args, "reserved", None),
-            "online": True if getattr(args, "online", False) else None,
-            "available": True if getattr(args, "available", False) else None,
-            "label": getattr(args, "label", None),
-        },
+        query,
     )
     _print_collection(payload, args.output, _bench_table)
 
@@ -1555,6 +1994,40 @@ def _build_parser() -> argparse.ArgumentParser:
     _read_parser(commands.add_parser("benches", help=argparse.SUPPRESS))
     _read_parser(commands.add_parser("plugins", help=argparse.SUPPRESS))
 
+    agent = commands.add_parser("agent", help="Administer distributed lab Agents.")
+    agents = agent.add_subparsers(dest="agent_command", required=True)
+    agent_list = _read_parser(agents.add_parser("list"))
+    agent_list.add_argument("--status")
+    agent_list.add_argument("--location")
+    agent_list.add_argument("--label", action="append", default=[])
+    agent_list.add_argument("--version")
+    agent_show = _read_parser(agents.add_parser("show"))
+    agent_show.add_argument("agent_id")
+    enrollment_token = agents.add_parser("enrollment-token")
+    enrollment_tokens = enrollment_token.add_subparsers(
+        dest="enrollment_token_command", required=True
+    )
+    enrollment_create = _read_parser(enrollment_tokens.add_parser("create"))
+    enrollment_create.add_argument("--name", required=True)
+    enrollment_create.add_argument("--expires-in", default="30m")
+    enrollment_create.add_argument("--expires-at")
+    enrollment_create.add_argument("--allowed-label", action="append", default=[])
+    _read_parser(enrollment_tokens.add_parser("list"))
+    enrollment_revoke = _read_parser(enrollment_tokens.add_parser("revoke"))
+    enrollment_revoke.add_argument("token_id")
+    agent_drain = _read_parser(agents.add_parser("drain"))
+    agent_drain.add_argument("agent_id")
+    agent_drain.add_argument("--cancel-queued-work", action="store_true")
+    for name in ("undrain", "revoke", "refresh"):
+        mutation = _read_parser(agents.add_parser(name))
+        mutation.add_argument("agent_id")
+    agent_timeline = _read_parser(agents.add_parser("timeline"))
+    agent_timeline.add_argument("agent_id")
+    agent_timeline.add_argument("--severity")
+    agent_timeline.add_argument("--event-type")
+    agent_timeline.add_argument("--since")
+    agent_timeline.add_argument("--limit", type=int, default=500)
+
     bench = commands.add_parser("bench", help="Inspect and control benches.")
     benches = bench.add_subparsers(dest="bench_command", required=True)
     bench_list = _read_parser(benches.add_parser("list"))
@@ -1564,6 +2037,9 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_list.add_argument("--online", action="store_true")
     bench_list.add_argument("--available", action="store_true")
     bench_list.add_argument("--label", action="append", default=[])
+    bench_list.add_argument("--agent", dest="agent_id")
+    bench_list.add_argument("--location")
+    bench_list.add_argument("--agent-label", action="append", default=[])
     bench_show = _read_parser(benches.add_parser("show"))
     bench_show.add_argument("bench_id")
     timeline = _read_parser(benches.add_parser("timeline"))
@@ -1599,6 +2075,8 @@ def _build_parser() -> argparse.ArgumentParser:
     reservation_list.add_argument("--bench-id")
     reservation_list.add_argument("--owner")
     reservation_list.add_argument("--status")
+    reservation_list.add_argument("--state", action="append", default=[])
+    reservation_list.add_argument("--agent", dest="agent_id")
     reservation_list.add_argument("--starts-after")
     reservation_list.add_argument("--starts-before")
     reservation_list.add_argument("--limit", type=int, default=50)
@@ -1611,14 +2089,25 @@ def _build_parser() -> argparse.ArgumentParser:
     reservation_create.add_argument("--start")
     reservation_create.add_argument("--queue-if-busy", action="store_true")
     reservation_create.add_argument("--idempotency-key")
+    reservation_create.add_argument("--lease-ttl")
+    reservation_create.add_argument("--metadata", action="append", default=[])
     reservation_extend = _read_parser(reservations.add_parser("extend"))
     reservation_extend.add_argument("reservation_id")
     reservation_extend.add_argument("--owner", required=True)
     reservation_extend.add_argument("--duration", required=True)
+    reservation_renew = _read_parser(reservations.add_parser("renew"))
+    reservation_renew.add_argument("reservation_id")
+    reservation_renew.add_argument("--owner", required=True)
+    reservation_renew.add_argument("--expected-lease-version", type=int, required=True)
+    reservation_renew.add_argument("--lease-ttl")
+    reservation_renew.add_argument("--idempotency-key")
     for name in ("release", "cancel"):
         reservation_mutation = _read_parser(reservations.add_parser(name))
         reservation_mutation.add_argument("reservation_id")
         reservation_mutation.add_argument("--owner", required=True)
+        if name == "release":
+            reservation_mutation.add_argument("--expected-lease-version", type=int)
+            reservation_mutation.add_argument("--idempotency-key")
     reservation_queue = _read_parser(reservations.add_parser("queue"))
     reservation_queue.add_argument("bench_id")
     reservation_queue.add_argument("--owner", required=True)
@@ -1635,10 +2124,21 @@ def _build_parser() -> argparse.ArgumentParser:
     _read_parser(workflows.add_parser("list"))
     workflow_show = _read_parser(workflows.add_parser("show"))
     workflow_show.add_argument("workflow_name")
+    workflow_register = _read_parser(workflows.add_parser("register"))
+    workflow_register.add_argument("definition", type=Path)
     workflow_run = _read_parser(workflows.add_parser("run"))
     workflow_run.add_argument("workflow_name")
-    workflow_run.add_argument("--bench", dest="bench_id", required=True)
+    workflow_run.add_argument("--bench", dest="bench_id")
     workflow_run.add_argument("--owner", required=True)
+    workflow_run.add_argument("--version", type=int)
+    workflow_run.add_argument("--idempotency-key")
+    workflow_run.add_argument("--kind", choices=("simulated", "physical"))
+    workflow_run.add_argument("--location")
+    workflow_run.add_argument("--bench-label", action="append", default=[])
+    workflow_run.add_argument("--agent-label", action="append", default=[])
+    workflow_run.add_argument("--reservation-duration")
+    workflow_run.add_argument("--lease-ttl")
+    workflow_run.add_argument("--command-timeout")
     workflow_run.add_argument("--reservation-id")
     workflow_run.add_argument("--reserve")
     workflow_run.add_argument("--release-after", action="store_true")
@@ -1724,6 +2224,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cancel = _read_parser(operations.add_parser("cancel"))
     cancel.add_argument("operation_id")
     cancel.add_argument("--owner", required=True)
+    reconcile = _read_parser(operations.add_parser("reconcile"))
+    reconcile.add_argument("operation_id")
 
     event = commands.add_parser("event", help="Read stored event history.")
     events = event.add_subparsers(dest="event_command", required=True)
@@ -1744,6 +2246,8 @@ def _add_ci_bench_request_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--require", action="append", default=[])
     parser.add_argument("--label", action="append", default=[])
     parser.add_argument("--prefer-label", action="append", default=[])
+    parser.add_argument("--agent-label", action="append", default=[])
+    parser.add_argument("--preferred-location")
     parser.add_argument(
         "--allow-simulated",
         action=argparse.BooleanOptionalAction,
@@ -1752,7 +2256,7 @@ def _add_ci_bench_request_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-physical",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
     parser.add_argument("--wait-timeout", default="10m")
     parser.add_argument("--reservation-duration", default="30m")
@@ -1878,11 +2382,121 @@ def _health_table(payload: dict[str, object]) -> None:
     _print_table(("FIELD", "VALUE"), rows)
 
 
+def _agent_table(items: list[object]) -> None:
+    rows: list[tuple[str, ...]] = []
+    for item in items:
+        agent = _require_mapping(item, "Agent")
+        rows.append(
+            (
+                str(agent.get("id", "")),
+                str(agent.get("name") or agent.get("slug") or ""),
+                str(agent.get("status", "")).replace("_", " ").title(),
+                str(agent.get("location") or "—"),
+                str(agent.get("version") or "—"),
+                str(agent.get("bench_count", 0)),
+            )
+        )
+    _print_table(("ID", "NAME", "STATUS", "LOCATION", "VERSION", "BENCHES"), rows)
+
+
+def _agent_show_table(agent: dict[str, object]) -> None:
+    connection = agent.get("connection")
+    connected = isinstance(connection, dict)
+    benches = agent.get("benches")
+    bench_count = len(benches) if isinstance(benches, list) else agent.get("bench_count", 0)
+    labels = agent.get("labels")
+    label_text = (
+        ", ".join(f"{key}={value}" for key, value in sorted(labels.items()))
+        if isinstance(labels, dict)
+        else ""
+    )
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Agent", str(agent.get("name") or agent.get("slug") or agent.get("id", ""))),
+            ("ID", str(agent.get("id", ""))),
+            ("Status", str(agent.get("status", "")).replace("_", " ").title()),
+            ("Location", str(agent.get("location") or "—")),
+            ("Version", str(agent.get("version") or "—")),
+            ("Protocol", str(agent.get("protocol_version") or "—")),
+            ("Connected", "Yes" if connected else "No"),
+            ("Last seen", str(agent.get("last_seen_at") or "—")),
+            ("Benches", str(bench_count)),
+            ("Labels", label_text or "—"),
+        ],
+    )
+
+
+def _print_agent_mutation(payload: object, action: str) -> None:
+    response = _require_mapping(payload, "Agent mutation")
+    nested = response.get("agent")
+    agent = _require_mapping(nested, "Agent") if isinstance(nested, dict) else response
+    name = str(agent.get("name") or agent.get("slug") or agent.get("id", ""))
+    print(f"Agent {name} {action.replace('_', ' ')} requested.")
+    print(f"Status: {str(agent.get('status', '')).replace('_', ' ').title()}")
+
+
+def _enrollment_token_table(items: list[object]) -> None:
+    rows: list[tuple[str, ...]] = []
+    for item in items:
+        token = _require_mapping(item, "enrollment token")
+        status = (
+            "Revoked"
+            if token.get("revoked_at")
+            else "Used"
+            if token.get("used_at")
+            else "Available"
+        )
+        rows.append(
+            (
+                str(token.get("id", "")),
+                str(token.get("name", "")),
+                status,
+                str(token.get("expires_at", "")),
+            )
+        )
+    _print_table(("ID", "NAME", "STATUS", "EXPIRES"), rows)
+
+
+def _agent_timeline_table(items: list[object]) -> None:
+    rows: list[tuple[str, ...]] = []
+    for item in items:
+        entry = _require_mapping(item, "Agent timeline entry")
+        rows.append(
+            (
+                str(entry.get("timestamp", "")),
+                str(entry.get("severity", "")).title(),
+                str(entry.get("event_type", "")),
+                str(entry.get("message", "")),
+            )
+        )
+    _print_table(("TIMESTAMP", "SEVERITY", "EVENT", "MESSAGE"), rows)
+
+
 def _bench_table(items: list[object]) -> None:
-    rows = []
+    if any(isinstance(item, dict) and "agent_id" in item for item in items):
+        distributed_rows: list[tuple[str, ...]] = []
+        for item in items:
+            bench = _require_mapping(item, "bench")
+            distributed_rows.append(
+                (
+                    str(bench.get("id", "")),
+                    str(bench.get("agent_slug") or bench.get("agent_id") or "—"),
+                    str(bench.get("status", "")).replace("_", " ").title(),
+                    str(bench.get("kind", "")).title(),
+                    str(bench.get("health", "")).title(),
+                    str(bench.get("firmware_version") or "—"),
+                )
+            )
+        _print_table(
+            ("ID", "AGENT", "STATUS", "KIND", "HEALTH", "FIRMWARE"),
+            distributed_rows,
+        )
+        return
+    local_rows: list[tuple[str, ...]] = []
     for item in items:
         bench = _require_mapping(item, "bench")
-        rows.append(
+        local_rows.append(
             (
                 str(bench.get("id", "")),
                 str(bench.get("status", "")).title(),
@@ -1891,7 +2505,7 @@ def _bench_table(items: list[object]) -> None:
                 str(bench.get("firmware_version") or "—"),
             )
         )
-    _print_table(("ID", "STATUS", "POWER", "RESERVED BY", "FIRMWARE"), rows)
+    _print_table(("ID", "STATUS", "POWER", "RESERVED BY", "FIRMWARE"), local_rows)
 
 
 def _bench_show_table(bench: dict[str, object]) -> None:
@@ -1971,7 +2585,7 @@ def _event_table(items: list[object]) -> None:
 def _reservation_table(items: list[object]) -> None:
     rows = []
     for item in items:
-        reservation = _require_mapping(item, "reservation")
+        reservation = _normalized_reservation(_require_mapping(item, "reservation"))
         rows.append(
             (
                 str(reservation.get("id", "")),
@@ -1986,6 +2600,7 @@ def _reservation_table(items: list[object]) -> None:
 
 
 def _reservation_show_table(reservation: dict[str, object]) -> None:
+    reservation = _normalized_reservation(reservation)
     _print_table(
         ("FIELD", "VALUE"),
         [
@@ -1996,17 +2611,35 @@ def _reservation_show_table(reservation: dict[str, object]) -> None:
 
 
 def _print_reservation(payload: object, output: str, action: str | None = None) -> None:
-    reservation = _require_mapping(payload, "reservation")
+    raw = _require_mapping(payload, "reservation")
+    reservation = _normalized_reservation(raw)
     if output == "json":
-        _print_json(reservation)
+        _print_json(raw)
         return
     status = str(reservation.get("status", "reservation")).replace("_", " ")
     verb = action or status
     print(f"Reservation {verb}.")
-    print(f"Reservation ID: {reservation.get('id', '')}")
+    print(f"Reservation ID: {reservation.get('id') or reservation.get('reservation_id', '')}")
     print(f"Bench:          {reservation.get('bench_id', '')}")
     print(f"Owner:          {reservation.get('owner', '')}")
     print(f"Ends:           {reservation.get('ends_at') or '—'}")
+
+
+def _normalized_reservation(payload: dict[str, object]) -> dict[str, object]:
+    nested = payload.get("reservation")
+    if not isinstance(nested, dict):
+        return payload
+    reservation = cast(dict[str, object], nested)
+    lease = payload.get("lease")
+    lease_data = cast(dict[str, object], lease) if isinstance(lease, dict) else {}
+    return {
+        **reservation,
+        "id": reservation.get("reservation_id") or reservation.get("id"),
+        "status": payload.get("state") or reservation.get("status"),
+        "lease_version": lease_data.get("lease_version"),
+        "ends_at": lease_data.get("valid_until") or reservation.get("ends_at"),
+        "revision": payload.get("revision"),
+    }
 
 
 def _queue_table(items: list[object]) -> None:

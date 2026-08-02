@@ -23,7 +23,6 @@ def _start_agent(root: Path) -> tuple[LabAgent, AgentHttpServer, threading.Threa
         encoding="utf-8",
     )
     agent = create_agent(root)
-    asyncio.run(agent.start())
     server = AgentHttpServer(agent, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -48,7 +47,7 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
     prefix = ["--server", base_url]
     try:
         assert cli_main([*prefix, "version"]) == 0
-        assert capsys.readouterr().out.strip() == "labctl 0.5.0-alpha"
+        assert capsys.readouterr().out.strip() == "labctl 0.6.0-alpha"
 
         assert cli_main([*prefix, "health", "--output", "json"]) == 0
         health = json.loads(capsys.readouterr().out)

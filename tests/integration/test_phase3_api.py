@@ -101,7 +101,6 @@ def _phase3_client(
         agent.catalog._clock = clock
         agent.reservation_service._clock = clock
         agent.scheduling_service._clock = clock
-    asyncio.run(agent.start())
     try:
         with TestClient(create_app(agent), raise_server_exceptions=False) as client:
             yield agent, client

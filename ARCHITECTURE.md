@@ -1,40 +1,65 @@
 # Architecture
 
-Lab Platform is a local-first, layered hardware-control service. Dependencies point inward; CI
-providers and backend implementations remain replaceable adapters.
+Lab Platform is a layered distributed hardware-control system with a local compatibility mode.
+Dependencies point inward; transports, CI providers, persistence, and backend implementations
+remain replaceable adapters. The central control plane owns global coordination while every Agent
+retains final authority over hardware execution and safety.
 
 | Layer | Packages | Responsibility |
 | --- | --- | --- |
-| Transport/integration | `apps/agent`, `apps/cli`, `integrations/` | FastAPI routes, HTTP client, provider metadata and presentation |
-| Application | `packages/core` services | CI coordination, selection/reservations, workflows, operations, cleanup, results |
-| Domain | `packages/models`, core protocols/errors | Immutable contracts, transitions, backend ports, stable errors |
-| Infrastructure | persistence, SimLab adapter, real backend | SQLite, artifact files, simulator mapping, ESP32 discovery/serial/esptool |
+| Transport/integration | `apps/control_plane`, `apps/agent`, `apps/cli`, `integrations/` | REST/WebSocket boundaries, process composition, HTTP clients, provider presentation |
+| Distributed application | `packages/control_plane_core`, `packages/agent_runtime` | Enrollment, presence, inventory, leases, remote commands, reconciliation, transfer, connection/journal behavior |
+| Local application | `packages/core` services | Backend selection/reservations, workflow execution, operations, CI cleanup and results |
+| Domain | `packages/models`, `packages/agent_protocol`, core protocols/errors | Immutable contracts, typed versioned envelopes, transitions, ports, stable errors |
+| Infrastructure | persistence, SimLab adapter, real backend | PostgreSQL/SQLite adapters, artifact files/cache, simulator mapping, ESP32 discovery/serial/esptool |
 
-## Controlling data flow
+## Distributed controlling data flow
 
 ```text
 GitHub Actions / GitLab CI / Jenkins / local shell
                         |
                      labctl
                         | HTTP + bearer token
-                    /api/v1
+                 Control Plane /api/v1
                         |
-                 CI Session Service
-             /           |            \
-       Artifact      Selection +       Workflow Runner
-       Service       Reservation             |
-                        |               BackendRegistry
-                        |               /             \
-                     SQLite      SimLabBackend   RealLabBackend
-                                                    |
-                                               PhysicalTarget
-                                                    |
-                                               Esp32Target
+       +----------------+------------------+
+       | global inventory/reservations/CI |
+       | remote operations and artifacts  |
+       +----------------+------------------+
+                        | authenticated protocol 1.0 WebSocket
+              +---------+---------+
+              |                   |
+           Agent A             Agent B
+       local journal/locks  local journal/locks
+          /         \          /         \
+   SimLabBackend  RealLab  SimLabBackend  RealLab
+                       |                       |
+                  Esp32Target            future target
 ```
 
-CI systems never call SimLab or hardware drivers directly. GitHub job summaries and provider
-environment detection live in integration/CLI adapters, not the domain layer. A manually launched
-workflow and a CI-launched workflow reach the same runner and backend ports.
+CI systems never call an Agent, SimLab, or hardware driver directly. The control plane selects the
+owning Agent and sends one complete sequential workflow command; that Agent invokes the same local
+workflow runner and backend ports used in standalone mode. GitHub job summaries and provider
+environment detection stay in integration/CLI adapters, not the domain layer.
+
+## Distributed consistency and safety
+
+The control plane is authoritative for global identity, reservations, routing, CI/workflow
+requests, and user-facing operation history. An Agent is authoritative for backend health,
+physical locks, safety policy, execution, progress, and local artifacts. The control plane cannot
+turn transmission into success; it waits for an Agent terminal event.
+
+Remote delivery is at least once. Commands are persisted before dispatch and before Agent
+acceptance, then deduplicated by command ID/idempotency key in a durable Agent journal. Global
+reservations become usable only after the owning Agent confirms a versioned local lease. Event
+batches remain in the durable Agent buffer until the control plane routes them and returns an
+explicit acknowledgment, so reconnect replay carries the same event IDs.
+
+Heartbeat loss marks benches offline and running operations/reservations unknown for bounded
+reconciliation periods. A reconnect report compares the boot ID, command journal, local leases,
+inventory, and buffered events. Same-boot work can be recovered or safely redelivered; a new boot
+is treated as process restart and missing work is never assumed to continue. See
+[Phase 5](docs/PHASE_5.md) for the full state and failure model.
 
 ## CI session aggregate
 
@@ -61,22 +86,29 @@ checks keep one automation owner from operating another owner's sessions or arti
 
 ## Selection, ownership, and concurrency
 
-The selection service filters online benches by exact capabilities, labels, and simulated/physical
-policy. Available candidates rank ahead of busy ones, followed by preferred-label score,
-least-recent use, and bench ID. Candidate choice and timed reservation creation share a transaction,
-so selection is deterministic and two sessions cannot acquire the same bench.
+The distributed selection service filters online, non-draining Agents and benches by capabilities,
+Agent/bench labels, location, and simulated/physical policy. Available candidates rank ahead of
+busy ones, followed by preference, load, least-recent use, and stable bench ID. Candidate choice
+and central reservation creation are coordinated, and the assignment is not visible as active
+until the Agent confirms its lease.
 
-SQLite is authoritative for bench catalog metadata, timed reservations, FIFO queues, operation
-locks, operations, workflow definitions/runs/steps, API token records, CI sessions, generic
-artifacts, cleanup results, recovery records, and audit events. Partial unique indexes allow only
-one active reservation and one operation lock per bench. Transactional state transitions prevent
-double assignment and duplicate idempotent resources.
+The production control plane uses PostgreSQL for global Agent/inventory/command/lease/
+reconciliation, workflow/CI/artifact/token/timeline state. SQLite remains available for the
+loopback developer control plane and for Agent-local journal/buffer/lease/cache metadata.
+Transactional state transitions and unique constraints/indexes prevent double assignment and
+duplicate idempotent resources on both supported central stores.
 
 Operations and sequential workflows execute as in-process asyncio tasks. Status and progress are
 persisted after each transition. A heartbeat reaper synchronizes live sessions and cleans up
 abandoned clients.
 
 ## Authentication boundary
+
+The Agent gateway requires a unique Agent credential over WSS outside the explicit loopback demo.
+One-time enrollment tokens and Agent credentials are stored only as hashes by the control plane;
+credential rotation/revocation is per Agent. The Agent stores only its non-secret ID in YAML and
+reads credential plaintext from a named environment variable. Protocol message IDs/sequences,
+command expiry, strict typed payloads, and bounded queues constrain replay and input handling.
 
 CI/artifact/result routes use bearer-token dependencies with explicit scopes. Tokens are generated
 from cryptographic random bytes and stored as one-way hashes; plaintext is returned only at
@@ -87,13 +119,15 @@ exists, those routes also require their mapped scopes and bind owner-bearing req
 reads to the authenticated token owner. This preserves an upgrade path for a fresh local Agent
 without leaving an owner-string bypass after machine authentication is enabled.
 
-The first token creation is allowed without authentication only while the token store is empty,
-and that token must grant every supported scope. Afterward, token creation, listing, and revocation
-require an active all-scope bearer; the last active all-scope token cannot be revoked. There is no
-distinct administrator identity in Phase 4, so an all-scope CI credential is admin-equivalent and
-operators should retain a separate backup before expiry. Network restriction and TLS termination
-belong outside the Agent. This boundary is limited machine authentication, not a hardened
-multi-tenant or public-internet security system.
+The first token creation is allowed without authentication only while the relevant token store is
+empty, and that token must grant every scope supported by that endpoint. The standalone Agent then
+requires all seven local scopes for token administration; the control plane requires
+`agents:admin`. Last-administrator revocation guards apply in both cases, but cannot prevent expiry,
+so operators should retain a separate backup. The distributed control-plane server can terminate
+TLS directly when both certificate/key paths are configured. A reverse proxy is accepted only in
+explicit TLS-termination mode while the server process remains loopback-bound. This boundary is
+still limited machine authentication, not a hardened multi-tenant or public-internet security
+system; mTLS, SSO, organizations, advanced RBAC, HA, and secret-vault integration are not claimed.
 
 ## Workflows and results
 
@@ -140,8 +174,11 @@ The same `esp32-ci-test` definition targets either backend through capabilities 
 
 ## Transport
 
-The Agent is a FastAPI application served by Uvicorn. Resources live under `/api/v1`; Swagger,
-ReDoc, and OpenAPI are exposed at `/docs`, `/redoc`, and `/openapi.json`. Middleware assigns a
-request ID, emits structured logs, and returns it in `X-Request-ID`. Domain errors use one stable
-error envelope. Polling is always supported for progress; provider adapters may render output and
-summaries without changing domain records.
+Both applications use FastAPI/Uvicorn for REST. Resources live under `/api/v1`; Swagger, ReDoc,
+and OpenAPI are exposed at `/docs`, `/redoc`, and `/openapi.json`. The control plane additionally
+hosts one authenticated protocol WebSocket per Agent and keeps binary artifacts on scoped HTTP
+transfer routes rather than the control channel. Request middleware returns `X-Request-ID`, and
+domain errors use a stable envelope. Polling remains the portable client progress mechanism.
+
+Checked-in contracts are [`docs/control-plane-openapi.json`](docs/control-plane-openapi.json) and
+[`docs/openapi.json`](docs/openapi.json) for the standalone Agent compatibility API.

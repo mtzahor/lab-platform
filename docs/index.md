@@ -1,5 +1,10 @@
 # Lab Platform documentation
 
+## Phase 5 distributed control plane
+
+- [Phase 5 architecture, authority, protocol, recovery, demo, and limitations](PHASE_5.md)
+- [Control-plane OpenAPI contract](control-plane-openapi.json)
+
 ## Phase 4 hardware CI
 
 - [Phase 4 overview and local demonstration](PHASE_4.md)
@@ -22,6 +27,7 @@
 - [Development](../DEVELOPMENT.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Plugin API](../PLUGIN_API.md)
+- [Standalone Agent OpenAPI contract](openapi.json)
 
 ## Earlier phases and shared labs
 

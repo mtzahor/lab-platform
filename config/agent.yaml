@@ -4,6 +4,32 @@ agent:
   port: 8080
   log_level: INFO
   max_request_body_size_mb: 1
+  data_directory: ./.lab-agent
+  location: local-development
+  labels:
+    environment: development
+
+# Distributed mode is deliberately disabled in the checked-in local configuration. Run
+# `lab-agent connect` with a one-time enrollment token, then set `enabled`, `url`, and `agent_id`
+# from its output. Keep the issued credential in the named environment variable, never in YAML.
+control_plane:
+  enabled: false
+  heartbeat_interval_seconds: 15
+  maximum_clock_skew_seconds: 30
+  maximum_message_size_mb: 2
+  outgoing_queue_size: 256
+  event_batch_size: 500
+  event_ack_timeout_seconds: 30
+  # Explicitly permits only the checked-in localhost demo; non-loopback HTTP is always rejected.
+  allow_insecure_loopback: true
+  reconnect:
+    initial_delay_seconds: 1
+    maximum_delay_seconds: 60
+    jitter: true
+    stability_seconds: 30
+
+identity:
+  credential_env_var: LAB_AGENT_CREDENTIAL
 
 backend:
   type: simlab

@@ -4,6 +4,12 @@ Phase 4 API tokens provide limited machine authentication for CI jobs. Records a
 one-way hash; the plaintext token is returned exactly once when it is created. Tokens have an
 owner, explicit scopes, optional expiry, revocation timestamp, and last-used timestamp.
 
+This page's seven-scope bootstrap contract describes the standalone Agent compatibility API. The
+Phase 5 control plane uses the same token model plus `agents:read` and `agents:admin`: its first
+token must contain all nine scopes, and later token administration requires `agents:admin` rather
+than every operational scope. A normal distributed `labctl ci run` can use the narrower scopes
+documented under [CI sessions](CI_SESSIONS.md).
+
 ## Create and store a token
 
 Create tokens only from the Agent's trusted management environment. On a new Agent with an empty

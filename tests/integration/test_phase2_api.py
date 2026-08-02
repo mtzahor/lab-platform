@@ -32,7 +32,6 @@ def test_probe_reset_serial_operation_and_artifact_api(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     agent = create_agent(tmp_path)
-    asyncio.run(agent.start())
     with TestClient(create_app(agent), raise_server_exceptions=False) as client:
         schema = client.get("/openapi.json").json()["paths"]
         assert "/api/v1/benches/{bench_id}/actions/probe" in schema

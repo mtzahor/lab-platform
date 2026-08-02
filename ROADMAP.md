@@ -42,11 +42,34 @@
 Phase 4's machine authentication is intentionally limited. It does not make the Agent safe for
 direct exposure to the untrusted public internet.
 
+## Phase 5 — distributed control plane and multi-Agent labs (reference implementation complete)
+
+- Independent control-plane service with authenticated protocol `1.0` WebSockets, one-time Agent
+  enrollment, unique rotatable/revocable credentials, heartbeat presence, drain mode, and unified
+  global inventory
+- Control-plane-owned reservations with Agent-confirmed versioned leases, durable remote commands,
+  pre-execution acknowledgment, Agent-side safety validation, idempotent execution, and persisted
+  user-facing operations
+- Durable Agent command journal, bounded event buffer with explicit acknowledgments, boot-aware
+  reconnect reconciliation, unknown-state/grace handling, and safe offline/Agent-restart behavior
+- Complete remote sequential workflows, checksummed scoped artifact transfers, bounded Agent cache,
+  and provider-neutral distributed CI selection across Agent labels and locations
+- Protocol/recovery/fault/migration coverage and a SimLab correctness test for 10 Agents, 1,000
+  benches, 100 simultaneous routes, 500 queued CI sessions, and mass reconnect
+- Existing ESP32 backend available through the same remote workflow path with explicit manual
+  hardware gating; normal CI remains deterministic and hardware-free
+
+The central production persistence adapter uses PostgreSQL, with explicit schema migrations and
+restart coverage. SQLite remains supported for the loopback demo and Agent-local durable state.
+
+See [the Phase 5 architecture, demo, and limitations](docs/PHASE_5.md).
+
 ## Later phases
 
 Deferred work includes full organizational identity, SSO, advanced RBAC, secret-vault integration,
-distributed/multi-Agent coordination, relays, hosted control plane, high availability, dashboards,
-arbitrary pipeline graphs, advanced analytics, billing, and production deployment hardening.
+relays, hosted control plane, high availability, dashboards, arbitrary pipeline graphs, advanced
+analytics, billing, and production deployment hardening.
 
-The immediate post-Phase-4 priority is to harden identity and multi-Agent coordination without
-moving CI-provider-specific behavior into the domain layer.
+The `0.6.0-alpha` reference control plane supports PostgreSQL and development-mode per-Agent bearer
+credentials. mTLS, active-active/HA coordination, and broader production hardening remain later
+deployment work rather than hidden claims of Phase 5.

@@ -7,7 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOTS = (
     ROOT / "apps/agent/src",
     ROOT / "apps/cli/src",
+    ROOT / "apps/control_plane/src",
+    ROOT / "packages/agent_protocol/src",
+    ROOT / "packages/agent_runtime/src",
     ROOT / "packages/config/src",
+    ROOT / "packages/control_plane_core/src",
     ROOT / "packages/core/src",
     ROOT / "packages/logging/src",
     ROOT / "packages/models/src",

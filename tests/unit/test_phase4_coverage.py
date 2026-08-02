@@ -613,6 +613,7 @@ def test_agent_cli_serves_with_overrides_and_shuts_down_on_interrupt(
     lifecycle: list[str] = []
 
     class FakeAgent:
+        started = True
         config = SimpleNamespace(
             agent=SimpleNamespace(host="127.0.0.1", port=8080),
             effective_backends=[
@@ -663,9 +664,9 @@ def test_agent_cli_serves_with_overrides_and_shuts_down_on_interrupt(
         )
         == 0
     )
-    assert lifecycle == ["agent-start", "serve", "server-shutdown", "agent-shutdown"]
+    assert lifecycle == ["serve", "server-shutdown"]
     output = capsys.readouterr().out
-    assert "2 backends registered: virtual, physical" in output
+    assert "Agent lifecycle delegated to the HTTP server" in output
     assert "Listening on http://0.0.0.0:9090" in output
     assert "Shutting down Lab Agent" in output
 
@@ -727,6 +728,7 @@ def test_streamed_upload_without_content_length_enforces_request_cap(
     multipart_footer = f"\r\n--{boundary}--\r\n".encode()
 
     class FakeAgent:
+        started = True
         config = SimpleNamespace(
             agent=SimpleNamespace(name="stream-limit-agent", max_request_body_size_mb=1),
             artifacts=SimpleNamespace(max_upload_size_mb=1, max_firmware_size_mb=1),
@@ -745,7 +747,7 @@ def test_streamed_upload_without_content_length_enforces_request_cap(
         yield b"over-limit"
         yield multipart_footer
 
-    app = create_app(cast(Any, FakeAgent()))
+    app = create_app(cast(Any, FakeAgent()), manage_lifecycle=False)
     with (
         TestClient(app, raise_server_exceptions=False) as client,
         client.stream(
@@ -776,6 +778,7 @@ def test_streamed_json_without_content_length_enforces_global_request_cap() -> N
     request_id = "streamed-json-limit"
 
     class FakeAgent:
+        started = True
         config = SimpleNamespace(
             agent=SimpleNamespace(name="stream-limit-agent", max_request_body_size_mb=1),
             artifacts=SimpleNamespace(max_upload_size_mb=10, max_firmware_size_mb=10),
@@ -792,7 +795,7 @@ def test_streamed_json_without_content_length_enforces_global_request_cap() -> N
         yield b"a" * (1024 * 1024)
         yield b'","owner":"ci","scopes":["ci:sessions"]}'
 
-    app = create_app(cast(Any, FakeAgent()))
+    app = create_app(cast(Any, FakeAgent()), manage_lifecycle=False)
     with (
         TestClient(app, raise_server_exceptions=False) as client,
         client.stream(

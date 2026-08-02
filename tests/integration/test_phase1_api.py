@@ -20,7 +20,6 @@ def _agent(root: Path) -> LabAgent:
         encoding="utf-8",
     )
     agent = create_agent(root)
-    asyncio.run(agent.start())
     return agent
 
 

@@ -135,7 +135,6 @@ workflows:
 def _phase4_client(root: Path) -> Iterator[tuple[LabAgent, TestClient]]:
     _write_config(root)
     agent = create_agent(root)
-    asyncio.run(agent.start())
     try:
         with TestClient(create_app(agent), raise_server_exceptions=False) as client:
             yield agent, client
@@ -650,7 +649,6 @@ def test_ci_cancellation_and_heartbeat_timeout_always_release_reservations(
 def test_agent_restart_recovers_reserved_and_terminal_ci_sessions(tmp_path: Path) -> None:
     _write_config(tmp_path)
     first = create_agent(tmp_path)
-    asyncio.run(first.start())
     try:
         with TestClient(create_app(first), raise_server_exceptions=False) as client:
             token, _record = _issue_token(
@@ -686,7 +684,6 @@ def test_agent_restart_recovers_reserved_and_terminal_ci_sessions(tmp_path: Path
         asyncio.run(first.shutdown())
 
     second = create_agent(tmp_path)
-    asyncio.run(second.start())
     try:
         with TestClient(create_app(second), raise_server_exceptions=False) as client:
             recovered = client.get(f"/api/v1/ci/sessions/{session_id}", headers=_auth(token))

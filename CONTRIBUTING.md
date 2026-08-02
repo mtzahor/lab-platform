@@ -19,7 +19,9 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run pytest -m "not hardware"
-uv run python scripts/export_openapi.py --check docs/openapi.json
+uv run python scripts/export_openapi.py --service agent --check docs/openapi.json
+uv run python scripts/export_openapi.py --service control-plane --check \
+  docs/control-plane-openapi.json
 uv build
 ```
 
@@ -36,5 +38,5 @@ rules and integration tests for changes that cross package or process boundaries
 - Keep transport rules out of services and target-specific rules inside backend adapters.
 - Preserve the per-bench reservation and operation atomicity guarantees.
 
-Use semantic versioning. Python package metadata encodes `0.4.0-alpha` as the
-PEP 440-compatible version `0.4.0a0`.
+Use semantic versioning. Python package metadata encodes `0.6.0-alpha` as the
+PEP 440-compatible version `0.6.0a0`.

@@ -1,5 +1,12 @@
 # Restart Recovery
 
+This page documents standalone Agent startup recovery. Phase 5 adds a second, distributed recovery
+layer: heartbeat loss makes global benches offline and remote operations/reservation leases
+`UNKNOWN`; the control plane retains ownership for bounded grace/reconciliation periods instead of
+guessing success or failure. Reconnect compares the Agent boot ID, durable command journal, local
+leases, current inventory, and acknowledged event-buffer watermark. See
+[Phase 5 disconnect, restart, and reconciliation](PHASE_5.md#disconnect-restart-and-reconciliation).
+
 The Agent reconciles persisted state before accepting new operations. Recovery is idempotent and
 records a report and timeline events.
 
