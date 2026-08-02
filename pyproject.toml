@@ -4,18 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-platform"
-version = "0.5.0a0"
-description = "Local-first remote hardware bench management platform."
+version = "0.6.0a0"
+description = "Distributed remote hardware bench management platform."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Lab Platform Contributors" }]
 dependencies = [
     "fastapi>=0.116,<1",
     "pydantic>=2.8,<3",
+    "psycopg[binary]>=3.2,<4",
     "python-multipart>=0.0.20,<1",
     "pyserial>=3.5,<4",
     "PyYAML>=6.0.1,<7",
     "uvicorn>=0.35,<1",
+    "websockets>=15,<16",
     "esptool>=4.8,<5",
 ]
 
@@ -30,14 +32,19 @@ dev = [
 
 [project.scripts]
 lab-agent = "lab_platform.agent.cli:main"
+lab-control-plane = "lab_platform.control_plane.cli:main"
 labctl = "lab_platform.cli.main:main"
 
 [tool.setuptools]
 packages = [
+    "lab_platform.agent_protocol",
+    "lab_platform.agent_runtime",
     "lab_platform.agent",
     "lab_platform.agent.api",
     "lab_platform.cli",
     "lab_platform.config",
+    "lab_platform.control_plane_core",
+    "lab_platform.control_plane",
     "lab_platform.core",
     "lab_platform.logging",
     "lab_platform.models",
@@ -51,10 +58,14 @@ packages = [
 ]
 
 [tool.setuptools.package-dir]
+"lab_platform.agent_protocol" = "packages/agent_protocol/src/lab_platform/agent_protocol"
+"lab_platform.agent_runtime" = "packages/agent_runtime/src/lab_platform/agent_runtime"
 "lab_platform.agent" = "apps/agent/src/lab_platform/agent"
 "lab_platform.agent.api" = "apps/agent/src/lab_platform/agent/api"
 "lab_platform.cli" = "apps/cli/src/lab_platform/cli"
 "lab_platform.config" = "packages/config/src/lab_platform/config"
+"lab_platform.control_plane_core" = "packages/control_plane_core/src/lab_platform/control_plane_core"
+"lab_platform.control_plane" = "apps/control_plane/src/lab_platform/control_plane"
 "lab_platform.core" = "packages/core/src/lab_platform/core"
 "lab_platform.logging" = "packages/logging/src/lab_platform/logging"
 "lab_platform.models" = "packages/models/src/lab_platform/models"
@@ -83,7 +94,11 @@ explicit_package_bases = true
 mypy_path = [
     "apps/agent/src",
     "apps/cli/src",
+    "apps/control_plane/src",
+    "packages/agent_protocol/src",
+    "packages/agent_runtime/src",
     "packages/config/src",
+    "packages/control_plane_core/src",
     "packages/core/src",
     "packages/logging/src",
     "packages/models/src",

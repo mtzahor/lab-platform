@@ -1,9 +1,113 @@
 # REST API
 
-The Agent exposes Swagger at `/docs`, ReDoc at `/redoc`, and OpenAPI at `/openapi.json`. Public
-resources use the `/api/v1` prefix. Every response includes `X-Request-ID`.
+Phase 5 has two HTTP applications. Clients use the central control plane; the owning Agent is
+selected by global bench identity and never appears in a client URL. Each Agent also retains its
+local compatibility/diagnostic API.
 
-## Phase 4 authentication
+Both expose Swagger at `/docs`, ReDoc at `/redoc`, and OpenAPI at `/openapi.json`; public resources
+use `/api/v1`. Checked-in contracts are
+[`docs/control-plane-openapi.json`](docs/control-plane-openapi.json) and
+[`docs/openapi.json`](docs/openapi.json) for the standalone Agent. REST responses include
+`X-Request-ID`.
+
+## Phase 5 control-plane API
+
+Client requests use a hashed, scoped bearer token. If the control-plane token store is empty, the
+first `POST /api/v1/tokens` request may bootstrap it without a bearer; that first token must grant
+all nine supported scopes. Only this token-creation route participates in empty-store bootstrap.
+Once a token exists, route dependencies enforce the following scopes:
+
+| Scope | Protected control-plane resources |
+| --- | --- |
+| `agents:read` | Agent inventory/timelines and metrics |
+| `agents:admin` | Client-token/enrollment administration, Agent revoke/drain/undrain/refresh, operation reconciliation |
+| `benches:read` | Unified bench inventory |
+| `reservations:write` | Central reservations and confirmed Agent leases |
+| `workflows:run` | Workflow definitions/runs, direct bench actions, and operation cancellation |
+| `operations:read` | Remote-operation/workflow status, results, and synchronized serial output |
+| `artifacts:read` | Artifact metadata/content reads |
+| `artifacts:write` | Client uploads, direct firmware staging, and Agent transfer issuance |
+| `ci:sessions` | Distributed CI session lifecycle |
+
+Agent enrollment is authenticated by a one-time enrollment token in its strict request body. The
+Agent WebSocket at `/api/v1/agent-gateway/{agent_id}` uses that Agent's own bearer credential and
+protocol `1.0`; it is not a client endpoint and is intentionally absent from ordinary `labctl`
+routing. Artifact-transfer upload/download routes use their own short-lived Agent/artifact-scoped
+capability instead of a client API token.
+
+Credential rotation is a separate self-service boundary:
+`POST /api/v1/agents/{agent_id}/credentials/rotate` authenticates the current Agent credential in
+the strict JSON body and returns the replacement plaintext once. It is currently a REST operation,
+not a `labctl agent` subcommand; store the replacement in the configured Agent credential secret
+before reconnecting.
+
+### Control-plane endpoint groups
+
+| Group | Representative paths |
+| --- | --- |
+| Service | `GET /api/v1/version`, `GET /api/v1/health`, `GET /metrics` |
+| Client token | `POST/GET /api/v1/tokens`, `POST /api/v1/tokens/{id}/revoke` |
+| Agent identity | `/api/v1/agents`, `/api/v1/agents/enrollment-tokens`, `/api/v1/agents/enroll` |
+| Agent administration | `/api/v1/agents/{id}/revoke`, `/credentials/rotate`, `/drain`, `/undrain`, `/actions/refresh-inventory`, `/timeline` |
+| Unified inventory | `GET /api/v1/benches`, `GET /api/v1/benches/{global_id}` |
+| Direct remote actions | `/api/v1/benches/{global_id}/actions/probe`, `/reset`, `/read-serial`, `/flash` |
+| Central reservations | `/api/v1/reservations`, `/{id}/renew`, `/{id}/release` |
+| Remote workflows | `/api/v1/workflows`, `/api/v1/workflows/{name}/runs` |
+| Remote operations | `/api/v1/operations`, `/{id}`, `/{id}/cancel`, `/{id}/reconcile`, `/{id}/artifacts/serial` |
+| Distributed CI | `/api/v1/ci/sessions`, `/{id}/run`, `/{id}/heartbeat`, `/{id}/cancel`, `/{id}/finalize`, `/{id}/artifacts` |
+| Artifacts | `GET/POST /api/v1/artifacts`, `/api/v1/artifacts/{id}`, `/{id}/content`, `/{id}/transfers` |
+| Transfer capabilities | `/api/v1/artifact-transfers/{id}/content` |
+
+Global bench IDs contain a slash, for example `home-lab/esp32-01`. Action and detail routes use a
+path-capturing parameter, so preserve that separator in the request path (the CLI does this for
+you) and percent-encode unsafe characters within each component. Reservation creation does not
+return an active assignment until the Agent confirms the versioned lease. Remote operations can
+become `UNKNOWN` during a disconnection and are finalized only by reconciliation or its configured
+timeout. See [Phase 5](docs/PHASE_5.md) for these state machines and the generated control-plane
+OpenAPI contract for exact request/response schemas.
+
+### Direct remote actions
+
+These client-facing routes hide Agent routing and always return `202` with a global
+`operation_id`, durable `command_id`, and current status:
+
+| Method | Path | Scope and reservation rule |
+| --- | --- | --- |
+| POST | `/api/v1/benches/{global_id}/actions/probe` | `workflows:run`; capability `probe`; no reservation required |
+| POST | `/api/v1/benches/{global_id}/actions/read-serial` | `workflows:run`; capability `serial`; no reservation required |
+| POST | `/api/v1/benches/{global_id}/actions/reset` | `workflows:run`; active confirmed lease owned by request `owner` |
+| POST | `/api/v1/benches/{global_id}/actions/flash` | `workflows:run` + `artifacts:write`; active confirmed lease owned by multipart `owner` |
+
+Probe/reset accept JSON `{"owner": "..."}`. Serial read additionally accepts
+`timeout_seconds`, `until_pattern`, and `max_lines`. Flash is multipart with `firmware`, `owner`,
+and optional `version`. All accept an optional `Idempotency-Key` header. Firmware content is staged
+in control-plane artifact storage and delivered to the owning Agent by a fresh short-lived
+capability; it is not embedded in durable command payloads or sent over the WebSocket.
+
+Poll `GET /api/v1/operations/{operation_id}` for the Agent-confirmed terminal result. A successful
+serial command exposes its synchronized text through
+`GET /api/v1/operations/{operation_id}/artifacts/serial`. Cancellation uses
+`POST /api/v1/operations/{operation_id}/cancel` with `owner` and an optional `reason`. The
+control plane does not expose the standalone Agent's legacy `power-on`, `power-off`,
+`power-cycle`, immediate bench-reservation, queue, bench-timeline, or event-list routes.
+
+### Transport and persistence deployment modes
+
+The checked-in configuration is plaintext HTTP/WS only because both the bind address and public
+URL are loopback and `development.allow_insecure_agent_transport` is explicit. For direct TLS,
+an HTTPS public URL requires both `control_plane.tls_certificate_path` and
+`control_plane.tls_private_key_path`. Same-host TLS termination is an explicit alternative only
+when the process binds to loopback and `development.allow_tls_termination_proxy: true`; it is
+rejected on non-loopback binds. An HTTPS URL with neither direct certificates nor that constrained
+proxy mode is rejected rather than serving misleading plaintext.
+
+The production control-plane store is PostgreSQL. Both `postgresql://` and
+`postgresql+psycopg://` configuration spellings are accepted; the latter is normalized to a
+Psycopg/libpq `postgresql://` DSN. SQLite remains available for the loopback developer demo, but
+is not the recommended central production store. Apply migrations before starting a deployment
+with `lab-control-plane migrate --config /path/to/control-plane.yaml`.
+
+## Standalone Agent API and Phase 4 authentication
 
 Machine endpoints use:
 
@@ -43,7 +147,7 @@ workflow-result, event, and timeline reads.
 The Agent derives CI `requested_by` from the token owner; the request body cannot impersonate
 another owner.
 
-## Endpoint summary
+## Standalone Agent endpoint summary
 
 ### Agent, benches, operations, and events
 
@@ -148,7 +252,7 @@ Content-Type: application/json
     "required_labels": {"board": "esp32"},
     "preferred_labels": {"location": "simulation"},
     "allow_simulated": true,
-    "allow_physical": true,
+    "allow_physical": false,
     "maximum_wait_seconds": 600,
     "reservation_duration_seconds": 1800
   }
@@ -169,7 +273,7 @@ Content-Type: application/json
   "workflow_name": "esp32-ci-test",
   "inputs": {
     "firmware": {"artifact_id": "f07d3d83-7961-4449-a54c-7091e9404a87"},
-    "expected_version": "0.5.0",
+    "expected_version": "0.6.0",
     "ready_timeout": 20
   }
 }

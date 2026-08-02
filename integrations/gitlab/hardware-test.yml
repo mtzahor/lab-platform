@@ -4,7 +4,7 @@ hardware-test:
   tags:
     - lab-network
   before_script:
-    - python -m pip install lab-platform==0.5.0a0
+    - python -m pip install lab-platform==0.6.0a0
   script:
     - >-
       labctl ci run

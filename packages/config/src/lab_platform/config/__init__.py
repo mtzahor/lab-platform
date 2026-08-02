@@ -1,4 +1,7 @@
 from lab_platform.config.loader import (
+    AgentControlPlaneSettings,
+    AgentIdentitySettings,
+    AgentReconnectSettings,
     AgentSettings,
     ArtifactSettings,
     BackendInstanceSettings,
@@ -29,6 +32,9 @@ from lab_platform.config.loader import (
 )
 
 __all__ = [
+    "AgentControlPlaneSettings",
+    "AgentIdentitySettings",
+    "AgentReconnectSettings",
     "AgentSettings",
     "ArtifactSettings",
     "BackendInstanceSettings",

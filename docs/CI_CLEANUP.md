@@ -92,11 +92,19 @@ After any result, confirm the session and bench:
 ```console
 labctl ci session show SESSION_ID --output json
 labctl bench show BENCH_ID --output json
-labctl event list --event-type CI_CLEANUP_COMPLETED --output json
 ```
 
 Expected final fields include `status: completed`, a terminal `outcome`, and
 `cleanup_status: succeeded`. The bench should have no active CI reservation or operation lock.
+When connected directly to a standalone Agent, its additional local audit view is:
+
+```console
+labctl event list --event-type CI_CLEANUP_COMPLETED --output json
+```
+
+The control plane has no global `/events` compatibility route; use its persisted session details,
+operation records, reservation history, and `labctl agent timeline AGENT_ID` for distributed
+diagnosis.
 
 For cancellation testing, start a workflow with a long wait step, send `SIGINT`, then perform these
 checks. For missed-heartbeat testing, terminate the client without a post-job hook only in an

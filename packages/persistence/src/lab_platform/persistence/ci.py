@@ -15,6 +15,7 @@ from lab_platform.models import (
     CiSessionStatus,
     CleanupResult,
     CleanupStatus,
+    DistributedCiWorkflowBinding,
     Reservation,
     ReservationSource,
     ReservationStatus,
@@ -269,6 +270,103 @@ class SQLiteCiSessionRepository:
                 "SELECT * FROM ci_sessions WHERE id = ?", (str(session_id),)
             ).fetchone()
         return _session_from_row(updated)
+
+    async def attach_distributed_workflow(
+        self,
+        session_id: UUID,
+        remote_command_id: UUID,
+        *,
+        operation_id: UUID,
+        agent_id: UUID,
+        bench_id: str,
+        reservation_id: UUID,
+        workflow_name: str,
+        workflow_version: int,
+        idempotency_key: str,
+        request_fingerprint: str,
+        started_at: datetime,
+    ) -> CiSession | None:
+        """Atomically bind a CI session to its centrally dispatched workflow.
+
+        Selection, lease activation, and command dispatch happen in the
+        distributed workflow coordinator.  This transaction makes their CI
+        projection visible as one state change, avoiding an intermediate
+        ``RESERVED`` session that cannot be recovered after a process crash.
+        """
+
+        with self._database.transaction(immediate=True) as connection:
+            claimed = connection.execute(
+                "SELECT ci.* FROM distributed_ci_workflows binding "
+                "JOIN ci_sessions ci ON ci.id = binding.ci_session_id "
+                "WHERE binding.launch_idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if claimed is not None:
+                return _session_from_row(claimed)
+            current = connection.execute(
+                "SELECT * FROM ci_sessions WHERE id = ?",
+                (str(session_id),),
+            ).fetchone()
+            if (
+                current is None
+                or current["bench_id"] is not None
+                or current["reservation_id"] is not None
+                or current["workflow_run_id"] is not None
+                or current["workflow_launch_idempotency_key"] is not None
+                or CiSessionStatus(current["status"]) not in _ASSIGNABLE_SESSION_STATUSES
+            ):
+                return None
+            connection.execute(
+                "INSERT INTO distributed_ci_workflows "
+                "(ci_session_id, remote_command_id, operation_id, agent_id, bench_id, "
+                "reservation_id, workflow_name, workflow_version, launch_idempotency_key, "
+                "request_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(session_id),
+                    str(remote_command_id),
+                    str(operation_id),
+                    str(agent_id),
+                    bench_id,
+                    str(reservation_id),
+                    workflow_name,
+                    workflow_version,
+                    idempotency_key,
+                    request_fingerprint,
+                    started_at.isoformat(),
+                ),
+            )
+            cursor = connection.execute(
+                "UPDATE ci_sessions SET bench_id = ?, reservation_id = ?, "
+                "workflow_launch_idempotency_key = ?, "
+                "status = 'running', started_at = COALESCE(started_at, ?) "
+                "WHERE id = ? AND bench_id IS NULL AND reservation_id IS NULL "
+                "AND workflow_run_id IS NULL AND workflow_launch_idempotency_key IS NULL "
+                "AND status IN ('created', 'waiting_for_bench')",
+                (
+                    bench_id,
+                    str(reservation_id),
+                    idempotency_key,
+                    started_at.isoformat(),
+                    str(session_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Distributed CI workflow attachment lost its transaction")
+            updated = connection.execute(
+                "SELECT * FROM ci_sessions WHERE id = ?", (str(session_id),)
+            ).fetchone()
+        return _session_from_row(updated)
+
+    async def get_distributed_workflow(
+        self,
+        session_id: UUID,
+    ) -> DistributedCiWorkflowBinding | None:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM distributed_ci_workflows WHERE ci_session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+        return _distributed_binding_from_row(row) if row is not None else None
 
     async def mark_finalized(
         self,
@@ -595,6 +693,22 @@ def _session_from_row(row: sqlite3.Row) -> CiSession:
         timeout_at=_parse_datetime(row["timeout_at"]),
         cleanup_status=CleanupStatus(row["cleanup_status"]),
         bench_request=(BenchRequest.model_validate_json(bench_request) if bench_request else None),
+    )
+
+
+def _distributed_binding_from_row(row: sqlite3.Row) -> DistributedCiWorkflowBinding:
+    return DistributedCiWorkflowBinding(
+        ci_session_id=UUID(row["ci_session_id"]),
+        remote_command_id=UUID(row["remote_command_id"]),
+        operation_id=UUID(row["operation_id"]),
+        agent_id=UUID(row["agent_id"]),
+        bench_id=row["bench_id"],
+        reservation_id=UUID(row["reservation_id"]),
+        workflow_name=row["workflow_name"],
+        workflow_version=row["workflow_version"],
+        launch_idempotency_key=row["launch_idempotency_key"],
+        request_fingerprint=row["request_fingerprint"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 

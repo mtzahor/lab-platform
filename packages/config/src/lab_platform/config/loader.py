@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
+from uuid import UUID
 
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -18,6 +19,48 @@ class AgentSettings(ConfigModel):
     port: int = Field(default=8080, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     max_request_body_size_mb: int = Field(default=1, ge=1, le=1024)
+    data_directory: Path = Path("./.lab-agent")
+    location: str | None = Field(default=None, min_length=1, max_length=200)
+    labels: dict[str, str] = Field(default_factory=dict, max_length=128)
+
+
+class AgentReconnectSettings(ConfigModel):
+    initial_delay_seconds: float = Field(default=1.0, gt=0, le=3600)
+    maximum_delay_seconds: float = Field(default=60.0, gt=0, le=86_400)
+    jitter: bool = True
+    stability_seconds: float = Field(default=30.0, gt=0, le=86_400)
+
+    @model_validator(mode="after")
+    def maximum_not_shorter_than_initial(self) -> AgentReconnectSettings:
+        if self.maximum_delay_seconds < self.initial_delay_seconds:
+            raise ValueError("maximum reconnect delay cannot be shorter than initial delay")
+        return self
+
+
+class AgentControlPlaneSettings(ConfigModel):
+    enabled: bool = False
+    url: str | None = Field(default=None, min_length=1, max_length=4000)
+    heartbeat_interval_seconds: float = Field(default=15.0, gt=0, le=3600)
+    maximum_clock_skew_seconds: int = Field(default=30, ge=0, le=3600)
+    maximum_message_size_mb: int = Field(default=2, ge=1, le=64)
+    outgoing_queue_size: int = Field(default=256, ge=1, le=100_000)
+    event_batch_size: int = Field(default=500, ge=1, le=10_000)
+    event_ack_timeout_seconds: float = Field(default=30.0, gt=0, le=3600)
+    allow_insecure_loopback: bool = False
+    reconnect: AgentReconnectSettings = Field(default_factory=AgentReconnectSettings)
+
+
+class AgentIdentitySettings(ConfigModel):
+    agent_id: UUID | None = None
+    credential_env_var: str = Field(
+        default="LAB_AGENT_CREDENTIAL",
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
+    certificate_path: Path | None = None
+    private_key_path: Path | None = None
+    ca_path: Path | None = None
 
 
 class SimLabSettings(ConfigModel):
@@ -257,6 +300,8 @@ class DevelopmentSettings(ConfigModel):
 
 class PlatformConfig(ConfigModel):
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    control_plane: AgentControlPlaneSettings = Field(default_factory=AgentControlPlaneSettings)
+    identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     backend: BackendSettings = Field(default_factory=BackendSettings)
     backends: list[BackendInstanceSettings] = Field(default_factory=list, max_length=100)
     simlab: SimLabSettings = Field(default_factory=SimLabSettings)
@@ -274,6 +319,11 @@ class PlatformConfig(ConfigModel):
 
     @model_validator(mode="after")
     def globally_unique_configured_ids(self) -> PlatformConfig:
+        if self.control_plane.enabled:
+            if self.control_plane.url is None:
+                raise ValueError("control_plane.url is required when distributed mode is enabled")
+            if self.identity.agent_id is None:
+                raise ValueError("identity.agent_id is required when distributed mode is enabled")
         backend_ids = [backend.id for backend in self.backends]
         if len(backend_ids) != len(set(backend_ids)):
             raise ValueError("backend ids must be unique")

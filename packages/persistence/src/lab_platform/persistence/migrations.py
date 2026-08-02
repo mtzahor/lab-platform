@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:
@@ -40,7 +40,628 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (5, datetime('now'))"
         )
+    # Phase 5 registry creation is intentionally unconditional so an interrupted
+    # initialization can recreate missing tables and indexes even if the version
+    # row committed. Existing incompatible tables require an explicit future
+    # rebuild migration; CREATE TABLE IF NOT EXISTS cannot repair their shape.
+    _create_phase5_agent_tables(connection)
+    _create_phase5_agent_indexes(connection)
+    if 6 not in applied:
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (6, datetime('now'))"
+        )
+    _create_phase5_distributed_tables(connection)
+    _create_phase5_distributed_indexes(connection)
+    if 7 not in applied:
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (7, datetime('now'))"
+        )
+    _add_distributed_operation_result_column(connection)
+    if 8 not in applied:
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (8, datetime('now'))"
+        )
     _create_queue_transition_trigger(connection)
+
+
+def _create_phase5_agent_tables(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'PENDING', 'ONLINE', 'DEGRADED', 'OFFLINE', 'DRAINING',
+                    'DRAINED', 'REVOKED', 'INCOMPATIBLE'
+                )
+            ),
+            version TEXT NOT NULL,
+            protocol_version TEXT NOT NULL,
+            location TEXT,
+            labels_json TEXT NOT NULL DEFAULT '{}'
+                CHECK (json_valid(labels_json) AND json_type(labels_json) = 'object'),
+            registered_at TEXT NOT NULL,
+            last_connected_at TEXT,
+            last_seen_at TEXT,
+            disconnected_at TEXT,
+            certificate_fingerprint TEXT,
+            enrollment_status TEXT NOT NULL CHECK (
+                enrollment_status IN ('PENDING', 'ENROLLED', 'REVOKED')
+            ),
+            revoked_at TEXT,
+            CHECK (last_connected_at IS NULL OR last_connected_at >= registered_at),
+            CHECK (revoked_at IS NULL OR revoked_at >= registered_at),
+            CHECK (
+                last_seen_at IS NULL OR (
+                    last_connected_at IS NOT NULL AND last_seen_at >= last_connected_at
+                )
+            ),
+            CHECK (
+                disconnected_at IS NULL OR (
+                    last_connected_at IS NOT NULL
+                    AND disconnected_at >= last_connected_at
+                    AND (last_seen_at IS NULL OR disconnected_at >= last_seen_at)
+                )
+            ),
+            CHECK (
+                (
+                    status = 'REVOKED' AND enrollment_status = 'REVOKED'
+                    AND revoked_at IS NOT NULL
+                ) OR (
+                    status != 'REVOKED' AND enrollment_status != 'REVOKED'
+                    AND revoked_at IS NULL
+                )
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_enrollment_tokens (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE CHECK (
+                length(token_hash) = 64
+                AND token_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            revoked_at TEXT,
+            allowed_labels_json TEXT NOT NULL DEFAULT '{}'
+                CHECK (
+                    json_valid(allowed_labels_json)
+                    AND json_type(allowed_labels_json) = 'object'
+                ),
+            used_by_agent_id TEXT UNIQUE,
+            enrollment_request_id TEXT UNIQUE,
+            CHECK (
+                (used_at IS NULL AND used_by_agent_id IS NULL
+                    AND enrollment_request_id IS NULL)
+                OR
+                (used_at IS NOT NULL AND used_by_agent_id IS NOT NULL
+                    AND enrollment_request_id IS NOT NULL)
+            ),
+            CHECK (expires_at > created_at),
+            CHECK (used_at IS NULL OR (used_at >= created_at AND used_at < expires_at)),
+            CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+            CHECK (used_at IS NULL OR revoked_at IS NULL OR revoked_at >= used_at),
+            FOREIGN KEY (used_by_agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_credentials (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind = 'OPAQUE_TOKEN'),
+            credential_hash TEXT NOT NULL UNIQUE CHECK (
+                length(credential_hash) = 64
+                AND credential_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            version INTEGER NOT NULL CHECK (version > 0),
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            revoked_at TEXT,
+            last_used_at TEXT,
+            UNIQUE (agent_id, version),
+            CHECK (expires_at IS NULL OR expires_at > created_at),
+            CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+            CHECK (
+                last_used_at IS NULL OR (
+                    last_used_at >= created_at
+                    AND (expires_at IS NULL OR last_used_at < expires_at)
+                    AND (revoked_at IS NULL OR last_used_at <= revoked_at)
+                )
+            ),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+        """
+    )
+
+
+def _create_phase5_agent_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS agents_status_seen
+            ON agents(status, last_seen_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS agents_certificate_fingerprint
+            ON agents(certificate_fingerprint)
+            WHERE certificate_fingerprint IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS agent_enrollment_tokens_active_expiry
+            ON agent_enrollment_tokens(expires_at, id)
+            WHERE used_at IS NULL AND revoked_at IS NULL;
+        CREATE INDEX IF NOT EXISTS agent_enrollment_tokens_created
+            ON agent_enrollment_tokens(created_at DESC, id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_credentials_one_active
+            ON agent_credentials(agent_id)
+            WHERE revoked_at IS NULL;
+        CREATE INDEX IF NOT EXISTS agent_credentials_agent_version
+            ON agent_credentials(agent_id, version DESC);
+        """
+    )
+
+
+def _create_phase5_distributed_tables(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agent_connections (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            boot_id TEXT NOT NULL,
+            protocol_version TEXT NOT NULL,
+            connected_at TEXT NOT NULL,
+            last_heartbeat_at TEXT NOT NULL,
+            disconnected_at TEXT,
+            last_sequence_number INTEGER NOT NULL DEFAULT 0
+                CHECK (last_sequence_number >= 0),
+            observed_clock_offset_seconds REAL NOT NULL DEFAULT 0
+                CHECK (observed_clock_offset_seconds BETWEEN -86400 AND 86400),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (last_heartbeat_at >= connected_at),
+            CHECK (
+                disconnected_at IS NULL OR disconnected_at >= last_heartbeat_at
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS global_benches (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            agent_slug TEXT NOT NULL,
+            local_bench_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            backend_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('SIMULATED', 'PHYSICAL')),
+            target_type TEXT,
+            status TEXT NOT NULL CHECK (status IN ('ONLINE', 'OFFLINE', 'DEGRADED')),
+            health TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL DEFAULT '[]'
+                CHECK (json_valid(capabilities_json) AND json_type(capabilities_json) = 'array'),
+            labels_json TEXT NOT NULL DEFAULT '{}'
+                CHECK (json_valid(labels_json) AND json_type(labels_json) = 'object'),
+            firmware_version TEXT,
+            last_seen_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (agent_id, local_bench_id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (updated_at >= created_at),
+            CHECK (last_seen_at IS NULL OR last_seen_at <= updated_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS bench_snapshots (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            boot_id TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            bench_count INTEGER NOT NULL CHECK (bench_count >= 0),
+            snapshot_json TEXT NOT NULL
+                CHECK (json_valid(snapshot_json) AND json_type(snapshot_json) = 'array'),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_commands (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            command_type TEXT NOT NULL CHECK (
+                command_type IN (
+                    'PROBE', 'FLASH', 'RESET', 'READ_SERIAL', 'RUN_WORKFLOW',
+                    'CANCEL_OPERATION', 'REFRESH_INVENTORY'
+                )
+            ),
+            payload_json TEXT NOT NULL DEFAULT '{}'
+                CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'CREATED', 'QUEUED', 'DISPATCHED', 'ACCEPTED', 'RUNNING',
+                    'SUCCEEDED', 'FAILED', 'CANCELLED', 'EXPIRED', 'UNKNOWN'
+                )
+            ),
+            created_at TEXT NOT NULL,
+            dispatched_at TEXT,
+            acknowledged_at TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            expires_at TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            operation_id TEXT,
+            reservation_id TEXT,
+            lease_version INTEGER CHECK (lease_version IS NULL OR lease_version > 0),
+            error_code TEXT,
+            error_message TEXT,
+            UNIQUE (agent_id, idempotency_key),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (bench_id) REFERENCES global_benches(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (expires_at > created_at),
+            CHECK ((reservation_id IS NULL) = (lease_version IS NULL))
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_command_attempts (
+            id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+            connection_id TEXT,
+            sequence_number INTEGER CHECK (sequence_number IS NULL OR sequence_number > 0),
+            dispatched_at TEXT NOT NULL,
+            acknowledged_at TEXT,
+            failed_at TEXT,
+            error_code TEXT,
+            UNIQUE (command_id, attempt_number),
+            FOREIGN KEY (command_id) REFERENCES remote_commands(id) ON DELETE CASCADE,
+            FOREIGN KEY (connection_id) REFERENCES agent_connections(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS distributed_operations (
+            id TEXT PRIMARY KEY,
+            remote_command_id TEXT NOT NULL UNIQUE,
+            agent_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            reservation_id TEXT,
+            operation_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'CREATED', 'DISPATCHED', 'ACCEPTED', 'RUNNING', 'SUCCEEDED',
+                    'FAILED', 'CANCELLED', 'UNKNOWN', 'RECONCILING'
+                )
+            ),
+            progress INTEGER CHECK (progress IS NULL OR progress BETWEEN 0 AND 100),
+            message TEXT,
+            result_json TEXT CHECK (
+                result_json IS NULL OR (
+                    json_valid(result_json) AND json_type(result_json) = 'object'
+                )
+            ),
+            created_at TEXT NOT NULL,
+            dispatched_at TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            last_agent_update_at TEXT,
+            reconciliation_deadline TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            FOREIGN KEY (remote_command_id) REFERENCES remote_commands(id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (bench_id) REFERENCES global_benches(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS reservation_leases (
+            reservation_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            valid_from TEXT NOT NULL,
+            valid_until TEXT NOT NULL,
+            lease_version INTEGER NOT NULL CHECK (lease_version > 0),
+            released_at TEXT,
+            PRIMARY KEY (reservation_id, lease_version),
+            FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (bench_id) REFERENCES global_benches(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (valid_until > valid_from),
+            CHECK (released_at IS NULL OR released_at >= valid_from)
+        );
+
+        CREATE TABLE IF NOT EXISTS coordinated_reservation_leases (
+            reservation_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (
+                state IN (
+                    'ACTIVATING', 'ACTIVE', 'RENEWING', 'UNKNOWN',
+                    'RELEASED', 'EXPIRED', 'REVOKED'
+                )
+            ),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            lease_version INTEGER NOT NULL CHECK (lease_version > 0),
+            record_json TEXT NOT NULL
+                CHECK (json_valid(record_json) AND json_type(record_json) = 'object'),
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (bench_id) REFERENCES global_benches(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS reservation_lease_mutations (
+            mutation_key TEXT PRIMARY KEY,
+            request_fingerprint TEXT NOT NULL CHECK (
+                length(request_fingerprint) = 64
+                AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            reservation_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            result_json TEXT NOT NULL
+                CHECK (json_valid(result_json) AND json_type(result_json) = 'object'),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (reservation_id) REFERENCES coordinated_reservation_leases(reservation_id)
+                ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS reconciliation_reports (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            boot_id TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            report_json TEXT NOT NULL
+                CHECK (json_valid(report_json) AND json_type(report_json) = 'object'),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS reconciliation_report_claims (
+            report_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            content_digest TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('PROCESSING', 'COMPLETE')),
+            result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+            UNIQUE (agent_id, content_digest, report_id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS protocol_message_journal (
+            message_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            connection_id TEXT,
+            direction TEXT NOT NULL CHECK (
+                direction IN ('agent_to_control_plane', 'control_plane_to_agent')
+            ),
+            sequence_number INTEGER NOT NULL CHECK (sequence_number > 0),
+            message_type TEXT NOT NULL,
+            correlation_id TEXT,
+            payload_sha256 TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            handled_at TEXT,
+            outcome TEXT NOT NULL CHECK (
+                outcome IN ('RECEIVED', 'SENT', 'HANDLED', 'REJECTED', 'DUPLICATE')
+            ),
+            PRIMARY KEY (agent_id, direction, message_id),
+            UNIQUE (connection_id, direction, sequence_number),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (connection_id) REFERENCES agent_connections(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_artifacts (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            local_artifact_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            operation_id TEXT,
+            name TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            content_type TEXT,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            uploaded_at TEXT,
+            UNIQUE (agent_id, local_artifact_id),
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (command_id) REFERENCES remote_commands(id) ON DELETE RESTRICT,
+            FOREIGN KEY (operation_id) REFERENCES distributed_operations(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS artifact_transfers (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK (
+                direction IN ('CONTROL_PLANE_TO_AGENT', 'AGENT_TO_CONTROL_PLANE')
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'EXPIRED')
+            ),
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            completed_at TEXT,
+            expected_sha256 TEXT NOT NULL,
+            expected_size_bytes INTEGER NOT NULL CHECK (expected_size_bytes >= 0),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            error_code TEXT,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (expires_at > created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS artifact_transfer_attempts (
+            id TEXT PRIMARY KEY,
+            transfer_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            bytes_transferred INTEGER NOT NULL DEFAULT 0 CHECK (bytes_transferred >= 0),
+            sha256 TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            UNIQUE (transfer_id, attempt_number),
+            FOREIGN KEY (transfer_id) REFERENCES artifact_transfers(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_timelines (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            severity TEXT NOT NULL CHECK (severity IN ('INFO', 'WARNING', 'ERROR')),
+            message TEXT NOT NULL,
+            correlation_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+                CHECK (json_valid(metadata_json) AND json_type(metadata_json) = 'object'),
+            deduplication_key TEXT,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS distributed_ci_workflows (
+            ci_session_id TEXT PRIMARY KEY,
+            remote_command_id TEXT NOT NULL UNIQUE,
+            operation_id TEXT NOT NULL UNIQUE,
+            agent_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            reservation_id TEXT NOT NULL,
+            workflow_name TEXT NOT NULL,
+            workflow_version INTEGER NOT NULL CHECK (workflow_version > 0),
+            launch_idempotency_key TEXT NOT NULL UNIQUE,
+            request_fingerprint TEXT NOT NULL CHECK (
+                length(request_fingerprint) = 64
+                AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (ci_session_id) REFERENCES ci_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (remote_command_id) REFERENCES remote_commands(id) ON DELETE RESTRICT,
+            FOREIGN KEY (operation_id) REFERENCES distributed_operations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (agent_id) REFERENCES agents(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (bench_id) REFERENCES global_benches(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_command_journal (
+            command_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            command_fingerprint TEXT NOT NULL,
+            command_type TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            result_json TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            CHECK (result_json IS NULL OR json_valid(result_json))
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_local_reservation_leases (
+            reservation_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            valid_from TEXT NOT NULL,
+            valid_until TEXT NOT NULL,
+            lease_version INTEGER NOT NULL CHECK (lease_version > 0),
+            released_at TEXT,
+            PRIMARY KEY (bench_id, lease_version),
+            UNIQUE (reservation_id, lease_version)
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_event_buffer (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL CHECK (sequence_number > 0),
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+                CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+            priority INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 100),
+            created_at TEXT NOT NULL,
+            UNIQUE (agent_id, sequence_number)
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_runtime_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+
+
+def _create_phase5_distributed_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_connections_one_active
+            ON agent_connections(agent_id) WHERE disconnected_at IS NULL;
+        CREATE INDEX IF NOT EXISTS agent_connections_heartbeat
+            ON agent_connections(disconnected_at, last_heartbeat_at, agent_id);
+        CREATE INDEX IF NOT EXISTS global_benches_inventory
+            ON global_benches(status, health, kind, agent_id, id);
+        CREATE INDEX IF NOT EXISTS global_benches_labels
+            ON global_benches(agent_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS bench_snapshots_agent_time
+            ON bench_snapshots(agent_id, received_at DESC);
+        CREATE INDEX IF NOT EXISTS remote_commands_dispatch
+            ON remote_commands(agent_id, status, created_at, id);
+        CREATE INDEX IF NOT EXISTS remote_commands_expiry
+            ON remote_commands(status, expires_at, id);
+        CREATE INDEX IF NOT EXISTS distributed_operations_active
+            ON distributed_operations(agent_id, status, created_at, id);
+        CREATE INDEX IF NOT EXISTS distributed_operations_bench
+            ON distributed_operations(bench_id, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS reservation_leases_current_active
+            ON reservation_leases(bench_id) WHERE released_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS coordinated_reservation_leases_current_bench
+            ON coordinated_reservation_leases(bench_id)
+            WHERE state NOT IN ('RELEASED', 'EXPIRED', 'REVOKED');
+        CREATE INDEX IF NOT EXISTS coordinated_reservation_leases_agent_state
+            ON coordinated_reservation_leases(agent_id, state, updated_at, reservation_id);
+        CREATE INDEX IF NOT EXISTS reservation_lease_mutations_reservation
+            ON reservation_lease_mutations(reservation_id, revision, created_at);
+        CREATE INDEX IF NOT EXISTS reconciliation_reports_agent_time
+            ON reconciliation_reports(agent_id, received_at DESC);
+        CREATE INDEX IF NOT EXISTS reconciliation_report_claims_digest
+            ON reconciliation_report_claims(agent_id, content_digest, status);
+        CREATE INDEX IF NOT EXISTS protocol_message_journal_observed
+            ON protocol_message_journal(agent_id, observed_at DESC);
+        CREATE INDEX IF NOT EXISTS remote_artifacts_command
+            ON remote_artifacts(command_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS artifact_transfers_pending
+            ON artifact_transfers(status, expires_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_timelines_deduplication
+            ON agent_timelines(deduplication_key)
+            WHERE deduplication_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS agent_timelines_agent_time
+            ON agent_timelines(agent_id, timestamp DESC, id);
+        CREATE INDEX IF NOT EXISTS distributed_ci_workflows_route
+            ON distributed_ci_workflows(agent_id, bench_id, created_at, ci_session_id);
+        CREATE INDEX IF NOT EXISTS agent_command_journal_status
+            ON agent_command_journal(status, received_at, command_id);
+        CREATE INDEX IF NOT EXISTS agent_local_reservation_current
+            ON agent_local_reservation_leases(bench_id, released_at, lease_version DESC);
+        CREATE INDEX IF NOT EXISTS agent_event_buffer_order
+            ON agent_event_buffer(agent_id, sequence_number, id);
+        CREATE INDEX IF NOT EXISTS agent_event_buffer_overflow
+            ON agent_event_buffer(priority, created_at, id);
+        """
+    )
 
 
 def _create_phase4_tables(connection: sqlite3.Connection) -> None:
@@ -270,6 +891,16 @@ def _add_reservation_columns(connection: sqlite3.Connection) -> None:
 def _add_event_columns(connection: sqlite3.Connection) -> None:
     _add_column(connection, "events", "reservation_id", "TEXT")
     _add_column(connection, "events", "deduplication_key", "TEXT")
+
+
+def _add_distributed_operation_result_column(connection: sqlite3.Connection) -> None:
+    _add_column(
+        connection,
+        "distributed_operations",
+        "result_json",
+        "TEXT CHECK (result_json IS NULL OR "
+        "(json_valid(result_json) AND json_type(result_json) = 'object'))",
+    )
 
 
 def _create_phase3_tables(connection: sqlite3.Connection) -> None:

@@ -3,6 +3,11 @@
 Reservations grant one owner exclusive mutating access to a bench for a bounded interval. They
 survive Agent restarts and use UTC internally.
 
+This page documents the standalone Agent's Phase 3 scheduling surface. The distributed control
+plane instead exposes global `create`, lease-versioned `renew`, and lease-versioned `release`;
+future scheduling, `extend`, `cancel`, and the immediate `bench reserve/release` aliases are not
+control-plane routes. See [Phase 5](PHASE_5.md#reservation-routing-and-command-safety).
+
 ## Immediate reservations
 
 ```bash

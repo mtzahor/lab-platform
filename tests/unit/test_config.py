@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from lab_platform.config import (
+    AgentIdentitySettings,
+    AgentReconnectSettings,
     RealBackendSettings,
     SimLabBackendSettings,
     load_config,
@@ -18,12 +20,65 @@ def test_missing_files_use_defaults(tmp_path: Path) -> None:
     assert config.agent.name == "local-agent"
     assert config.agent.port == 8080
     assert config.agent.max_request_body_size_mb == 1
+    assert config.agent.data_directory == Path(".lab-agent")
+    assert not config.control_plane.enabled
+    assert config.identity.agent_id is None
     assert config.simlab.benches == 5
     assert config.plugins == ["power", "serial", "firmware"]
     assert config.ci.default_reservation_minutes == 30
     assert config.ci.heartbeat_timeout_seconds == 120
     assert config.artifacts.max_upload_size_mb == 100
     assert config.serial.stream_buffer_lines == 500
+
+
+def test_distributed_agent_configuration_requires_stable_identity_and_url(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "agent.yaml").write_text(
+        "control_plane:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="control_plane.url"):
+        load_config(tmp_path)
+
+    (tmp_path / "agent.yaml").write_text(
+        """
+agent:
+  name: home-lab
+  data_directory: ./.agent-state
+  location: jerusalem-home
+  labels:
+    environment: development
+control_plane:
+  enabled: true
+  url: wss://lab.example.internal/api/v1/agent-gateway
+  reconnect:
+    initial_delay_seconds: 2
+    maximum_delay_seconds: 20
+    jitter: false
+identity:
+  agent_id: 11111111-1111-4111-8111-111111111111
+  credential_env_var: HOME_LAB_AGENT_CREDENTIAL
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.agent.location == "jerusalem-home"
+    assert config.agent.labels == {"environment": "development"}
+    assert config.control_plane.enabled
+    assert config.control_plane.reconnect.maximum_delay_seconds == 20
+    assert config.identity.agent_id is not None
+    assert config.identity.credential_env_var == "HOME_LAB_AGENT_CREDENTIAL"
+
+
+def test_distributed_agent_reconnect_and_credential_settings_are_bounded() -> None:
+    with pytest.raises(ValidationError, match="maximum reconnect delay"):
+        AgentReconnectSettings(initial_delay_seconds=10, maximum_delay_seconds=1)
+
+    with pytest.raises(ValidationError):
+        AgentIdentitySettings(credential_env_var="not-valid-name")
 
 
 @pytest.mark.parametrize(

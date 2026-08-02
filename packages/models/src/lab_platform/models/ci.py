@@ -10,6 +10,8 @@ from pydantic import Field, field_validator, model_validator
 
 
 class ApiTokenScope(StrEnum):
+    AGENTS_READ = "agents:read"
+    AGENTS_ADMIN = "agents:admin"
     BENCHES_READ = "benches:read"
     RESERVATIONS_WRITE = "reservations:write"
     WORKFLOWS_RUN = "workflows:run"
@@ -164,8 +166,10 @@ class BenchRequest(LabModel):
     required_capabilities: set[str] = Field(default_factory=set)
     required_labels: dict[str, str] = Field(default_factory=dict)
     preferred_labels: dict[str, str] = Field(default_factory=dict)
+    required_agent_labels: dict[str, str] = Field(default_factory=dict)
+    preferred_location: str | None = Field(default=None, min_length=1, max_length=200)
     allow_simulated: bool = True
-    allow_physical: bool = True
+    allow_physical: bool = False
     maximum_wait_seconds: int = Field(default=600, ge=0, le=86_400)
     reservation_duration_seconds: int = Field(default=1800, gt=0, le=604_800)
 
@@ -181,7 +185,12 @@ class BenchRequest(LabModel):
             normalized.add(item.strip().lower())
         return normalized
 
-    @field_validator("required_labels", "preferred_labels", mode="before")
+    @field_validator(
+        "required_labels",
+        "preferred_labels",
+        "required_agent_labels",
+        mode="before",
+    )
     @classmethod
     def normalize_labels(cls, value: object) -> object:
         if not isinstance(value, dict):
@@ -193,6 +202,16 @@ class BenchRequest(LabModel):
             if not isinstance(raw_value, str) or not raw_value.strip():
                 raise ValueError("label values must be non-empty strings")
             normalized[raw_key.strip()] = raw_value.strip()
+        return normalized
+
+    @field_validator("preferred_location", mode="before")
+    @classmethod
+    def normalize_preferred_location(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("preferred location must not be empty")
         return normalized
 
     @model_validator(mode="after")
@@ -239,6 +258,29 @@ class CiSession(LabModel):
         if self.completed_at is not None and self.completed_at < self.created_at:
             raise ValueError("completed_at cannot precede created_at")
         return self
+
+
+class DistributedCiWorkflowBinding(LabModel):
+    """Durable link from a central CI session to one remote workflow command."""
+
+    ci_session_id: UUID
+    remote_command_id: UUID
+    operation_id: UUID
+    agent_id: UUID
+    bench_id: str = Field(min_length=3, max_length=600)
+    reservation_id: UUID
+    workflow_name: str = Field(min_length=1, max_length=200)
+    workflow_version: int = Field(ge=1, strict=True)
+    launch_idempotency_key: str = Field(min_length=1, max_length=500)
+    request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("created_at")
+    @classmethod
+    def normalize_created_at(cls, value: datetime) -> datetime:
+        normalized = _as_utc(value, model="distributed CI workflow binding")
+        assert normalized is not None
+        return normalized
 
 
 class CleanupResult(LabModel):

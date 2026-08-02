@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_platform.config import (
@@ -80,6 +82,11 @@ from lab_platform.persistence.workflows import SQLiteWorkflowRepository
 from lab_platform.plugins import PluginManager
 from lab_platform.real_backend import RealLabBackend
 from lab_platform.simlab_adapter import SimLabBackend
+
+if TYPE_CHECKING:
+    from lab_platform.agent.distributed import AgentDistributedRuntime
+
+DistributedRuntimeFactory = Callable[["LabAgent"], "AgentDistributedRuntime"]
 
 
 class _WorkflowOperationLockAdapter:
@@ -160,6 +167,10 @@ class _ProbeHealthRecorder:
         self._repository = repository
         self._events = events
         self._clock = clock
+        self._inventory_publisher: Callable[[], Awaitable[None]] | None = None
+
+    def bind_inventory_publisher(self, publisher: Callable[[], Awaitable[None]]) -> None:
+        self._inventory_publisher = publisher
 
     async def record(self, health: TargetHealth) -> None:
         previous = self._catalog.get(health.bench_id)
@@ -189,6 +200,22 @@ class _ProbeHealthRecorder:
                 deduplication_key=(f"bench:{updated.id}:health:{updated.updated_at.isoformat()}"),
             )
         )
+        if self._inventory_publisher is not None:
+            try:
+                await self._inventory_publisher()
+            except Exception as exc:
+                await self._events.create(
+                    EventRecord(
+                        timestamp=self._clock.now(),
+                        type="INVENTORY_SYNC_FAILED",
+                        source="inventory",
+                        bench_id=updated.id,
+                        payload={"error": str(exc)},
+                        deduplication_key=(
+                            f"bench:{updated.id}:inventory-sync:{updated.updated_at.isoformat()}"
+                        ),
+                    )
+                )
 
 
 class LabAgent:
@@ -226,6 +253,7 @@ class LabAgent:
         workflow_directory: Path,
         workflow_paths: tuple[Path, ...],
         artifacts_directory: Path,
+        distributed_runtime_factory: DistributedRuntimeFactory | None = None,
     ) -> None:
         self.config = config
         self.backend_registry = backend_registry
@@ -244,6 +272,7 @@ class LabAgent:
         self.artifact_service = artifact_service
         self.ci_session_service = ci_session_service
         self.artifacts_directory = artifacts_directory
+        self.distributed_runtime: AgentDistributedRuntime | None = None
         self._logger = logger
         self._catalog_repository = catalog_repository
         self._clock = clock
@@ -259,6 +288,7 @@ class LabAgent:
         self._operation_locks = operation_locks
         self._workflow_directory = workflow_directory
         self._workflow_paths = workflow_paths
+        self._distributed_runtime_factory = distributed_runtime_factory
         self._started = False
         self._bench_cache: list[BenchSnapshot] = []
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -267,6 +297,7 @@ class LabAgent:
         self._health_probe_poll_seconds = 5.0
         self._health_monitor.report("configuration", HealthStatus.HEALTHY, "Configuration loaded")
         self._health_monitor.report("logging", HealthStatus.HEALTHY, "Logging initialized")
+        self._probe_health_recorder.bind_inventory_publisher(self._publish_distributed_inventory)
 
     @property
     def started(self) -> bool:
@@ -346,8 +377,16 @@ class LabAgent:
                 f"Recovered {recovered_ci_sessions} incomplete CI sessions",
             )
             await self._set_health("agent", HealthStatus.HEALTHY, "Agent ready")
-            self._started = True
+            if self._distributed_runtime_factory is not None:
+                self.distributed_runtime = self._distributed_runtime_factory(self)
+                await self.distributed_runtime.start()
+                await self._set_health(
+                    "control_plane",
+                    HealthStatus.HEALTHY,
+                    "Distributed control-plane connection manager started",
+                )
             await self.start_background_workers()
+            self._started = True
             self._logger.info(
                 "Agent ready with %d benches, %d backends, and %d plugins",
                 len(self._bench_cache),
@@ -355,6 +394,9 @@ class LabAgent:
                 len(plugins),
             )
         except Exception:
+            if self.distributed_runtime is not None:
+                await self.distributed_runtime.stop()
+                self.distributed_runtime = None
             await self.stop_background_workers()
             await self._workflow_runner.shutdown()
             await self.operation_runner.shutdown()
@@ -362,6 +404,7 @@ class LabAgent:
             await self.backend_registry.stop()
             await self._core.shutdown()
             self._database.close()
+            self._started = False
             await self._set_health("agent", HealthStatus.UNHEALTHY, "Agent failed to start")
             self._logger.exception("Agent startup failed")
             raise
@@ -370,6 +413,9 @@ class LabAgent:
         if not self._started:
             return
         await self.stop_background_workers()
+        if self.distributed_runtime is not None:
+            await self.distributed_runtime.stop()
+            self.distributed_runtime = None
         await self._workflow_runner.shutdown()
         await self._drain_release_tasks()
         await self.operation_runner.shutdown()
@@ -448,6 +494,30 @@ class LabAgent:
             }
         return payload
 
+    async def metrics_payload(self) -> dict[str, int]:
+        catalog = self.catalog.list()
+        distributed: dict[str, object] = {}
+        if self.distributed_runtime is not None:
+            distributed = await self.distributed_runtime.status()
+
+        def distributed_metric(name: str) -> int:
+            value = distributed.get(name, 0)
+            return value if isinstance(value, int) else 0
+
+        return {
+            "connection_status": distributed_metric("connection_status"),
+            "reconnect_attempts": distributed_metric("reconnect_attempts"),
+            "command_queue_size": distributed_metric("command_queue_size"),
+            "event_buffer_size": distributed_metric("event_buffer_size"),
+            "active_operations": len(await self._operation_locks.list()),
+            "local_benches_online": sum(
+                1 for bench in catalog if bench.online and bench.health is HealthStatus.HEALTHY
+            ),
+            "local_benches_degraded": sum(
+                1 for bench in catalog if bench.online and bench.health is not HealthStatus.HEALTHY
+            ),
+        }
+
     async def _scheduler_loop(self) -> None:
         interval = self.config.scheduler.poll_interval_seconds
         while True:
@@ -460,6 +530,7 @@ class LabAgent:
                 self._bench_cache = [
                     item.snapshot for item in self.backend_registry.last_refresh.benches
                 ]
+                await self._publish_distributed_inventory()
                 await self.scheduling_service.process_due_reservations()
                 if self.config.scheduler.automatic_assignment:
                     await self.scheduling_service.promote_queues()
@@ -599,11 +670,22 @@ class LabAgent:
                 )
             )
 
-    async def refresh_catalog(self) -> CatalogRefreshResult:
+    async def refresh_catalog(
+        self,
+        *,
+        publish_distributed: bool = True,
+    ) -> CatalogRefreshResult:
         refresh = await self.catalog.refresh()
         await self._persist_catalog_refresh(refresh)
         self._bench_cache = [item.snapshot for item in self.backend_registry.last_refresh.benches]
+        if publish_distributed:
+            await self._publish_distributed_inventory()
         return refresh
+
+    async def _publish_distributed_inventory(self) -> None:
+        runtime = self.distributed_runtime
+        if runtime is not None and runtime.started:
+            await runtime.publish_inventory()
 
     async def _load_workflow_definitions(self) -> int:
         paths = self._workflow_definition_files()
@@ -1038,6 +1120,20 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
     get_logger("lab-platform.backend.registry", config.agent.log_level)
     get_logger("lab-platform.backend.simlab", config.agent.log_level)
     get_logger("lab-platform.backend.real", config.agent.log_level)
+    distributed_runtime_factory: DistributedRuntimeFactory | None = None
+    if config.control_plane.enabled:
+        from lab_platform.agent.distributed import AgentDistributedRuntime
+
+        def distributed_runtime_factory(agent: LabAgent) -> AgentDistributedRuntime:
+            return AgentDistributedRuntime(
+                agent,
+                database=database,
+                workflow_repository=workflow_repository,
+                operation_locks=operation_locks,
+                events=events,
+                storage_root=storage_root,
+            )
+
     return LabAgent(
         config=config,
         logger=logger,
@@ -1074,6 +1170,7 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
             _relative_to_storage(path, storage_root) for path in config.workflows.definition_paths
         ),
         artifacts_directory=artifact_path,
+        distributed_runtime_factory=distributed_runtime_factory,
     )
 
 

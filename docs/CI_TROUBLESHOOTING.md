@@ -33,9 +33,10 @@ policy explicit.
 - Confirm `LAB_PLATFORM_TOKEN` is set in the same process without printing it.
 - If using `--token-env`, confirm the named environment variable exists.
 - Check `labctl token list` from the trusted management interface for expiry/revocation.
-- Grant the least required missing scope; standard `ci run` normally needs all seven Phase 4
-  scopes.
-- Confirm the runner is talking to the intended Agent and TLS proxy.
+- Grant the least required missing scope. A standalone Agent `ci run` uses all seven local Phase 4
+  scopes. A control-plane run uses `ci:sessions`, `artifacts:write`, `operations:read`, and
+  `artifacts:read`; Agent-administration scopes are not job scopes.
+- Confirm the runner is talking to the intended control plane or standalone Agent and TLS endpoint.
 
 Never retry by moving the token onto a command-line option or enabling shell tracing.
 
@@ -68,9 +69,13 @@ same capabilities, labels, explicit bench, and backend allow flags before inspec
 reservations:
 
 ```console
-labctl bench timeline BENCH_ID
 labctl reservation list --bench-id BENCH_ID
+labctl operation list --bench-id BENCH_ID
 ```
+
+For a distributed bench, also inspect `labctl agent timeline AGENT_ID`; find the Agent ID in
+`labctl bench show BENCH_ID --output json`. `labctl bench timeline` is a standalone Agent
+compatibility route and returns `404` when the CLI is pointed at the control plane.
 
 Increase `--wait-timeout` only when pipeline latency permits it. Do not inflate session or workflow
 timeouts to solve queue pressure.
@@ -96,7 +101,7 @@ Patterns are regular expressions; anchors and case matter. Confirm the supplied
 - Verify the token has `artifacts:write` and owns the target session.
 - If sending `sha256`, recompute it and retry with the same idempotency key.
 - Use a simple logical name; never depend on directory components in an uploaded filename.
-- Check reverse-proxy request-body limits when the Agent limit is higher.
+- Check reverse-proxy request-body limits when the service's configured limit is higher.
 
 ## Cancellation or timeout (16/17)
 
@@ -127,14 +132,17 @@ labctl health --output json
 labctl bench show BENCH_ID --output json
 ```
 
-For physical ESP32 benches, check USB presence/serial identity, permissions, cable, port ambiguity,
-esptool, and boot-marker configuration. For SimLab, check the configured backend is enabled and
-auto-started. Provider-specific CI settings do not fix a backend health problem.
+For a distributed bench, use its record to run `labctl agent show AGENT_ID --output json` and
+`labctl agent timeline AGENT_ID`; control-plane health describes the central service, not a local
+USB device. For physical ESP32 benches, check USB presence/serial identity, permissions, cable,
+port ambiguity, esptool, and boot-marker configuration on the owning Agent. For SimLab, check the
+configured backend is enabled and auto-started. Provider-specific CI settings do not fix a backend
+health problem.
 
 ## Client/protocol error (20)
 
 Confirm `LAB_PLATFORM_SERVER`, `/api/v1/version`, network reachability, and compatible
-`0.5.0-alpha` client/server versions. Record the `X-Request-ID` and stable error code from the
+`0.6.0-alpha` client/server versions. Record the `X-Request-ID` and stable error code from the
 response. Polling remains the supported fallback if optional event streaming is interrupted.
 
 ## Missing results or artifacts
@@ -145,6 +153,8 @@ an `always`/post section. A passing JUnit suite does not override a cleanup fail
 
 ## Security reminder
 
-Do not post token values, full environment dumps, or unredacted device logs in tickets. Phase 4
-authentication is limited; keep the Agent private and terminate TLS at a trusted proxy. See
+Do not post token values, full environment dumps, or unredacted device logs in tickets. Standalone
+Agent authentication is limited; keep it private and terminate TLS at a trusted proxy. For the
+control plane, use direct configured TLS or the explicit loopback-only TLS-termination proxy mode
+described in [Phase 5](PHASE_5.md#security-posture-and-limits). See
 [API tokens](API_TOKENS.md).

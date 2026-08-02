@@ -1,9 +1,24 @@
 # CI artifacts
 
-Phase 4 artifacts carry firmware into a CI session and retain logs, reports, and metadata after it
+Artifacts carry firmware into a CI session and retain logs, reports, and metadata after it
 finishes. An artifact record has a generated UUID, logical owner, display name, type, content type,
 generated storage path, byte size, SHA-256 checksum, timestamps, optional expiry, and string
 metadata.
+
+In Phase 5 client content is stored by the control plane, then downloaded by the selected Agent
+through a short-lived Agent/artifact-scoped capability. Agent outputs travel in the opposite
+direction: metadata is announced first, the control plane assigns a global artifact ID and scoped
+upload capability, and completion is idempotent. Content stays off the protocol WebSocket. The
+Agent verifies SHA-256 and uses a bounded LRU cache that pins active inputs. The remaining sections
+describe the compatible client artifact surface; see [Phase 5](PHASE_5.md#workflows-ci-and-artifacts)
+for transfer/reconnect behavior.
+
+The durable workflow or flash command contains only an artifact reference, Agent ID, checksum,
+size, and safe target path. The control plane creates the transfer record and injects its URL,
+expiry, and plaintext bearer capability only while constructing each outbound command envelope.
+Those fields are not written to `remote_commands`; an `UNKNOWN` replay, including one after a
+control-plane restart, receives a newly issued capability while retaining the same durable
+idempotency identity.
 
 Supported owner types are `ci_session`, `workflow_run`, `workflow_step`, and `operation`. CI input
 uploads are owned by the session that will run them; access is restricted to the same API token
@@ -18,7 +33,7 @@ the same name:
 labctl ci run \
   --workflow esp32-ci-test \
   --artifact firmware=build/firmware.bin \
-  --input expected_version=0.5.0 \
+  --input expected_version=0.6.0 \
   --label board=esp32 \
   --allow-simulated \
   --no-allow-physical
@@ -126,8 +141,9 @@ Prefer `labctl ci download` in shared runner logs because it builds the header i
 
 Serial output is stored as per-step workflow artifacts and consolidated as the session-owned
 `serial.log`; structured flashing progress and boot diagnostics are consolidated separately as
-`flash.log`. SQLite keeps only bounded recent metadata, not every line. Capture enforces both a
-per-message byte limit and the configured total artifact limit while data arrives, applies
+`flash.log`. The metadata database keeps only bounded recent records, not every line. Capture
+enforces both a per-message byte limit and the configured total artifact limit while data arrives,
+applies
 `serial.redact_patterns` before persistence, and fails the step while preserving the complete
 accepted prefix if a backend or limit error interrupts collection. Invalid byte sequences follow
 `serial.decode_errors`.

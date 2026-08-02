@@ -4,6 +4,12 @@ A CI session is the durable coordinator for one external CI attempt. It is separ
 reservation, workflow run, or individual operation because it must recover and clean up all of
 them as one unit.
 
+In Phase 5 the same public aggregate is hosted by the control plane. Its durable workflow binding
+points to a global bench, confirmed Agent lease, remote command, and distributed operation. The
+owning Agent runs the complete sequential workflow locally; a CI provider never calls an Agent
+directly. The standalone behavior described below remains the Phase 4 compatibility mode. See
+[Phase 5](PHASE_5.md#workflows-ci-and-artifacts) for disconnect and lease semantics.
+
 ```text
 CI session
 |- provider and external run metadata
@@ -36,14 +42,16 @@ The one-command path is preferred for CI jobs:
 labctl ci run \
   --workflow esp32-ci-test \
   --artifact firmware=build/firmware.bin \
-  --input expected_version=0.5.0 \
+  --input expected_version=0.6.0 \
   --require capability=firmware \
   --require capability=serial \
   --require capability=reset \
   --require capability=probe \
   --label board=esp32 \
+  --agent-label environment=development \
+  --preferred-location simulation \
   --allow-simulated \
-  --allow-physical \
+  --no-allow-physical \
   --wait-timeout 10m \
   --reservation-duration 30m
 ```
@@ -66,10 +74,21 @@ labctl ci session finalize SESSION_ID
 Finalization is idempotent. Repeating it returns the existing finalized session instead of
 performing cleanup twice.
 
+For a distributed run, finalization can temporarily return `cleanup_pending` while the control
+plane retries checksum-verified output uploads from the owning Agent. `labctl ci run` keeps polling
+and does not download results until the session is `completed`. The retry state survives a control
+plane restart. If an upload is still incomplete after
+`artifacts.finalization_timeout_seconds`, cleanup fails boundedly and the final outcome is
+`infrastructure_error`; it is never reported as a successful cleanup with missing content.
+
 ## REST flow
 
-Create a session with a bearer token that has `ci:sessions`, `benches:read`, and
-`reservations:write`:
+The standalone Agent's session-creation route requires `ci:sessions`, `benches:read`, and
+`reservations:write`. The Phase 5 control-plane route requires `ci:sessions`; its central service
+enforces selection and lease safety. Across the complete one-command flow, a standalone Agent job
+uses all seven local scopes. A distributed `labctl ci run` uses `ci:sessions`, `artifacts:write`,
+`operations:read`, and `artifacts:read` to create/run the session, upload its inputs, read results,
+and download outputs; it does not need Agent-administration scopes.
 
 ```http
 POST /api/v1/ci/sessions
@@ -90,8 +109,10 @@ Content-Type: application/json
     "required_capabilities": ["firmware", "serial", "reset", "probe"],
     "required_labels": {"board": "esp32"},
     "preferred_labels": {"location": "simulation"},
+    "required_agent_labels": {"environment": "development"},
+    "preferred_location": "simulation",
     "allow_simulated": true,
-    "allow_physical": true,
+    "allow_physical": false,
     "maximum_wait_seconds": 600,
     "reservation_duration_seconds": 1800
   }
@@ -118,7 +139,7 @@ API:
   "workflow_name": "esp32-ci-test",
   "inputs": {
     "firmware": {"artifact_id": "f07d3d83-7961-4449-a54c-7091e9404a87"},
-    "expected_version": "0.5.0",
+    "expected_version": "0.6.0",
     "ready_timeout": 20
   }
 }
@@ -127,18 +148,19 @@ API:
 ## Bench selection
 
 An explicit `--bench` takes precedence. Otherwise candidates are filtered by online state,
-required capabilities, required labels, and allowed backend kind. Available candidates are ranked
-before busy ones, then by preferred-label score, least-recent use, and bench ID. The ordering is
-deterministic and reservation creation is atomic with selection, so two sessions cannot acquire
-the same bench.
+required capabilities, required labels, and allowed backend kind. Distributed selection also
+requires matching Agent labels and excludes offline or draining Agents. Available candidates are
+ranked before busy ones, then by preferred location/labels, Agent load, least-recent use, and bench
+ID. The ordering is deterministic and central reservation creation is confirmed by a versioned
+Agent lease, so two sessions cannot acquire the same bench.
 
 With `maximum_wait_seconds: 0`, failure to reserve a matching available bench on the first attempt
 is reported as immediate selection failure; that result cannot distinguish an incompatible pool
 from compatible benches that are busy. With a positive duration, selection retries until the
 bench-wait deadline, whose timeout likewise does not necessarily distinguish busy from
-incompatible. Both backend kinds are allowed by default. Add `--no-allow-physical` for
-deterministic SimLab-only pipelines, or `--no-allow-simulated --allow-physical` with an explicit
-bench for gated hardware runs. At least one backend kind must be allowed.
+incompatible. Simulated benches are allowed by default, while physical selection requires an
+explicit `--allow-physical`. Use `--no-allow-simulated --allow-physical` with an explicit bench
+for gated hardware runs. At least one backend kind must be allowed.
 
 ## Provider metadata
 

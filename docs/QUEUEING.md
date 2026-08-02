@@ -3,6 +3,10 @@
 Queueing lets an owner wait for a busy or offline bench without racing other users. Queue entries
 are persistent and ordered FIFO per bench.
 
+This is the standalone Agent's Phase 3 queue API. Phase 5 distributed CI performs bounded
+selection retries centrally, but the control plane does not expose the local `/queue` routes or
+their `labctl reservation queue*` commands.
+
 ```bash
 labctl reservation queue bench-01 --owner alice --duration 20m
 labctl reservation queue-list bench-01

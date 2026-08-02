@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import PlainTextResponse
 from lab_platform.agent.api.artifacts import create_artifact_router
 from lab_platform.agent.api.auth import require_legacy_scopes
 from lab_platform.agent.api.ci import create_ci_router
@@ -27,6 +28,7 @@ from lab_platform.core import (
     VERSION,
     ArtifactTooLargeError,
     BenchNotReservedError,
+    ConfigurationError,
     FirmwareFileTooLargeError,
     InvalidFirmwareFileError,
     PermissionDeniedError,
@@ -42,6 +44,7 @@ from lab_platform.models import (
     FirmwareInput,
     OperationStatus,
     OperationType,
+    RemoteCommandStatus,
     SerialReadRequest,
 )
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -83,14 +86,32 @@ class SerialReadApiRequest(OwnerRequest):
 LabelFilter = Annotated[str, StringConstraints(pattern=r"^[^:=\s]+[:=].+$")]
 
 
-def create_app(agent: LabAgent) -> FastAPI:
+def create_app(agent: LabAgent, *, manage_lifecycle: bool = True) -> FastAPI:
+    if manage_lifecycle and agent.started:
+        raise ConfigurationError(
+            "The Agent HTTP application requires an unstarted Agent when it owns lifecycle."
+        )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        await agent.start_background_workers()
+        # Distributed connection tasks must be created on the same event loop
+        # Uvicorn keeps alive.  Caller-owned lifecycles are supported only through
+        # an explicit opt-out so the application never guesses task ownership.
+        if manage_lifecycle:
+            if agent.started:
+                raise ConfigurationError(
+                    "The Agent was started before the HTTP application lifespan."
+                )
+            await agent.start()
+        elif not agent.started:
+            raise ConfigurationError(
+                "A caller-managed Agent must be started before the HTTP lifespan."
+            )
         try:
             yield
         finally:
-            await agent.stop_background_workers()
+            if manage_lifecycle:
+                await agent.shutdown()
 
     app = FastAPI(
         title="Lab Platform Agent API",
@@ -203,6 +224,8 @@ def create_app(agent: LabAgent) -> FastAPI:
     )
     authorize_workflows = require_legacy_scopes(agent, ApiTokenScope.WORKFLOWS_RUN)
     authorize_operations = require_legacy_scopes(agent, ApiTokenScope.OPERATIONS_READ)
+    authorize_agents_read = require_legacy_scopes(agent, ApiTokenScope.AGENTS_READ)
+    authorize_agents_admin = require_legacy_scopes(agent, ApiTokenScope.AGENTS_ADMIN)
 
     @router.get("/health")
     async def health() -> dict[str, object]:
@@ -211,6 +234,66 @@ def create_app(agent: LabAgent) -> FastAPI:
     @router.get("/version")
     async def version() -> dict[str, str]:
         return {"version": VERSION}
+
+    @router.get("/agent/status")
+    async def local_agent_status(
+        _token: Annotated[ApiToken | None, Depends(authorize_agents_read)],
+    ) -> dict[str, object]:
+        runtime = agent.distributed_runtime
+        connection = (
+            await runtime.status()
+            if runtime is not None
+            else {"enabled": False, "connected": False}
+        )
+        return {
+            **agent.health_payload(),
+            "agent_name": agent.config.agent.name,
+            "location": agent.config.agent.location,
+            "control_plane": connection,
+        }
+
+    @router.get("/agent/connection")
+    async def local_agent_connection(
+        _token: Annotated[ApiToken | None, Depends(authorize_agents_read)],
+    ) -> dict[str, object]:
+        runtime = agent.distributed_runtime
+        if runtime is None:
+            return {"enabled": False, "connected": False}
+        return await runtime.status()
+
+    @router.get("/agent/journal")
+    async def local_agent_journal(
+        _token: Annotated[ApiToken | None, Depends(authorize_agents_read)],
+        command_status: Annotated[
+            RemoteCommandStatus | None,
+            Query(alias="status"),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=10_000)] = 100,
+    ) -> dict[str, object]:
+        runtime = agent.distributed_runtime
+        entries = (
+            await runtime.journal_entries(status=command_status, limit=limit)
+            if runtime is not None
+            else []
+        )
+        return {"items": [entry.model_dump(mode="json") for entry in entries]}
+
+    @router.post("/agent/reconnect", status_code=202)
+    async def reconnect_control_plane(
+        _token: Annotated[ApiToken | None, Depends(authorize_agents_admin)],
+    ) -> dict[str, object]:
+        runtime = agent.distributed_runtime
+        if runtime is None:
+            raise ConfigurationError("Distributed control-plane mode is not enabled.")
+        await runtime.reconnect()
+        return {"reconnect_requested": True, **await runtime.status()}
+
+    @router.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(
+        _token: Annotated[ApiToken | None, Depends(authorize_benches)],
+    ) -> str:
+        values = await agent.metrics_payload()
+        return "".join(f"{name} {value}\n" for name, value in sorted(values.items()))
 
     @router.get("/benches")
     async def list_benches(
@@ -519,6 +602,13 @@ def create_app(agent: LabAgent) -> FastAPI:
     @app.get("/version", include_in_schema=False)
     async def legacy_version() -> dict[str, str]:
         return {"version": VERSION}
+
+    @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
+    async def legacy_metrics(
+        _token: Annotated[ApiToken | None, Depends(authorize_benches)],
+    ) -> str:
+        values = await agent.metrics_payload()
+        return "".join(f"{name} {value}\n" for name, value in sorted(values.items()))
 
     @app.get("/plugins", include_in_schema=False)
     async def legacy_plugins(

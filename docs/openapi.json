@@ -33,6 +33,8 @@
       },
       "ApiTokenScope": {
         "enum": [
+          "agents:read",
+          "agents:admin",
           "benches:read",
           "reservations:write",
           "workflows:run",
@@ -48,7 +50,7 @@
         "additionalProperties": false,
         "properties": {
           "allow_physical": {
-            "default": true,
+            "default": false,
             "title": "Allow Physical",
             "type": "boolean"
           },
@@ -82,6 +84,26 @@
               "type": "string"
             },
             "title": "Preferred Labels",
+            "type": "object"
+          },
+          "preferred_location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Location"
+          },
+          "required_agent_labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Required Agent Labels",
             "type": "object"
           },
           "required_capabilities": {
@@ -500,6 +522,22 @@
         "title": "QueueReservationRequest",
         "type": "object"
       },
+      "RemoteCommandStatus": {
+        "enum": [
+          "CREATED",
+          "QUEUED",
+          "DISPATCHED",
+          "ACCEPTED",
+          "RUNNING",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELLED",
+          "EXPIRED",
+          "UNKNOWN"
+        ],
+        "title": "RemoteCommandStatus",
+        "type": "string"
+      },
       "ReservationStatus": {
         "enum": [
           "queued",
@@ -683,10 +721,180 @@
   "info": {
     "description": "Versioned local API for reserving and controlling lab benches.",
     "title": "Lab Platform Agent API",
-    "version": "0.5.0-alpha"
+    "version": "0.6.0-alpha"
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/agent/connection": {
+      "get": {
+        "operationId": "local_agent_connection_api_v1_agent_connection_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Local Agent Connection Api V1 Agent Connection Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Local Agent Connection"
+      }
+    },
+    "/api/v1/agent/journal": {
+      "get": {
+        "operationId": "local_agent_journal_api_v1_agent_journal_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/RemoteCommandStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Local Agent Journal Api V1 Agent Journal Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Local Agent Journal"
+      }
+    },
+    "/api/v1/agent/reconnect": {
+      "post": {
+        "operationId": "reconnect_control_plane_api_v1_agent_reconnect_post",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reconnect Control Plane Api V1 Agent Reconnect Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Reconnect Control Plane"
+      }
+    },
+    "/api/v1/agent/status": {
+      "get": {
+        "operationId": "local_agent_status_api_v1_agent_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Local Agent Status Api V1 Agent Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Local Agent Status"
+      }
+    },
     "/api/v1/artifacts": {
       "post": {
         "operationId": "upload_artifact_api_v1_artifacts_post",
@@ -2309,6 +2517,39 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "operationId": "metrics_api_v1_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request validation failed"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Metrics"
       }
     },
     "/api/v1/operations": {

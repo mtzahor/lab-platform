@@ -1,3 +1,4 @@
+from lab_platform.persistence.agents import SQLiteAgentEnrollmentRepository
 from lab_platform.persistence.artifacts import (
     SQLiteArtifactRecordRepository,
     SQLiteGenericArtifactRepository,
@@ -18,6 +19,13 @@ from lab_platform.persistence.database import (
     SQLiteOperationRepository,
     SQLiteReservationRepository,
 )
+from lab_platform.persistence.distributed_reservations import (
+    SQLiteCentralReservationLeaseRepository,
+)
+from lab_platform.persistence.postgresql import (
+    PostgreSQLDatabase,
+    create_control_plane_database,
+)
 from lab_platform.persistence.reservations import (
     SQLiteOperationLockRepository,
     SQLiteQueueRepository,
@@ -29,13 +37,16 @@ from lab_platform.persistence.workflows import SQLiteWorkflowRepository
 
 __all__ = [
     "BackendRegistration",
+    "PostgreSQLDatabase",
     "SCHEMA_VERSION",
+    "SQLiteAgentEnrollmentRepository",
     "SQLiteApiTokenRepository",
     "SQLiteArtifactRepository",
     "SQLiteArtifactRecordRepository",
     "SQLiteBenchCatalogRepository",
     "SQLiteCatalogRepository",
     "SQLiteCiSessionRepository",
+    "SQLiteCentralReservationLeaseRepository",
     "SQLiteDatabase",
     "SQLiteEventRepository",
     "SQLiteGenericArtifactRepository",
@@ -48,4 +59,5 @@ __all__ = [
     "SQLiteTimelineRepository",
     "SQLiteTimedReservationRepository",
     "SQLiteWorkflowRepository",
+    "create_control_plane_database",
 ]

@@ -38,7 +38,7 @@ def _record(
     )
 
 
-def test_schema_v5_migrates_phase2_data_without_rewriting_it(tmp_path: Path) -> None:
+def test_schema_v6_migrates_phase2_data_without_rewriting_it(tmp_path: Path) -> None:
     path = tmp_path / "phase2.db"
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -81,7 +81,7 @@ def test_schema_v5_migrates_phase2_data_without_rewriting_it(tmp_path: Path) -> 
         assert [
             row[0]
             for row in migrated.execute("SELECT version FROM schema_migrations ORDER BY version")
-        ] == [2, 3, 4, 5]
+        ] == [2, 3, 4, 5, 6, 7, 8]
         legacy = migrated.execute(
             "SELECT bench_id, owner, status FROM reservations WHERE id = 'reservation-1'"
         ).fetchone()
@@ -107,7 +107,7 @@ def test_schema_v5_migrates_phase2_data_without_rewriting_it(tmp_path: Path) -> 
     database.close()
 
 
-def test_schema_v5_upgrades_an_existing_phase3_database(tmp_path: Path) -> None:
+def test_schema_v6_upgrades_an_existing_phase3_database(tmp_path: Path) -> None:
     path = tmp_path / "phase3.db"
     initial = SQLiteDatabase(path)
     initial.initialize()
@@ -136,7 +136,7 @@ def test_schema_v5_upgrades_an_existing_phase3_database(tmp_path: Path) -> None:
         assert (
             connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             == SCHEMA_VERSION
-            == 5
+            == 8
         )
         assert connection.execute("SELECT COUNT(*) FROM backend_registrations").fetchone()[0] == 0
     upgraded.close()
