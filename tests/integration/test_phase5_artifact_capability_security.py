@@ -94,6 +94,7 @@ def test_download_capabilities_are_transient_and_reissued_after_restart(
         enrollment = await runtime.enrollment.issue_token(
             name="artifact-command-agent",
             expires_at=now + timedelta(minutes=30),
+            allow_internal_authorisation=True,
         )
         enrolled = await runtime.enrollment.enroll(
             plaintext_token=enrollment.plaintext.get_secret_value(),
@@ -145,6 +146,7 @@ def test_download_capabilities_are_transient_and_reissued_after_restart(
             artifact_id=artifact.id,
             target_path=f"artifacts/{artifact.id}",
             idempotency_key="stage-firmware",
+            allow_internal_authorisation=True,
         )
         assert await runtime.artifact_transfers.list(agent_id=agent.id, limit=10) == []
         reservation = ReservationLease(

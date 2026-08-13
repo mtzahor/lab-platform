@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from lab_platform.models.domain import LabModel
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID, LabModel
 from pydantic import Field, field_validator, model_validator
 
 
@@ -18,6 +18,7 @@ class QueueEntryStatus(StrEnum):
 
 class QueueEntry(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     bench_id: str
     owner: str
     requested_duration_seconds: int = Field(gt=0)

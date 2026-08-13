@@ -5,7 +5,8 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from lab_platform.models.domain import LabModel, utc_now
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID, LabModel, utc_now
+from lab_platform.models.identity import ActorContext, PrincipalType
 from pydantic import Field, field_validator, model_validator
 
 
@@ -231,9 +232,14 @@ class CiSession(LabModel):
     actor: str | None = None
 
     requested_by: str = Field(min_length=1, max_length=200)
+    organisation_id: UUID | None = None
+    requested_by_principal_id: UUID | None = None
+    requested_by_principal_type: PrincipalType | None = None
     bench_id: str | None = None
     reservation_id: UUID | None = None
     workflow_run_id: UUID | None = None
+    cancel_actor_context: ActorContext | None = Field(default=None, exclude=True)
+    cancel_authorisation_snapshot_id: UUID | None = Field(default=None, exclude=True)
 
     status: CiSessionStatus = CiSessionStatus.CREATED
     outcome: CiOutcome = CiOutcome.PENDING
@@ -257,6 +263,25 @@ class CiSession(LabModel):
             raise ValueError("started_at cannot precede created_at")
         if self.completed_at is not None and self.completed_at < self.created_at:
             raise ValueError("completed_at cannot precede created_at")
+        principal_fields = (
+            self.organisation_id,
+            self.requested_by_principal_id,
+            self.requested_by_principal_type,
+        )
+        if any(value is not None for value in principal_fields) and not all(
+            value is not None for value in principal_fields
+        ):
+            raise ValueError("CI identity fields must be supplied together")
+        if (self.cancel_actor_context is None) is not (
+            self.cancel_authorisation_snapshot_id is None
+        ):
+            raise ValueError("CI cancellation actor and authorisation evidence must be paired")
+        if (
+            self.cancel_actor_context is not None
+            and self.cancel_actor_context.authorisation_snapshot_id
+            != self.cancel_authorisation_snapshot_id
+        ):
+            raise ValueError("CI cancellation actor and authorisation evidence do not match")
         return self
 
 
@@ -294,6 +319,7 @@ class CleanupResult(LabModel):
 
 class ArtifactRecord(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     owner_type: ArtifactOwnerType
     owner_id: UUID
     name: str = Field(min_length=1, max_length=500)

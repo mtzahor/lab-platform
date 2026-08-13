@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -13,6 +15,7 @@ from lab_platform.agent_protocol.commands import (
     InventoryRefreshRequestPayload,
     ReconciliationRequestPayload,
 )
+from lab_platform.control_plane.artifact_access import ProtectedArtifactService
 from lab_platform.control_plane.config import ControlPlaneConfig
 from lab_platform.control_plane.gateway import (
     WS_AUTHENTICATION_FAILED,
@@ -20,6 +23,8 @@ from lab_platform.control_plane.gateway import (
     AgentGateway,
     AgentMessageRouter,
 )
+from lab_platform.control_plane.oidc_provider import HttpOidcProvider
+from lab_platform.control_plane.operational_access import OperationalAccessService
 from lab_platform.control_plane.reservations import (
     CoordinatedReconciliationHandler,
     HubReservationLeaseSynchronizer,
@@ -53,15 +58,25 @@ from lab_platform.control_plane_core.workflows import (
 )
 from lab_platform.core.artifacts import ArtifactService
 from lab_platform.core.auth import ApiTokenService
-from lab_platform.core.errors import ConfigurationError
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError, ConfigurationError
+from lab_platform.core.identity import IdentityAuthenticationService
+from lab_platform.core.identity_admin import IdentityAdministrationService
+from lab_platform.core.oidc import OidcAuthenticationService, OidcProvider
 from lab_platform.models import (
+    ActorContext,
     AgentRecord,
     AgentStatus,
     AgentTimelineRecord,
     AgentTimelineSeverity,
     ArtifactTransferDirection,
     ArtifactTransferStatus,
+    AuthenticationContext,
+    AuthorisationResource,
+    AuthorisationSnapshot,
+    BenchVisibility,
     RemoteCommandStatus,
+    ResourceType,
 )
 from lab_platform.persistence import (
     SQLiteApiTokenRepository,
@@ -95,13 +110,24 @@ from lab_platform.persistence.distributed_adapters import (
     SQLiteReconciliationReportStore,
     SQLiteRemoteCommandServiceRepository,
 )
+from lab_platform.persistence.identity import SQLiteIdentityRepository
 from lab_platform.persistence.postgresql import create_control_plane_database
+
+_LOGGER = logging.getLogger("lab-platform.control-plane")
+
+_IDENTITY_MAINTENANCE_INTERVAL = timedelta(hours=1)
+_IDENTITY_MAINTENANCE_BATCH_SIZE = 1_000
 
 
 class ControlPlaneRuntime:
     """Composition root for the independent Phase 5 control-plane process."""
 
-    def __init__(self, config: ControlPlaneConfig) -> None:
+    def __init__(
+        self,
+        config: ControlPlaneConfig,
+        *,
+        oidc_provider: OidcProvider | None = None,
+    ) -> None:
         self.config = config
         self.database = create_control_plane_database(config.database.url)
 
@@ -181,12 +207,14 @@ class ControlPlaneRuntime:
             ),
             payload_hydrator=self.workflow_artifacts,
         )
+        self.commands.set_workflow_definition_catalog(self.workflow_repository)
         self.workflows = DistributedWorkflowCoordinator(
             self.inventory,
             self.presence,
             self.reservations,
             self.workflow_artifacts,
             self.commands,
+            definition_catalog=self.workflow_repository,
         )
         self.workflow_reservations = DistributedWorkflowReservationLifecycle(
             self.command_repository,
@@ -255,7 +283,99 @@ class ControlPlaneRuntime:
         self.api_tokens = SQLiteApiTokenRepository(self.database)
         self.audit_events = SQLiteEventRepository(self.database)
         self.token_service = ApiTokenService(self.api_tokens, self.audit_events)
+        self.identity_repository = SQLiteIdentityRepository(self.database)
+        self.identity = IdentityAuthenticationService(
+            self.identity_repository,
+            minimum_password_length=config.identity.local_auth.minimum_password_length,
+            access_token_minutes=config.identity.sessions.access_token_minutes,
+            session_hours=config.identity.sessions.session_hours,
+            maximum_session_days=config.identity.sessions.maximum_session_days,
+            login_rate_limit_attempts=config.security.login_rate_limit.attempts,
+            login_rate_limit_window_minutes=config.security.login_rate_limit.window_minutes,
+            audit_enabled=config.audit.enabled,
+        )
+        if oidc_provider is None and config.identity.oidc.enabled:
+            secret_name = config.identity.oidc.client_secret_env
+            client_secret = os.environ.get(secret_name) if secret_name is not None else None
+            if (
+                config.identity.oidc.issuer_url is not None
+                and config.identity.oidc.client_id is not None
+                and client_secret
+            ):
+                oidc_provider = HttpOidcProvider(
+                    issuer_url=config.identity.oidc.issuer_url,
+                    client_id=config.identity.oidc.client_id,
+                    client_secret=client_secret,
+                )
+        self.oidc = OidcAuthenticationService(
+            self.identity_repository,
+            self.identity,
+            enabled=config.identity.oidc.enabled,
+            issuer_url=config.identity.oidc.issuer_url,
+            client_id=config.identity.oidc.client_id,
+            scopes=config.identity.oidc.scopes,
+            username_claim=config.identity.oidc.username_claim,
+            provider=oidc_provider,
+            transaction_ttl_seconds=config.identity.oidc.transaction_ttl_seconds,
+            clock_skew_seconds=config.identity.oidc.clock_skew_seconds,
+        )
+        self.authorisation = AuthorisationService(
+            self.identity_repository,
+            audit_repository=self.identity_repository,
+            policy_repository=self.identity_repository,
+            default_bench_visibility=BenchVisibility(
+                config.authorisation.default_bench_visibility.upper()
+            ),
+            audit_enabled=config.audit.enabled,
+        )
+        self.artifact_access = ProtectedArtifactService(
+            self.platform_artifacts,
+            self.remote_artifacts,
+            self.operation_records,
+            self.command_repository,
+            self.workflow_repository,
+            self.inventory_repository,
+            self.presence,
+            self.ci,
+            self.ci_repository,
+            self.authorisation,
+            self.artifacts,
+            self.artifact_store,
+            maximum_transfer_size_bytes=config.artifacts.max_upload_size_mb * 1024 * 1024,
+            hide_unauthorised_resources=(config.authorisation.hide_unauthorised_resources),
+        )
+        self.operational_access = OperationalAccessService(
+            self.presence,
+            self.inventory,
+            self.workflow_repository,
+            self.operation_records,
+            self.ci,
+            self.authorisation,
+            hide_unauthorised_resources=(config.authorisation.hide_unauthorised_resources),
+        )
+        self.workflow_artifacts.set_protected_artifact_service(self.artifact_access)
+        self.workflows.set_authorisation_service(self.authorisation)
+        self.ci.set_authorisation_service(self.authorisation)
+        self.ci.set_authorisation_snapshot_repository(self.identity_repository)
+        self.commands.set_authorisation_service(self.authorisation)
+        self.commands.set_authorisation_snapshot_repository(self.identity_repository)
+        self.commands.set_ci_cancellation_binding_repository(self.ci_repository)
+        self.reservations.set_authorisation_service(self.authorisation)
+        self.drain.set_authorisation_service(self.authorisation)
+        self.enrollment.set_authorisation_service(self.authorisation)
+        self.identity_administration = IdentityAdministrationService(
+            self.identity_repository,
+            self.identity,
+            self.authorisation,
+            bench_directory=self.benches,
+            workflow_catalog=self.workflow_repository,
+            default_bench_visibility=BenchVisibility(
+                config.authorisation.default_bench_visibility.upper()
+            ),
+            audit_enabled=config.audit.enabled,
+        )
         self._monitor_task: asyncio.Task[None] | None = None
+        self._next_identity_maintenance_at: datetime | None = None
         self._started = False
 
     @property
@@ -265,10 +385,22 @@ class ControlPlaneRuntime:
     async def start(self) -> None:
         if self._started:
             return
+        if self.config.development.auto_login_user is not None:
+            _LOGGER.warning(
+                "DEVELOPMENT AUTO-LOGIN IS ENABLED for user %s on loopback only; "
+                "do not use this configuration in a shared or production deployment",
+                self.config.development.auto_login_user,
+            )
         try:
             self.database.initialize()
+            if self.config.identity.enabled:
+                await self.identity_repository.ensure_default_organisation(
+                    slug=self.config.identity.default_organisation_slug,
+                    name=self.config.identity.default_organisation_name,
+                )
             self.config.artifacts.directory.mkdir(parents=True, exist_ok=True)
             await self.ci.recover_incomplete()
+            self._next_identity_maintenance_at = datetime.now(UTC)
             self._monitor_task = asyncio.create_task(
                 self._monitor_loop(),
                 name="control-plane-monitor",
@@ -279,6 +411,7 @@ class ControlPlaneRuntime:
                 self._monitor_task.cancel()
                 await asyncio.gather(self._monitor_task, return_exceptions=True)
                 self._monitor_task = None
+            self._next_identity_maintenance_at = None
             self.database.close()
             self._started = False
             raise
@@ -288,22 +421,52 @@ class ControlPlaneRuntime:
             self._monitor_task.cancel()
             await asyncio.gather(self._monitor_task, return_exceptions=True)
             self._monitor_task = None
+        self._next_identity_maintenance_at = None
         self.database.close()
         self._started = False
 
-    async def refresh_inventory(self, agent_id: UUID) -> UUID:
-        await self.presence.get_agent(agent_id)
-        request_id = uuid4()
-        await self.hub.send(
+    async def refresh_inventory(
+        self,
+        agent_id: UUID,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> UUID:
+        _, authentication_context = await self._require_agent_authorisation(
             agent_id,
-            MessageType.INVENTORY_REFRESH_REQUEST,
-            InventoryRefreshRequestPayload(request_id=request_id),
-            correlation_id=request_id,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+            persist_snapshot=True,
         )
+        request_id = uuid4()
+        actor_context = _control_actor_context(authentication_context)
+        payload = InventoryRefreshRequestPayload(
+            request_id=request_id,
+            actor_context=actor_context,
+            authorisation_snapshot_id=(
+                authentication_context.authorisation_snapshot_id
+                if authentication_context is not None
+                else None
+            ),
+        )
+        # Persist the authorised intent before the in-memory socket enqueue.  A crash or
+        # backpressure failure can therefore be distinguished from an action that was never
+        # authorised, while the Agent protocol journal still records an eventual wire send.
         await self.record_timeline(
             agent_id,
             "INVENTORY_REFRESH_REQUESTED",
             "A fresh Agent inventory snapshot was requested.",
+            correlation_id=request_id,
+            metadata=_control_intent_metadata(authentication_context),
+            deduplication_key=f"control-intent:inventory-refresh:{request_id}",
+        )
+        await self.hub.send(
+            agent_id,
+            MessageType.INVENTORY_REFRESH_REQUEST,
+            payload,
             correlation_id=request_id,
         )
         return request_id
@@ -371,20 +534,54 @@ class ControlPlaneRuntime:
             self._artifact_upload_requested_at[artifact_id] = now
             return issued
 
-    async def request_reconciliation(self, agent_id: UUID) -> UUID:
+    async def request_reconciliation(
+        self,
+        agent_id: UUID,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> UUID:
+        _, authentication_context = await self._require_agent_authorisation(
+            agent_id,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+            persist_snapshot=True,
+        )
         connection = await self.presence.active_connection(agent_id)
         if connection is None:
-            await self.presence.get_agent(agent_id)
             raise RuntimeError("Agent is not connected")
         request_id = uuid4()
+        actor_context = _control_actor_context(authentication_context)
+        payload = ReconciliationRequestPayload(
+            request_id=request_id,
+            expected_boot_id=connection.connection.boot_id,
+            last_control_plane_sequence=connection.connection.last_sequence_number,
+            actor_context=actor_context,
+            authorisation_snapshot_id=(
+                authentication_context.authorisation_snapshot_id
+                if authentication_context is not None
+                else None
+            ),
+        )
+        await self.record_timeline(
+            agent_id,
+            "RECONCILIATION_REQUESTED",
+            "A fresh Agent reconciliation report was requested.",
+            correlation_id=request_id,
+            metadata=_control_intent_metadata(
+                authentication_context,
+                expected_boot_id=str(connection.connection.boot_id),
+                last_control_plane_sequence=connection.connection.last_sequence_number,
+            ),
+            deduplication_key=f"control-intent:reconciliation:{request_id}",
+        )
         await self.hub.send(
             agent_id,
             MessageType.RECONCILIATION_REQUEST,
-            ReconciliationRequestPayload(
-                request_id=request_id,
-                expected_boot_id=connection.connection.boot_id,
-                last_control_plane_sequence=connection.connection.last_sequence_number,
-            ),
+            payload,
             correlation_id=request_id,
         )
         return request_id
@@ -427,43 +624,125 @@ class ControlPlaneRuntime:
         agent_id: UUID,
         *,
         cancel_queued_work: bool = False,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> DrainResult:
+        _, authentication_context = await self._require_agent_authorisation(
+            agent_id,
+            "agents:drain",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+            persist_snapshot=True,
+        )
         result = await self.drain.drain(
             agent_id,
             cancel_queued_work=cancel_queued_work,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        correlation_id = uuid4()
+        actor_context = _control_actor_context(authentication_context)
+        await self.record_timeline(
+            agent_id,
+            "AGENT_DRAIN_REQUESTED",
+            "Agent entered drain mode.",
+            correlation_id=correlation_id,
+            metadata=_control_intent_metadata(
+                authentication_context,
+                cancelled_queued_work=result.cancelled_queued_work,
+            ),
+            deduplication_key=f"control-intent:drain:{correlation_id}",
         )
         if await self.hub.is_connected(agent_id):
             await self.hub.send(
                 agent_id,
                 MessageType.DRAIN_AGENT,
-                DrainAgentPayload(drain=True),
-                correlation_id=uuid4(),
+                DrainAgentPayload(
+                    drain=True,
+                    actor_context=actor_context,
+                    authorisation_snapshot_id=(
+                        authentication_context.authorisation_snapshot_id
+                        if authentication_context is not None
+                        else None
+                    ),
+                ),
+                correlation_id=correlation_id,
             )
-        await self.record_timeline(
-            agent_id,
-            "AGENT_DRAIN_REQUESTED",
-            "Agent entered drain mode.",
-            metadata={"cancelled_queued_work": result.cancelled_queued_work},
-        )
         return result
 
-    async def undrain_agent(self, agent_id: UUID) -> AgentRecord:
-        agent = await self.drain.undrain(agent_id)
-        await self.hub.send(
+    async def undrain_agent(
+        self,
+        agent_id: UUID,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> AgentRecord:
+        _, authentication_context = await self._require_agent_authorisation(
             agent_id,
-            MessageType.DRAIN_AGENT,
-            DrainAgentPayload(drain=False),
-            correlation_id=uuid4(),
+            "agents:drain",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+            persist_snapshot=True,
         )
+        agent = await self.drain.undrain(
+            agent_id,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        correlation_id = uuid4()
+        actor_context = _control_actor_context(authentication_context)
         await self.record_timeline(
             agent_id,
             "AGENT_UNDRAINED",
             "Agent left drain mode.",
+            correlation_id=correlation_id,
+            metadata=_control_intent_metadata(authentication_context),
+            deduplication_key=f"control-intent:undrain:{correlation_id}",
+        )
+        await self.hub.send(
+            agent_id,
+            MessageType.DRAIN_AGENT,
+            DrainAgentPayload(
+                drain=False,
+                actor_context=actor_context,
+                authorisation_snapshot_id=(
+                    authentication_context.authorisation_snapshot_id
+                    if authentication_context is not None
+                    else None
+                ),
+            ),
+            correlation_id=correlation_id,
         )
         return agent
 
-    async def revoke_agent(self, agent_id: UUID) -> AgentRecord:
-        agent = await self.enrollment.revoke_agent(agent_id)
+    async def revoke_agent(
+        self,
+        agent_id: UUID,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> AgentRecord:
+        trusted_agent, _ = await self._require_agent_authorisation(
+            agent_id,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        agent = await self.enrollment.revoke_agent(
+            agent_id,
+            organisation_id=trusted_agent.organisation_id,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         await self.hub.close_agent(
             agent_id,
             code=WS_AUTHENTICATION_FAILED,
@@ -476,6 +755,98 @@ class ControlPlaneRuntime:
             severity=AgentTimelineSeverity.WARNING,
         )
         return agent
+
+    async def _require_agent_authorisation(
+        self,
+        agent_id: UUID,
+        permission: str,
+        *,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+        persist_snapshot: bool = False,
+    ) -> tuple[AgentRecord, AuthenticationContext | None]:
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError(
+                "Legacy and internal Agent authorisation escapes are mutually exclusive"
+            )
+        if authentication_context is not None and (
+            allow_legacy_authorisation or allow_internal_authorisation
+        ):
+            raise ValueError("Agent authorisation escapes cannot carry an authenticated principal")
+        agent = (
+            await self.presence.get_agent(agent_id)
+            if authentication_context is None
+            else await self.presence.get_agent(
+                agent_id,
+                organisation_id=authentication_context.principal.organisation_id,
+            )
+        )
+        if (
+            authentication_context is not None
+            and authentication_context.principal.organisation_id != agent.organisation_id
+        ):
+            raise ValueError("Agent organisation does not match the authenticated principal")
+        if allow_legacy_authorisation or allow_internal_authorisation:
+            return agent, None
+        if authentication_context is None:
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to manage Agents."
+            )
+        principal = authentication_context.principal
+        resource = AuthorisationResource(
+            type=ResourceType.AGENT,
+            id=str(agent.id),
+            organisation_id=agent.organisation_id,
+        )
+        decision = await self.authorisation.evaluate(
+            principal,
+            permission,
+            resource,
+            credential_restrictions=authentication_context.permission_restrictions,
+        )
+        if not decision.allowed:
+            await self.authorisation.require(
+                principal,
+                permission,
+                resource,
+                credential_restrictions=authentication_context.permission_restrictions,
+            )
+            raise AssertionError("AuthorisationService.require must reject a denied decision")
+        if not persist_snapshot:
+            return agent, authentication_context
+
+        snapshot_id = authentication_context.authorisation_snapshot_id
+        if snapshot_id is None:
+            created_snapshot = await self.identity_repository.create_authorisation_snapshot(
+                principal.organisation_id,
+                AuthorisationSnapshot(
+                    principal_id=principal.id,
+                    permission=permission,
+                    resource_type=ResourceType.AGENT,
+                    resource_id=str(agent.id),
+                    granted_by_assignments=sorted(decision.granting_assignment_ids, key=str),
+                ),
+            )
+            authentication_context = authentication_context.model_copy(
+                update={"authorisation_snapshot_id": created_snapshot.id}
+            )
+        else:
+            existing_snapshot = await self.identity_repository.get_authorisation_snapshot(
+                principal.organisation_id,
+                snapshot_id,
+            )
+            if (
+                existing_snapshot is None
+                or existing_snapshot.principal_id != principal.id
+                or existing_snapshot.permission != permission
+                or existing_snapshot.resource_type is not ResourceType.AGENT
+                or existing_snapshot.resource_id != str(agent.id)
+            ):
+                raise ValueError(
+                    "Agent control authorisation snapshot evidence is unresolved or mismatched"
+                )
+        return agent, authentication_context
 
     async def rotate_agent_credential(
         self,
@@ -513,6 +884,7 @@ class ControlPlaneRuntime:
         severity: AgentTimelineSeverity = AgentTimelineSeverity.INFO,
         correlation_id: UUID | None = None,
         metadata: dict[str, object] | None = None,
+        deduplication_key: str | None = None,
     ) -> AgentTimelineRecord:
         return await self.timeline.append(
             AgentTimelineRecord(
@@ -522,64 +894,154 @@ class ControlPlaneRuntime:
                 message=message,
                 correlation_id=correlation_id,
                 metadata=metadata or {},
+                deduplication_key=deduplication_key,
             )
         )
 
-    async def metrics(self) -> dict[str, int | float]:
+    async def metrics(
+        self,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+        organisation_id: UUID | None = None,
+    ) -> dict[str, int | float]:
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError(
+                "Legacy and internal metrics authorisation escapes are mutually exclusive"
+            )
+        if authentication_context is not None and (
+            allow_legacy_authorisation or allow_internal_authorisation
+        ):
+            raise ValueError(
+                "Metrics authorisation escapes cannot carry an authenticated principal"
+            )
+        if authentication_context is not None:
+            principal = authentication_context.principal
+            if organisation_id is not None and organisation_id != principal.organisation_id:
+                raise ValueError("Metrics organisation does not match the authenticated principal")
+            await self.authorisation.require(
+                principal,
+                "agents:read",
+                AuthorisationResource(
+                    type=ResourceType.ORGANISATION,
+                    id=str(principal.organisation_id),
+                    organisation_id=principal.organisation_id,
+                ),
+                credential_restrictions=authentication_context.permission_restrictions,
+            )
+            organisation_id = principal.organisation_id
+        elif not (allow_legacy_authorisation or allow_internal_authorisation):
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to read control-plane metrics."
+            )
         with self.database.transaction() as connection:
 
-            def scalar(query: str) -> int | float:
-                value = connection.execute(query).fetchone()[0]
+            def scalar(query: str, parameters: tuple[object, ...] = ()) -> int | float:
+                value = connection.execute(query, parameters).fetchone()[0]
                 if not isinstance(value, (int, float)):
                     raise RuntimeError("Metric query did not return a number")
                 return value
 
+            scope_values: tuple[object, ...] = (
+                (str(organisation_id),) if organisation_id is not None else ()
+            )
+            scope_where = " WHERE organisation_id = ?" if organisation_id is not None else ""
+            scope_and = " AND organisation_id = ?" if organisation_id is not None else ""
             metrics: dict[str, int | float] = {
-                "agents_online": scalar("SELECT COUNT(*) FROM agents WHERE status = 'ONLINE'"),
-                "agents_offline": scalar("SELECT COUNT(*) FROM agents WHERE status = 'OFFLINE'"),
+                "agents_online": scalar(
+                    "SELECT COUNT(*) FROM agents WHERE status = 'ONLINE'" + scope_and,
+                    scope_values,
+                ),
+                "agents_offline": scalar(
+                    "SELECT COUNT(*) FROM agents WHERE status = 'OFFLINE'" + scope_and,
+                    scope_values,
+                ),
                 "agent_reconnects_total": scalar(
-                    "SELECT MAX(0, COUNT(*) - COUNT(DISTINCT agent_id)) FROM agent_connections"
+                    "SELECT MAX(0, COUNT(*) - COUNT(DISTINCT connection.agent_id)) "
+                    "FROM agent_connections AS connection "
+                    "JOIN agents AS agent ON agent.id = connection.agent_id"
+                    + (" WHERE agent.organisation_id = ?" if organisation_id is not None else ""),
+                    scope_values,
                 ),
                 "agent_heartbeat_lag_seconds": scalar(
                     "SELECT COALESCE(MAX((julianday('now') - julianday(last_heartbeat_at)) "
-                    "* 86400.0), 0) FROM agent_connections WHERE disconnected_at IS NULL"
+                    "* 86400.0), 0) FROM agent_connections AS connection "
+                    "JOIN agents AS agent ON agent.id = connection.agent_id "
+                    "WHERE connection.disconnected_at IS NULL"
+                    + (" AND agent.organisation_id = ?" if organisation_id is not None else ""),
+                    scope_values,
                 ),
                 "remote_commands_pending": scalar(
                     "SELECT COUNT(*) FROM remote_commands WHERE status IN "
-                    "('CREATED', 'QUEUED', 'DISPATCHED', 'ACCEPTED', 'UNKNOWN')"
+                    "('CREATED', 'QUEUED', 'DISPATCHED', 'ACCEPTED', 'UNKNOWN')" + scope_and,
+                    scope_values,
                 ),
                 "remote_commands_running": scalar(
-                    "SELECT COUNT(*) FROM remote_commands WHERE status = 'RUNNING'"
+                    "SELECT COUNT(*) FROM remote_commands WHERE status = 'RUNNING'" + scope_and,
+                    scope_values,
                 ),
                 "remote_commands_failed": scalar(
-                    "SELECT COUNT(*) FROM remote_commands WHERE status = 'FAILED'"
+                    "SELECT COUNT(*) FROM remote_commands WHERE status = 'FAILED'" + scope_and,
+                    scope_values,
                 ),
                 "operation_reconciliations_total": scalar(
-                    "SELECT COUNT(*) FROM reconciliation_report_claims WHERE status = 'COMPLETE'"
+                    "SELECT COUNT(*) FROM reconciliation_report_claims AS claim "
+                    "JOIN agents AS agent ON agent.id = claim.agent_id "
+                    "WHERE claim.status = 'COMPLETE'"
+                    + (" AND agent.organisation_id = ?" if organisation_id is not None else ""),
+                    scope_values,
                 ),
                 "artifact_transfer_bytes": scalar(
-                    "SELECT COALESCE(SUM(bytes_transferred), 0) FROM artifact_transfer_attempts"
+                    "SELECT COALESCE(SUM(attempt.bytes_transferred), 0) "
+                    "FROM artifact_transfer_attempts AS attempt "
+                    "JOIN artifact_transfers AS transfer ON transfer.id = attempt.transfer_id "
+                    "JOIN agents AS agent ON agent.id = transfer.agent_id"
+                    + (" WHERE agent.organisation_id = ?" if organisation_id is not None else ""),
+                    scope_values,
                 ),
                 "artifact_transfer_failures": scalar(
-                    "SELECT COUNT(*) FROM artifact_transfers WHERE status = 'FAILED'"
+                    "SELECT COUNT(*) FROM artifact_transfers AS transfer "
+                    "JOIN agents AS agent ON agent.id = transfer.agent_id "
+                    "WHERE transfer.status = 'FAILED'"
+                    + (" AND agent.organisation_id = ?" if organisation_id is not None else ""),
+                    scope_values,
                 ),
-                "bench_inventory_total": scalar("SELECT COUNT(*) FROM global_benches"),
+                "bench_inventory_total": scalar(
+                    "SELECT COUNT(*) FROM global_benches" + scope_where,
+                    scope_values,
+                ),
                 "bench_inventory_offline": scalar(
-                    "SELECT COUNT(*) FROM global_benches WHERE status = 'OFFLINE'"
+                    "SELECT COUNT(*) FROM global_benches WHERE status = 'OFFLINE'" + scope_and,
+                    scope_values,
                 ),
                 "ci_sessions_waiting": scalar(
                     "SELECT COUNT(*) FROM ci_sessions WHERE status IN "
-                    "('created', 'waiting_for_bench')"
+                    "('created', 'waiting_for_bench')" + scope_and,
+                    scope_values,
                 ),
                 "ci_sessions_running": scalar(
                     "SELECT COUNT(*) FROM ci_sessions WHERE status IN "
-                    "('reserved', 'running', 'cancel_requested')"
+                    "('reserved', 'running', 'cancel_requested')" + scope_and,
+                    scope_values,
                 ),
                 "ci_sessions_cleanup_pending": scalar(
-                    "SELECT COUNT(*) FROM ci_sessions WHERE status = 'cleanup_pending'"
+                    "SELECT COUNT(*) FROM ci_sessions WHERE status = 'cleanup_pending'" + scope_and,
+                    scope_values,
                 ),
             }
-        hub_metrics = await self.hub.metrics()
+            agent_ids = (
+                None
+                if organisation_id is None
+                else {
+                    UUID(str(row[0]))
+                    for row in connection.execute(
+                        "SELECT id FROM agents WHERE organisation_id = ?",
+                        scope_values,
+                    ).fetchall()
+                }
+            )
+        hub_metrics = await self.hub.metrics(agent_ids=agent_ids)
         metrics.update({f"gateway_{key}": value for key, value in hub_metrics.items()})
         return metrics
 
@@ -603,7 +1065,27 @@ class ControlPlaneRuntime:
         await self.ci.process_maintenance()
         for agent in await self.presence.list_agents(status=AgentStatus.DRAINING):
             with suppress(Exception):
-                await self.drain.refresh(agent.id)
+                await self.drain.refresh(
+                    agent.id,
+                    allow_internal_authorisation=True,
+                )
+        await self._process_identity_maintenance(now)
+
+    async def _process_identity_maintenance(self, now: datetime) -> None:
+        due_at = self._next_identity_maintenance_at
+        if due_at is None or now < due_at:
+            return
+        # Advance before I/O so a transient database failure does not cause the
+        # one-second monitor loop to hammer the maintenance path.
+        self._next_identity_maintenance_at = now + _IDENTITY_MAINTENANCE_INTERVAL
+        await self.identity_repository.prune_audit_events_for_retention(
+            now - timedelta(days=self.config.audit.retention_days),
+            batch_size=_IDENTITY_MAINTENANCE_BATCH_SIZE,
+        )
+        await self.identity_repository.prune_login_attempts_for_retention(
+            now - timedelta(minutes=self.config.security.login_rate_limit.window_minutes),
+            batch_size=_IDENTITY_MAINTENANCE_BATCH_SIZE,
+        )
 
     async def _monitor_loop(self) -> None:
         interval = self.config.agent_gateway.monitor_interval_seconds
@@ -611,6 +1093,37 @@ class ControlPlaneRuntime:
             await asyncio.sleep(interval)
             with suppress(Exception):
                 await self.monitor_once()
+
+
+def _control_actor_context(
+    authentication_context: AuthenticationContext | None,
+) -> ActorContext | None:
+    if authentication_context is None:
+        return None
+    principal = authentication_context.principal
+    return ActorContext(
+        principal_id=principal.id,
+        principal_type=principal.type,
+        display_name=principal.display_name,
+        organisation_id=principal.organisation_id,
+        authorisation_snapshot_id=authentication_context.authorisation_snapshot_id,
+    )
+
+
+def _control_intent_metadata(
+    authentication_context: AuthenticationContext | None,
+    **metadata: object,
+) -> dict[str, object]:
+    actor_context = _control_actor_context(authentication_context)
+    if actor_context is not None:
+        metadata["actor_context"] = actor_context.model_dump(mode="json")
+        metadata["authorisation_snapshot_id"] = (
+            str(authentication_context.authorisation_snapshot_id)
+            if authentication_context is not None
+            and authentication_context.authorisation_snapshot_id is not None
+            else None
+        )
+    return metadata
 
 
 def _sqlite_path(url: str) -> Path:

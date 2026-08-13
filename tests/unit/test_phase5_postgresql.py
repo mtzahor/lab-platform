@@ -245,6 +245,18 @@ def test_initialize_connects_with_the_url_and_applies_postgresql_migrations() ->
     assert raw.close_count == 1
 
 
+def test_phase10_migration_drops_foreign_keys_before_parent_unique_constraints() -> None:
+    database, raw, _factory = initialized_database()
+
+    phase10 = next(statement.sql for statement in raw.statements if "DO $phase10$" in statement.sql)
+    foreign_keys = phase10.index("AND contype = 'f'")
+    unique_constraints = phase10.index("AND contype = 'u'")
+
+    assert foreign_keys < unique_constraints
+    assert "CASCADE" not in phase10
+    database.close()
+
+
 def test_transaction_translates_placeholders_and_preserves_literals_and_parameters() -> None:
     database, raw, _factory = initialized_database()
     raw.clear_observations()
@@ -366,7 +378,9 @@ def test_metrics_sql_uses_postgresql_scalar_and_datetime_compatibility() -> None
 
     with database.transaction() as connection:
         connection.execute(
-            "SELECT MAX(0, COUNT(*) - COUNT(DISTINCT agent_id)) FROM agent_connections"
+            "SELECT MAX(0, COUNT(*) - COUNT(DISTINCT connection.agent_id)) "
+            "FROM agent_connections AS connection JOIN agents AS agent "
+            "ON agent.id = connection.agent_id"
         )
         connection.execute(
             "SELECT COALESCE(MAX((julianday('now') - julianday(last_heartbeat_at)) "
@@ -374,7 +388,7 @@ def test_metrics_sql_uses_postgresql_scalar_and_datetime_compatibility() -> None
         )
 
     sql = executed_sql(raw)
-    assert "GREATEST(0, COUNT(*) - COUNT(DISTINCT agent_id))" in sql
+    assert "GREATEST(0, COUNT(*) - COUNT(DISTINCT connection.agent_id))" in sql
     assert "MAX(0, COUNT(*)" not in sql
     assert "lab_platform_julianday('now')" in sql
     assert "lab_platform_julianday(last_heartbeat_at)" in sql
@@ -456,6 +470,7 @@ def test_postgresql_optional_live_smoke(tmp_path: Path) -> None:
                 name=f"postgresql-smoke-{uuid4().hex}",
                 expires_at=datetime.now(UTC) + timedelta(minutes=5),
                 allowed_labels={"suite": "postgresql"},
+                allow_internal_authorisation=True,
             )
             enrolled = await runtime.enrollment.enroll(
                 plaintext_token=issued.plaintext.get_secret_value(),
@@ -469,9 +484,11 @@ def test_postgresql_optional_live_smoke(tmp_path: Path) -> None:
                 enrolled.plaintext.get_secret_value(),
             )
             assert authenticated.agent.id == enrolled.agent.id
-            assert enrolled.agent in await runtime.enrollment.list_agents()
+            assert enrolled.agent in await runtime.enrollment.list_agents(
+                allow_internal_authorisation=True
+            )
 
-            metrics = await runtime.metrics()
+            metrics = await runtime.metrics(allow_internal_authorisation=True)
             assert {
                 "agents_online",
                 "agents_offline",

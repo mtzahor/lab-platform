@@ -80,11 +80,32 @@ class InMemoryInventoryRepository:
         for bench in benches:
             self._seed(bench)
 
-    async def get(self, bench_id: str) -> GlobalBenchRecord | None:
-        return self._benches.get(bench_id)
+    async def get(
+        self,
+        bench_id: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> GlobalBenchRecord | None:
+        bench = self._benches.get(bench_id)
+        if bench is not None and (
+            organisation_id is None or bench.organisation_id == organisation_id
+        ):
+            return bench
+        return None
 
-    async def list(self) -> list[GlobalBenchRecord]:
-        return sorted(self._benches.values(), key=lambda bench: bench.id)
+    async def list(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[GlobalBenchRecord]:
+        return sorted(
+            (
+                bench
+                for bench in self._benches.values()
+                if organisation_id is None or bench.organisation_id == organisation_id
+            ),
+            key=lambda bench: bench.id,
+        )
 
     async def reconcile_agent_snapshot(
         self,
@@ -333,8 +354,20 @@ class InventoryService:
         scoped = tuple(updated if bench.id == bench_id else bench for bench in benches)
         return await self._repository.reconcile_agent_snapshot(agent, scoped, observed_at=now)
 
-    async def get_bench(self, bench_id: str) -> GlobalBenchRecord:
-        bench = await self._repository.get(bench_id)
+    async def get_bench(
+        self,
+        bench_id: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> GlobalBenchRecord:
+        bench = (
+            await self._repository.get(bench_id)
+            if organisation_id is None
+            else await self._repository.get(  # type: ignore[call-arg]
+                bench_id,
+                organisation_id=organisation_id,
+            )
+        )
         if bench is None:
             raise BenchNotFoundError(
                 f"Bench {bench_id} does not exist in the global inventory.",
@@ -345,6 +378,7 @@ class InventoryService:
     async def list_benches(
         self,
         *,
+        organisation_id: UUID | None = None,
         agent_id: UUID | None = None,
         agent_slug: str | None = None,
         status: GlobalBenchStatus | None = None,
@@ -354,7 +388,13 @@ class InventoryService:
         labels: Mapping[str, str] | None = None,
         online: bool | None = None,
     ) -> list[GlobalBenchRecord]:
-        benches = await self._repository.list()
+        benches = (
+            await self._repository.list()
+            if organisation_id is None
+            else await self._repository.list(  # type: ignore[call-arg]
+                organisation_id=organisation_id
+            )
+        )
         if agent_id is not None:
             benches = [bench for bench in benches if bench.agent_id == agent_id]
         if agent_slug is not None:
@@ -416,6 +456,7 @@ def _global_bench(
     }[bench.kind]
     return GlobalBenchRecord(
         id=f"{agent.slug}/{bench.local_bench_id}",
+        organisation_id=agent.organisation_id,
         agent_id=agent.id,
         agent_slug=agent.slug,
         local_bench_id=bench.local_bench_id,
@@ -443,6 +484,13 @@ def _require_bench_owner(bench: GlobalBenchRecord, agent: AgentRecord) -> None:
             expected_bench_id=expected_id,
             expected_agent_id=str(agent.id),
             received_agent_id=str(bench.agent_id),
+        )
+    if bench.organisation_id != agent.organisation_id:
+        raise BenchAgentMismatchError(
+            "Bench organisation does not match its Agent.",
+            bench_id=bench.id,
+            expected_organisation_id=str(agent.organisation_id),
+            received_organisation_id=str(bench.organisation_id),
         )
 
 
@@ -474,6 +522,7 @@ def _inventory_agent_identity(bench: GlobalBenchRecord) -> AgentRecord:
     # The remaining valid fields deliberately carry no authority.
     return AgentRecord(
         id=bench.agent_id,
+        organisation_id=bench.organisation_id,
         slug=bench.agent_slug,
         name=bench.agent_slug,
         status=AgentStatus.OFFLINE,

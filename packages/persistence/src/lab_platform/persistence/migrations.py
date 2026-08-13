@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
+
+DEFAULT_ORGANISATION_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:
@@ -60,6 +62,23 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
     if 8 not in applied:
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (8, datetime('now'))"
+        )
+    # Phase 6 is an expand-only migration. Existing Phase 5 columns and uniqueness
+    # constraints remain intact while identity-aware services move to tenant-scoped
+    # repositories incrementally.
+    _create_phase6_identity_tables(connection)
+    _seed_default_organisation(connection)
+    _add_phase6_central_columns(connection)
+    _ensure_ci_cancellation_evidence_schema(connection)
+    _create_phase6_indexes(connection)
+    if 9 not in applied:
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (9, datetime('now'))"
+        )
+    if 10 not in applied:
+        _upgrade_phase10_tenant_storage_boundaries(connection)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (10, datetime('now'))"
         )
     _create_queue_transition_trigger(connection)
 
@@ -199,7 +218,7 @@ def _create_phase5_agent_indexes(connection: sqlite3.Connection) -> None:
             WHERE revoked_at IS NULL;
         CREATE INDEX IF NOT EXISTS agent_credentials_agent_version
             ON agent_credentials(agent_id, version DESC);
-        """
+        """,
     )
 
 
@@ -664,6 +683,861 @@ def _create_phase5_distributed_indexes(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_phase6_identity_tables(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS organisations (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'SUSPENDED', 'ARCHIVED')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (updated_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            email TEXT,
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'DISABLED', 'LOCKED', 'DELETED')),
+            authentication_source TEXT NOT NULL CHECK (authentication_source IN ('LOCAL', 'OIDC')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_login_at TEXT,
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (updated_at >= created_at),
+            CHECK (last_login_at IS NULL OR last_login_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS password_credentials (
+            user_id TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL CHECK (length(password_hash) >= 32),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            CHECK (updated_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS organisation_memberships (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('OWNER', 'ADMIN', 'MEMBER', 'VIEWER')),
+            created_at TEXT NOT NULL,
+            UNIQUE (organisation_id, user_id),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS teams (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (organisation_id, slug),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (updated_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS team_memberships (
+            id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('MANAGER', 'MEMBER', 'VIEWER')),
+            created_at TEXT NOT NULL,
+            UNIQUE (team_id, user_id),
+            FOREIGN KEY (team_id) REFERENCES teams(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS service_accounts (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'DISABLED', 'REVOKED')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_used_at TEXT,
+            UNIQUE (organisation_id, name),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (updated_at >= created_at),
+            CHECK (last_used_at IS NULL OR last_used_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            organisation_id TEXT NOT NULL,
+            secret_hash TEXT NOT NULL UNIQUE CHECK (
+                length(secret_hash) = 64 AND secret_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            maximum_expires_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            revoked_at TEXT,
+            user_agent TEXT,
+            ip_address TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (expires_at > created_at),
+            CHECK (maximum_expires_at >= expires_at),
+            CHECK (last_seen_at >= created_at),
+            CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS api_credentials (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            principal_type TEXT NOT NULL CHECK (principal_type IN ('USER', 'SERVICE_ACCOUNT')),
+            name TEXT NOT NULL,
+            secret_hash TEXT NOT NULL UNIQUE CHECK (
+                length(secret_hash) = 64 AND secret_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            revoked_at TEXT,
+            last_used_at TEXT,
+            allowed_ip_ranges_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(allowed_ip_ranges_json)
+                AND json_type(allowed_ip_ranges_json) = 'array'
+            ),
+            permission_restrictions_json TEXT CHECK (
+                permission_restrictions_json IS NULL OR (
+                    json_valid(permission_restrictions_json)
+                    AND json_type(permission_restrictions_json) = 'array'
+                )
+            ),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (expires_at IS NULL OR expires_at > created_at),
+            CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+            CHECK (last_used_at IS NULL OR last_used_at >= created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS role_assignments (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            subject_type TEXT NOT NULL CHECK (
+                subject_type IN ('USER', 'SERVICE_ACCOUNT', 'TEAM')
+            ),
+            subject_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (
+                role IN (
+                    'ORGANISATION_OWNER', 'ORGANISATION_ADMIN', 'LAB_ADMIN', 'OPERATOR',
+                    'WORKFLOW_RUNNER', 'RESERVER', 'VIEWER', 'AUDITOR'
+                )
+            ),
+            resource_type TEXT NOT NULL CHECK (
+                resource_type IN ('ORGANISATION', 'AGENT', 'BENCH', 'WORKFLOW')
+            ),
+            resource_id TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            UNIQUE (
+                organisation_id, subject_type, subject_id, role, resource_type, resource_id
+            ),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (expires_at IS NULL OR expires_at > created_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS authorisation_snapshots (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            permission TEXT NOT NULL,
+            resource_type TEXT NOT NULL CHECK (
+                resource_type IN ('ORGANISATION', 'AGENT', 'BENCH', 'WORKFLOW', 'CI_SESSION')
+            ),
+            resource_id TEXT NOT NULL,
+            granted_by_assignments_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(granted_by_assignments_json)
+                AND json_type(granted_by_assignments_json) = 'array'
+            ),
+            evaluated_at TEXT NOT NULL,
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS bench_access_policies (
+            organisation_id TEXT NOT NULL,
+            bench_id TEXT NOT NULL,
+            visibility TEXT NOT NULL CHECK (
+                visibility IN ('PRIVATE', 'ORGANISATION', 'RESTRICTED')
+            ),
+            reservation_role TEXT CHECK (
+                reservation_role IS NULL OR reservation_role IN (
+                    'ORGANISATION_OWNER', 'ORGANISATION_ADMIN', 'LAB_ADMIN', 'OPERATOR',
+                    'WORKFLOW_RUNNER', 'RESERVER', 'VIEWER', 'AUDITOR'
+                )
+            ),
+            operation_role TEXT CHECK (
+                operation_role IS NULL OR operation_role IN (
+                    'ORGANISATION_OWNER', 'ORGANISATION_ADMIN', 'LAB_ADMIN', 'OPERATOR',
+                    'WORKFLOW_RUNNER', 'RESERVER', 'VIEWER', 'AUDITOR'
+                )
+            ),
+            allowed_team_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(allowed_team_ids_json)
+                AND json_type(allowed_team_ids_json) = 'array'
+            ),
+            PRIMARY KEY (organisation_id, bench_id),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS workflow_access_policies (
+            organisation_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            visibility TEXT NOT NULL CHECK (
+                visibility IN ('ORGANISATION', 'RESTRICTED', 'ADMIN_ONLY')
+            ),
+            PRIMARY KEY (organisation_id, workflow_id),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            actor_type TEXT CHECK (actor_type IS NULL OR actor_type IN ('USER', 'SERVICE_ACCOUNT')),
+            actor_id TEXT,
+            actor_display_name TEXT,
+            action TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id TEXT,
+            outcome TEXT NOT NULL CHECK (outcome IN ('SUCCEEDED', 'FAILED', 'DENIED')),
+            request_id TEXT,
+            source_ip TEXT,
+            user_agent TEXT,
+            reason TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (
+                json_valid(metadata_json) AND json_type(metadata_json) = 'object'
+            ),
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK ((actor_type IS NULL) = (actor_id IS NULL))
+        );
+
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            id TEXT PRIMARY KEY,
+            organisation_slug TEXT NOT NULL,
+            username TEXT NOT NULL,
+            ip_address TEXT,
+            attempted_at TEXT NOT NULL,
+            succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1))
+        );
+        """
+    )
+
+
+def _seed_default_organisation(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT OR IGNORE INTO organisations "
+        "(id, slug, name, status, created_at, updated_at) "
+        "VALUES (?, 'default', 'Default Organisation', 'ACTIVE', datetime('now'), datetime('now'))",
+        (DEFAULT_ORGANISATION_ID,),
+    )
+
+
+def _add_phase6_central_columns(connection: sqlite3.Connection) -> None:
+    # These are control-plane-owned records. Agent-local execution journals are
+    # intentionally excluded because Agent authentication remains a separate trust domain.
+    organisation_tables = (
+        "reservations",
+        "reservation_queue",
+        "operations",
+        "events",
+        "firmware_artifacts",
+        "operation_artifacts",
+        "operation_locks",
+        "workflows",
+        "workflow_runs",
+        "workflow_step_results",
+        "api_tokens",
+        "ci_sessions",
+        "ci_cleanup_results",
+        "artifacts",
+        "backend_registrations",
+        "bench_catalog",
+        "agents",
+        "agent_enrollment_tokens",
+        "agent_credentials",
+        "agent_connections",
+        "global_benches",
+        "bench_snapshots",
+        "remote_commands",
+        "remote_command_attempts",
+        "distributed_operations",
+        "reservation_leases",
+        "coordinated_reservation_leases",
+        "reservation_lease_mutations",
+        "reconciliation_reports",
+        "reconciliation_report_claims",
+        "protocol_message_journal",
+        "remote_artifacts",
+        "artifact_transfers",
+        "artifact_transfer_attempts",
+        "agent_timelines",
+        "distributed_ci_workflows",
+    )
+    declaration = f"TEXT NOT NULL DEFAULT '{DEFAULT_ORGANISATION_ID}'"
+    for table in organisation_tables:
+        _add_column(connection, table, "organisation_id", declaration)
+
+    _add_column(connection, "reservations", "owner_principal_id", "TEXT")
+    _add_column(
+        connection,
+        "reservations",
+        "owner_principal_type",
+        "TEXT CHECK (owner_principal_type IS NULL OR "
+        "owner_principal_type IN ('USER', 'SERVICE_ACCOUNT'))",
+    )
+    _add_column(
+        connection,
+        "remote_commands",
+        "actor_context_json",
+        "TEXT CHECK (actor_context_json IS NULL OR "
+        "(json_valid(actor_context_json) AND json_type(actor_context_json) = 'object'))",
+    )
+    _add_column(connection, "remote_commands", "authorisation_snapshot_id", "TEXT")
+    _add_column(connection, "ci_sessions", "requested_by_principal_id", "TEXT")
+    _add_column(
+        connection,
+        "ci_sessions",
+        "requested_by_principal_type",
+        "TEXT CHECK (requested_by_principal_type IS NULL OR "
+        "requested_by_principal_type IN ('USER', 'SERVICE_ACCOUNT'))",
+    )
+
+
+def _ensure_ci_cancellation_evidence_schema(connection: sqlite3.Connection) -> None:
+    """Repair already-versioned Phase 6 databases for durable CI cancel evidence."""
+
+    _add_column(
+        connection,
+        "ci_sessions",
+        "cancel_actor_context_json",
+        "TEXT CHECK (cancel_actor_context_json IS NULL OR "
+        "(json_valid(cancel_actor_context_json) "
+        "AND json_type(cancel_actor_context_json) = 'object'))",
+    )
+    _add_column(connection, "ci_sessions", "cancel_authorisation_snapshot_id", "TEXT")
+
+    if connection.__class__.__module__ != "sqlite3":
+        connection.execute(
+            "ALTER TABLE authorisation_snapshots DROP CONSTRAINT IF EXISTS "
+            "authorisation_snapshots_resource_type_check"
+        )
+        connection.execute(
+            "ALTER TABLE authorisation_snapshots ADD CONSTRAINT "
+            "authorisation_snapshots_resource_type_check CHECK "
+            "(resource_type IN ('ORGANISATION', 'AGENT', 'BENCH', 'WORKFLOW', 'CI_SESSION'))"
+        )
+        return
+
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'authorisation_snapshots'"
+    ).fetchone()
+    if row is None or "CI_SESSION" in str(row[0]):
+        return
+    _execute_transactional_script(
+        connection,
+        """
+        DROP TABLE IF EXISTS authorisation_snapshots_ci_cancel;
+        CREATE TABLE authorisation_snapshots_ci_cancel (
+            id TEXT PRIMARY KEY,
+            organisation_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            permission TEXT NOT NULL,
+            resource_type TEXT NOT NULL CHECK (
+                resource_type IN (
+                    'ORGANISATION', 'AGENT', 'BENCH', 'WORKFLOW', 'CI_SESSION'
+                )
+            ),
+            resource_id TEXT NOT NULL,
+            granted_by_assignments_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(granted_by_assignments_json)
+                AND json_type(granted_by_assignments_json) = 'array'
+            ),
+            evaluated_at TEXT NOT NULL,
+            FOREIGN KEY (organisation_id) REFERENCES organisations(id)
+                ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+        INSERT INTO authorisation_snapshots_ci_cancel
+            (id, organisation_id, principal_id, permission, resource_type, resource_id,
+             granted_by_assignments_json, evaluated_at)
+        SELECT id, organisation_id, principal_id, permission, resource_type, resource_id,
+               granted_by_assignments_json, evaluated_at
+        FROM authorisation_snapshots;
+        DROP TABLE authorisation_snapshots;
+        ALTER TABLE authorisation_snapshots_ci_cancel RENAME TO authorisation_snapshots;
+        """,
+    )
+
+
+def _create_phase6_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS users_organisation_username
+            ON users(organisation_id, username COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS users_organisation_status
+            ON users(organisation_id, status, username, id);
+        CREATE INDEX IF NOT EXISTS organisation_memberships_user
+            ON organisation_memberships(organisation_id, user_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS teams_organisation_slug_nocase
+            ON teams(organisation_id, slug COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS team_memberships_user
+            ON team_memberships(user_id, team_id);
+        CREATE INDEX IF NOT EXISTS service_accounts_organisation_status
+            ON service_accounts(organisation_id, status, name, id);
+        CREATE INDEX IF NOT EXISTS user_sessions_active
+            ON user_sessions(organisation_id, user_id, revoked_at, expires_at);
+        CREATE INDEX IF NOT EXISTS api_credentials_principal
+            ON api_credentials(organisation_id, principal_type, principal_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS api_credentials_active
+            ON api_credentials(organisation_id, revoked_at, expires_at);
+        CREATE INDEX IF NOT EXISTS role_assignments_subject
+            ON role_assignments(organisation_id, subject_type, subject_id, expires_at);
+        CREATE INDEX IF NOT EXISTS role_assignments_resource
+            ON role_assignments(organisation_id, resource_type, resource_id, expires_at);
+        CREATE INDEX IF NOT EXISTS authorisation_snapshots_principal_time
+            ON authorisation_snapshots(organisation_id, principal_id, evaluated_at DESC);
+        CREATE INDEX IF NOT EXISTS audit_events_organisation_time
+            ON audit_events(organisation_id, timestamp DESC, id);
+        CREATE INDEX IF NOT EXISTS audit_events_organisation_action
+            ON audit_events(organisation_id, action, timestamp DESC, id);
+        CREATE INDEX IF NOT EXISTS audit_events_retention_time
+            ON audit_events(timestamp, id);
+        CREATE INDEX IF NOT EXISTS login_attempts_subject_time
+            ON login_attempts(organisation_slug, username, attempted_at DESC, id);
+        CREATE INDEX IF NOT EXISTS login_attempts_ip_time
+            ON login_attempts(ip_address, attempted_at DESC, id)
+            WHERE ip_address IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS login_attempts_retention_time
+            ON login_attempts(attempted_at, id);
+
+        CREATE INDEX IF NOT EXISTS reservations_organisation
+            ON reservations(organisation_id, created_at DESC, id);
+        CREATE INDEX IF NOT EXISTS operations_organisation
+            ON operations(organisation_id, created_at DESC, id);
+        CREATE INDEX IF NOT EXISTS workflows_organisation
+            ON workflows(organisation_id, name, version);
+        CREATE INDEX IF NOT EXISTS ci_sessions_organisation
+            ON ci_sessions(organisation_id, created_at DESC, id);
+        CREATE INDEX IF NOT EXISTS artifacts_organisation
+            ON artifacts(organisation_id, created_at DESC, id);
+        CREATE INDEX IF NOT EXISTS agents_organisation
+            ON agents(organisation_id, status, id);
+        CREATE INDEX IF NOT EXISTS global_benches_organisation
+            ON global_benches(organisation_id, agent_id, status, id);
+        CREATE INDEX IF NOT EXISTS remote_commands_organisation
+            ON remote_commands(organisation_id, agent_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS distributed_operations_organisation
+            ON distributed_operations(organisation_id, created_at DESC, id);
+        """
+    )
+
+
+def _upgrade_phase10_tenant_storage_boundaries(connection: sqlite3.Connection) -> None:
+    """Replace the remaining global user-key constraints with tenant-safe storage."""
+
+    if connection.__class__.__module__ == "sqlite3":
+        _rebuild_phase10_sqlite_tenant_tables(connection)
+    else:
+        _upgrade_phase10_postgresql_workflow_constraints(connection)
+    _create_phase10_scoped_idempotency_indexes(connection)
+
+
+def _rebuild_phase10_sqlite_tenant_tables(connection: sqlite3.Connection) -> None:
+    # ``ci_sessions`` has a foreign key to ``workflow_runs`` and the mutation journal needs
+    # a composite primary key. SQLite cannot replace these tables in place, so commit the
+    # expand-only v9 work, rebuild the closed set atomically, and validate every relationship
+    # before returning to the normal migration transaction.
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _execute_transactional_script(
+            connection,
+            f"""
+            DROP TABLE IF EXISTS workflow_step_results_phase10;
+            DROP TABLE IF EXISTS workflow_runs_phase10;
+            DROP TABLE IF EXISTS workflows_phase10;
+            DROP TABLE IF EXISTS distributed_ci_workflows_phase10;
+            DROP TABLE IF EXISTS reservation_lease_mutations_phase10;
+
+            CREATE TABLE workflows_phase10 (
+                organisation_id TEXT NOT NULL DEFAULT '{DEFAULT_ORGANISATION_ID}',
+                name TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version >= 1),
+                definition_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (organisation_id, name, version)
+            );
+            CREATE TABLE workflow_runs_phase10 (
+                id TEXT PRIMARY KEY,
+                organisation_id TEXT NOT NULL DEFAULT '{DEFAULT_ORGANISATION_ID}',
+                workflow_name TEXT NOT NULL,
+                workflow_version INTEGER NOT NULL,
+                bench_id TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                reservation_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'pending', 'running', 'succeeded', 'failed',
+                        'cancel_requested', 'cancelled'
+                    )
+                ),
+                current_step INTEGER CHECK (current_step IS NULL OR current_step >= 0),
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                UNIQUE (organisation_id, id),
+                FOREIGN KEY (organisation_id, workflow_name, workflow_version)
+                    REFERENCES workflows_phase10(organisation_id, name, version)
+            );
+            CREATE TABLE workflow_step_results_phase10 (
+                id TEXT PRIMARY KEY,
+                organisation_id TEXT NOT NULL DEFAULT '{DEFAULT_ORGANISATION_ID}',
+                workflow_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL CHECK (step_index >= 0),
+                name TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL CHECK (
+                    action IN ('flash', 'reset', 'read_serial', 'assert_serial', 'wait', 'probe')
+                ),
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'pending', 'running', 'succeeded', 'failed', 'skipped', 'cancelled'
+                    )
+                ),
+                started_at TEXT,
+                completed_at TEXT,
+                output_json TEXT NOT NULL,
+                error_code TEXT,
+                error_message TEXT,
+                artifact_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                    json_valid(artifact_ids_json)
+                    AND json_type(artifact_ids_json) = 'array'
+                ),
+                UNIQUE (organisation_id, workflow_run_id, step_index),
+                FOREIGN KEY (organisation_id, workflow_run_id)
+                    REFERENCES workflow_runs_phase10(organisation_id, id) ON DELETE CASCADE
+            );
+            CREATE TABLE distributed_ci_workflows_phase10 (
+                ci_session_id TEXT PRIMARY KEY,
+                remote_command_id TEXT NOT NULL UNIQUE,
+                operation_id TEXT NOT NULL UNIQUE,
+                agent_id TEXT NOT NULL,
+                bench_id TEXT NOT NULL,
+                reservation_id TEXT NOT NULL,
+                workflow_name TEXT NOT NULL,
+                workflow_version INTEGER NOT NULL CHECK (workflow_version > 0),
+                launch_idempotency_key TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL CHECK (
+                    length(request_fingerprint) = 64
+                    AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+                ),
+                created_at TEXT NOT NULL,
+                organisation_id TEXT NOT NULL DEFAULT '{DEFAULT_ORGANISATION_ID}',
+                FOREIGN KEY (ci_session_id) REFERENCES ci_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (remote_command_id)
+                    REFERENCES remote_commands(id) ON DELETE RESTRICT,
+                FOREIGN KEY (operation_id)
+                    REFERENCES distributed_operations(id) ON DELETE RESTRICT,
+                FOREIGN KEY (agent_id)
+                    REFERENCES agents(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (bench_id)
+                    REFERENCES global_benches(id) ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (reservation_id)
+                    REFERENCES reservations(id) ON DELETE RESTRICT
+            );
+            CREATE TABLE reservation_lease_mutations_phase10 (
+                organisation_id TEXT NOT NULL DEFAULT '{DEFAULT_ORGANISATION_ID}',
+                mutation_key TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL CHECK (
+                    length(request_fingerprint) = 64
+                    AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+                ),
+                reservation_id TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                result_json TEXT NOT NULL CHECK (
+                    json_valid(result_json) AND json_type(result_json) = 'object'
+                ),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (organisation_id, mutation_key),
+                FOREIGN KEY (reservation_id)
+                    REFERENCES coordinated_reservation_leases(reservation_id)
+                    ON DELETE RESTRICT
+            );
+            """,
+        )
+        connection.execute(
+            "INSERT INTO workflows_phase10 "
+            "(organisation_id, name, version, definition_json, created_at) "
+            "SELECT organisation_id, name, version, definition_json, created_at FROM workflows"
+        )
+        connection.execute(
+            "INSERT INTO workflow_runs_phase10 "
+            "(id, organisation_id, workflow_name, workflow_version, bench_id, owner, "
+            "reservation_id, status, current_step, created_at, started_at, completed_at, "
+            "error_code, error_message) "
+            "SELECT run.id, COALESCE(definition.organisation_id, run.organisation_id, ?), "
+            "run.workflow_name, run.workflow_version, run.bench_id, run.owner, "
+            "run.reservation_id, run.status, "
+            "run.current_step, run.created_at, run.started_at, run.completed_at, "
+            "run.error_code, run.error_message FROM workflow_runs run "
+            "LEFT JOIN workflows definition ON definition.name = run.workflow_name "
+            "AND definition.version = run.workflow_version",
+            (DEFAULT_ORGANISATION_ID,),
+        )
+        connection.execute(
+            "INSERT INTO workflow_step_results_phase10 "
+            "(id, organisation_id, workflow_run_id, step_index, name, action, status, "
+            "started_at, completed_at, output_json, error_code, error_message, "
+            "artifact_ids_json) "
+            "SELECT result.id, COALESCE(run.organisation_id, result.organisation_id, ?), "
+            "result.workflow_run_id, result.step_index, result.name, result.action, "
+            "result.status, result.started_at, "
+            "result.completed_at, result.output_json, result.error_code, "
+            "result.error_message, result.artifact_ids_json "
+            "FROM workflow_step_results result "
+            "LEFT JOIN workflow_runs_phase10 run ON run.id = result.workflow_run_id",
+            (DEFAULT_ORGANISATION_ID,),
+        )
+        connection.execute(
+            "INSERT INTO distributed_ci_workflows_phase10 "
+            "(ci_session_id, remote_command_id, operation_id, agent_id, bench_id, "
+            "reservation_id, workflow_name, workflow_version, launch_idempotency_key, "
+            "request_fingerprint, created_at, organisation_id) "
+            "SELECT ci_session_id, remote_command_id, operation_id, agent_id, bench_id, "
+            "reservation_id, workflow_name, workflow_version, launch_idempotency_key, "
+            "request_fingerprint, created_at, organisation_id FROM distributed_ci_workflows"
+        )
+        connection.execute(
+            "INSERT INTO reservation_lease_mutations_phase10 "
+            "(organisation_id, mutation_key, request_fingerprint, reservation_id, revision, "
+            "result_json, created_at) "
+            "SELECT organisation_id, mutation_key, request_fingerprint, reservation_id, "
+            "revision, result_json, created_at FROM reservation_lease_mutations"
+        )
+        _execute_transactional_script(
+            connection,
+            """
+            DROP TABLE workflow_step_results;
+            DROP TABLE workflow_runs;
+            DROP TABLE workflows;
+            DROP TABLE distributed_ci_workflows;
+            DROP TABLE reservation_lease_mutations;
+            ALTER TABLE workflows_phase10 RENAME TO workflows;
+            ALTER TABLE workflow_runs_phase10 RENAME TO workflow_runs;
+            ALTER TABLE workflow_step_results_phase10 RENAME TO workflow_step_results;
+            ALTER TABLE distributed_ci_workflows_phase10 RENAME TO distributed_ci_workflows;
+            ALTER TABLE reservation_lease_mutations_phase10
+                RENAME TO reservation_lease_mutations;
+
+            CREATE UNIQUE INDEX workflow_runs_one_active_per_bench
+                ON workflow_runs(organisation_id, bench_id)
+                WHERE status IN ('pending', 'running', 'cancel_requested');
+            CREATE INDEX workflow_runs_created
+                ON workflow_runs(organisation_id, created_at DESC);
+            CREATE INDEX workflow_step_results_run
+                ON workflow_step_results(organisation_id, workflow_run_id, step_index);
+            CREATE INDEX workflows_organisation
+                ON workflows(organisation_id, name, version);
+            CREATE INDEX distributed_ci_workflows_route
+                ON distributed_ci_workflows(
+                    organisation_id, agent_id, bench_id, created_at, ci_session_id
+                );
+            CREATE INDEX reservation_lease_mutations_reservation
+                ON reservation_lease_mutations(
+                    organisation_id, reservation_id, revision, created_at
+                );
+            """,
+        )
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f"Phase 10 migration produced foreign-key violations: {violations!r}"
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
+def _execute_transactional_script(
+    connection: sqlite3.Connection,
+    script: str,
+) -> None:
+    """Execute simple migration DDL without sqlite3.executescript's implicit commit."""
+
+    for statement in script.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+def _upgrade_phase10_postgresql_workflow_constraints(
+    connection: sqlite3.Connection,
+) -> None:
+    # PostgreSQL can replace these constraints directly, preserving dependent table OIDs.
+    connection.execute(
+        """
+        DO $phase10$
+        DECLARE constraint_row record;
+        BEGIN
+            -- Foreign keys must be removed before the unique constraints whose
+            -- backing indexes they reference. PostgreSQL otherwise rejects the
+            -- parent-constraint drop with DependentObjectsStillExist.
+            FOR constraint_row IN
+                SELECT conrelid::regclass AS table_name, conname
+                FROM pg_constraint
+                WHERE conrelid IN (
+                    'workflow_runs'::regclass,
+                    'workflow_step_results'::regclass
+                )
+                AND contype = 'f'
+            LOOP
+                EXECUTE format(
+                    'ALTER TABLE %%I DROP CONSTRAINT %%I',
+                    constraint_row.table_name,
+                    constraint_row.conname
+                );
+            END LOOP;
+            FOR constraint_row IN
+                SELECT conrelid::regclass AS table_name, conname
+                FROM pg_constraint
+                WHERE conrelid IN (
+                    'workflow_runs'::regclass,
+                    'workflow_step_results'::regclass
+                )
+                AND contype = 'u'
+            LOOP
+                EXECUTE format(
+                    'ALTER TABLE %%I DROP CONSTRAINT %%I',
+                    constraint_row.table_name,
+                    constraint_row.conname
+                );
+            END LOOP;
+        END
+        $phase10$
+        """
+    )
+    connection.execute(
+        "UPDATE workflow_runs AS run SET organisation_id = definition.organisation_id "
+        "FROM workflows AS definition WHERE definition.name = run.workflow_name "
+        "AND definition.version = run.workflow_version"
+    )
+    connection.execute(
+        "UPDATE workflow_step_results AS result SET organisation_id = run.organisation_id "
+        "FROM workflow_runs AS run WHERE run.id = result.workflow_run_id"
+    )
+    connection.execute("ALTER TABLE workflows DROP CONSTRAINT IF EXISTS workflows_pkey")
+    connection.execute(
+        "ALTER TABLE workflows ADD CONSTRAINT workflows_pkey "
+        "PRIMARY KEY (organisation_id, name, version)"
+    )
+    connection.execute(
+        "ALTER TABLE workflow_runs ADD CONSTRAINT workflow_runs_tenant_identity "
+        "UNIQUE (organisation_id, id)"
+    )
+    connection.execute(
+        "ALTER TABLE workflow_runs ADD CONSTRAINT workflow_runs_definition_tenant_fk "
+        "FOREIGN KEY (organisation_id, workflow_name, workflow_version) "
+        "REFERENCES workflows(organisation_id, name, version)"
+    )
+    connection.execute(
+        "ALTER TABLE workflow_step_results ADD CONSTRAINT workflow_step_results_tenant_step_key "
+        "UNIQUE (organisation_id, workflow_run_id, step_index)"
+    )
+    connection.execute(
+        "ALTER TABLE workflow_step_results ADD CONSTRAINT workflow_step_results_run_tenant_fk "
+        "FOREIGN KEY (organisation_id, workflow_run_id) "
+        "REFERENCES workflow_runs(organisation_id, id) ON DELETE CASCADE"
+    )
+    connection.execute(
+        "ALTER TABLE distributed_ci_workflows "
+        "DROP CONSTRAINT IF EXISTS distributed_ci_workflows_launch_idempotency_key_key"
+    )
+    connection.execute(
+        "ALTER TABLE reservation_lease_mutations "
+        "DROP CONSTRAINT IF EXISTS reservation_lease_mutations_pkey"
+    )
+    connection.execute(
+        "ALTER TABLE reservation_lease_mutations "
+        "ADD CONSTRAINT reservation_lease_mutations_pkey "
+        "PRIMARY KEY (organisation_id, mutation_key)"
+    )
+    connection.executescript(
+        """
+        DROP INDEX IF EXISTS workflow_runs_one_active_per_bench;
+        CREATE UNIQUE INDEX workflow_runs_one_active_per_bench
+            ON workflow_runs(organisation_id, bench_id)
+            WHERE status IN ('pending', 'running', 'cancel_requested');
+        DROP INDEX IF EXISTS workflow_runs_created;
+        CREATE INDEX workflow_runs_created
+            ON workflow_runs(organisation_id, created_at DESC);
+        DROP INDEX IF EXISTS workflow_step_results_run;
+        CREATE INDEX workflow_step_results_run
+            ON workflow_step_results(organisation_id, workflow_run_id, step_index);
+        """
+    )
+
+
+def _create_phase10_scoped_idempotency_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        DROP INDEX IF EXISTS ci_sessions_idempotency;
+        CREATE UNIQUE INDEX ci_sessions_idempotency
+            ON ci_sessions(organisation_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+        DROP INDEX IF EXISTS ci_sessions_workflow_launch_idempotency;
+        CREATE UNIQUE INDEX ci_sessions_workflow_launch_idempotency
+            ON ci_sessions(organisation_id, workflow_launch_idempotency_key)
+            WHERE workflow_launch_idempotency_key IS NOT NULL;
+        DROP INDEX IF EXISTS ci_sessions_finalize_idempotency;
+        CREATE UNIQUE INDEX ci_sessions_finalize_idempotency
+            ON ci_sessions(organisation_id, finalize_idempotency_key)
+            WHERE finalize_idempotency_key IS NOT NULL;
+        DROP INDEX IF EXISTS artifacts_idempotency;
+        CREATE UNIQUE INDEX artifacts_idempotency
+            ON artifacts(organisation_id, owner_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+        DROP INDEX IF EXISTS reservations_idempotency;
+        CREATE UNIQUE INDEX reservations_idempotency
+            ON reservations(organisation_id, bench_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+        DROP INDEX IF EXISTS queue_idempotency;
+        CREATE UNIQUE INDEX queue_idempotency
+            ON reservation_queue(organisation_id, bench_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+        DROP INDEX IF EXISTS distributed_ci_workflows_launch_idempotency;
+        CREATE UNIQUE INDEX distributed_ci_workflows_launch_idempotency
+            ON distributed_ci_workflows(organisation_id, launch_idempotency_key);
+        """
+    )
+
+
 def _create_phase4_tables(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
@@ -691,6 +1565,13 @@ def _create_phase4_tables(connection: sqlite3.Connection) -> None:
             commit_sha TEXT,
             actor TEXT,
             requested_by TEXT NOT NULL,
+            cancel_actor_context_json TEXT CHECK (
+                cancel_actor_context_json IS NULL OR (
+                    json_valid(cancel_actor_context_json)
+                    AND json_type(cancel_actor_context_json) = 'object'
+                )
+            ),
+            cancel_authorisation_snapshot_id TEXT,
             bench_id TEXT,
             reservation_id TEXT,
             workflow_run_id TEXT,

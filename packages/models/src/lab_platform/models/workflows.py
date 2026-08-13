@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias, cast
 from uuid import UUID, uuid4
 
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -238,6 +239,7 @@ WorkflowStep: TypeAlias = Annotated[
 
 
 class WorkflowDefinition(WorkflowModel):
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
     version: int = Field(ge=1)
     description: str | None = None
@@ -271,6 +273,7 @@ class WorkflowDefinition(WorkflowModel):
 
 class WorkflowRun(WorkflowModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     workflow_name: str
     workflow_version: int = Field(ge=1)
     bench_id: str
@@ -292,6 +295,7 @@ class WorkflowRun(WorkflowModel):
 
 class WorkflowStepResult(WorkflowModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     workflow_run_id: UUID
     step_index: int = Field(ge=0)
     name: str = Field(default="", max_length=500)

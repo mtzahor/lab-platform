@@ -10,7 +10,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
+from lab_platform.control_plane_core.commands import RemoteCommandService
 from lab_platform.control_plane_core.reservations import (
+    CentralReservationLeaseService,
     CoordinatedReservationLease,
     ReservationLeaseState,
 )
@@ -18,10 +20,20 @@ from lab_platform.control_plane_core.workflows import (
     DistributedWorkflowDispatch,
     DistributedWorkflowRequest,
 )
-from lab_platform.core.errors import CiSessionConflictError, CiSessionNotFoundError
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import (
+    AuthenticationRequiredError,
+    CiSessionConflictError,
+    CiSessionNotFoundError,
+    PermissionDeniedError,
+)
 from lab_platform.core.workflows import WorkflowInvalidError
 from lab_platform.models import (
+    ActorContext,
     ArtifactReference,
+    AuthenticationContext,
+    AuthorisationResource,
+    AuthorisationSnapshot,
     BenchRequest,
     CiOutcome,
     CiProvider,
@@ -33,9 +45,12 @@ from lab_platform.models import (
     DistributedOperation,
     DistributedOperationStatus,
     GlobalBenchKind,
+    Principal,
     RemoteArtifactMetadata,
     RemoteCommand,
     RemoteCommandStatus,
+    ReservationOwner,
+    ResourceType,
     WorkflowDefinition,
 )
 
@@ -70,6 +85,10 @@ class DistributedCiCreateRequest:
     provider: CiProvider
     external_run_id: str
     requested_by: str
+    owner_principal: ReservationOwner | None = None
+    actor_context: ActorContext | None = None
+    authentication_context: AuthenticationContext | None = None
+    allow_legacy_authorisation: bool = False
     bench_request: BenchRequest = field(default_factory=BenchRequest)
     repository: str | None = None
     ref: str | None = None
@@ -239,6 +258,14 @@ class DistributedCiCommandService(Protocol):
     ) -> RemoteCommand: ...
 
 
+class DistributedCiAuthorisationSnapshotRepository(Protocol):
+    async def create_authorisation_snapshot(
+        self,
+        organisation_id: UUID,
+        snapshot: AuthorisationSnapshot,
+    ) -> AuthorisationSnapshot: ...
+
+
 class DistributedCiArtifactRepository(Protocol):
     async def list(
         self,
@@ -308,6 +335,8 @@ class DistributedCiSessionService:
         self._commands = commands
         self._artifacts = artifacts
         self._artifact_uploads = artifact_uploads
+        self._authorisation: AuthorisationService | None = None
+        self._authorisation_snapshots: DistributedCiAuthorisationSnapshotRepository | None = None
         self._clock = clock or _utc_now
         self._session_timeout_seconds = session_timeout_seconds
         self._maximum_session_timeout_seconds = maximum_session_timeout_seconds
@@ -320,7 +349,36 @@ class DistributedCiSessionService:
         self._maintenance_batch_size = maintenance_batch_size
         self._locks = tuple(asyncio.Lock() for _ in range(lock_shards))
 
+    def set_authorisation_service(self, authorisation: AuthorisationService) -> None:
+        """Enable identity enforcement after runtime dependency construction."""
+
+        self._authorisation = authorisation
+
+    def set_authorisation_snapshot_repository(
+        self,
+        repository: DistributedCiAuthorisationSnapshotRepository,
+    ) -> None:
+        """Attach the durable store for initiating CI cancellation evidence."""
+
+        self._authorisation_snapshots = repository
+
     async def create(self, request: DistributedCiCreateRequest) -> CiSession:
+        await self._require_create_authorisation(request)
+        if (request.owner_principal is None) is not (request.actor_context is None):
+            raise CiSessionConflictError(
+                "CI principal and actor context must be supplied together."
+            )
+        if (
+            request.owner_principal is not None
+            and request.actor_context is not None
+            and (
+                request.owner_principal.principal_id != request.actor_context.principal_id
+                or request.owner_principal.principal_type
+                is not request.actor_context.principal_type
+                or request.owner_principal.display_name != request.actor_context.display_name
+            )
+        ):
+            raise CiSessionConflictError("CI principal and actor context do not match.")
         timeout_seconds = (
             self._session_timeout_seconds
             if request.timeout_seconds is None
@@ -341,6 +399,19 @@ class DistributedCiSessionService:
             commit_sha=request.commit_sha,
             actor=request.actor,
             requested_by=request.requested_by,
+            organisation_id=(
+                request.actor_context.organisation_id if request.actor_context is not None else None
+            ),
+            requested_by_principal_id=(
+                request.owner_principal.principal_id
+                if request.owner_principal is not None
+                else None
+            ),
+            requested_by_principal_type=(
+                request.owner_principal.principal_type
+                if request.owner_principal is not None
+                else None
+            ),
             status=CiSessionStatus.WAITING_FOR_BENCH,
             created_at=now,
             heartbeat_at=now,
@@ -360,24 +431,50 @@ class DistributedCiSessionService:
     async def list(
         self,
         *,
+        organisation_id: UUID | None = None,
         status: CiSessionStatus | None = None,
         provider: CiProvider | None = None,
         limit: int = 500,
     ) -> list[CiSession]:
         _require_positive_integer(limit, field="limit")
-        return await self._repository.list(status=status, provider=provider, limit=limit)
+        if organisation_id is None:
+            return await self._repository.list(status=status, provider=provider, limit=limit)
+        return await self._repository.list(  # type: ignore[call-arg]
+            organisation_id=organisation_id,
+            status=status,
+            provider=provider,
+            limit=limit,
+        )
 
-    async def get(self, session_id: UUID, *, synchronize: bool = True) -> CiSession:
-        session = await self._require_session(session_id)
+    async def get(
+        self,
+        session_id: UUID,
+        *,
+        synchronize: bool = True,
+        organisation_id: UUID | None = None,
+    ) -> CiSession:
+        session = await self._require_session(session_id, organisation_id=organisation_id)
         if synchronize:
             session = await self._synchronize(session)
         return session
 
-    async def details(self, session_id: UUID) -> dict[str, object]:
-        session = await self.get(session_id)
+    async def details(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> dict[str, object]:
+        session = await self.get(session_id, organisation_id=organisation_id)
         cleanup, errors = await asyncio.gather(
             self._repository.get_cleanup(session_id),
-            self._repository.errors(session_id),
+            (
+                self._repository.errors(session_id)
+                if organisation_id is None
+                else self._repository.errors(  # type: ignore[call-arg]
+                    session_id,
+                    organisation_id=organisation_id,
+                )
+            ),
         )
         return {
             **session.model_dump(mode="json"),
@@ -390,10 +487,31 @@ class DistributedCiSessionService:
         self,
         session_id: UUID,
         request: DistributedCiStartRequest,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
     ) -> CiSession:
         async with self._session_lock(session_id):
-            session = await self._require_session(session_id)
-            existing_binding = await self._repository.get_distributed_workflow(session.id)
+            session = await self._require_session(
+                session_id,
+                organisation_id=organisation_id,
+            )
+            await self._require_session_permission(
+                session,
+                authentication_context,
+                "ci:sessions:create",
+                allow_legacy_authorisation=allow_legacy_authorisation,
+                owner_only=True,
+            )
+            existing_binding = (
+                await self._repository.get_distributed_workflow(session.id)
+                if organisation_id is None
+                else await self._repository.get_distributed_workflow(  # type: ignore[call-arg]
+                    session.id,
+                    organisation_id=organisation_id,
+                )
+            )
             if existing_binding is not None:
                 self._validate_started_workflow(existing_binding, request)
                 return await self._synchronize(session)
@@ -406,9 +524,17 @@ class DistributedCiSessionService:
                     ci_session_id=str(session.id),
                     status=session.status.value,
                 )
-            definition = await self._workflow_catalog.get_definition(
-                request.workflow_name,
-                request.workflow_version,
+            definition = (
+                await self._workflow_catalog.get_definition(
+                    request.workflow_name,
+                    request.workflow_version,
+                )
+                if organisation_id is None
+                else await self._workflow_catalog.get_definition(  # type: ignore[call-arg]
+                    request.workflow_name,
+                    request.workflow_version,
+                    organisation_id=organisation_id,
+                )
             )
             if definition is None:
                 raise WorkflowInvalidError(
@@ -416,8 +542,18 @@ class DistributedCiSessionService:
                     workflow_name=request.workflow_name,
                     workflow_version=request.workflow_version,
                 )
+            if self._authorisation is not None and authentication_context is not None:
+                await self._authorisation.require(
+                    authentication_context.principal,
+                    "ci:sessions:create",
+                    AuthorisationResource(
+                        type=ResourceType.WORKFLOW,
+                        id=definition.name,
+                        organisation_id=definition.organisation_id,
+                    ),
+                    credential_restrictions=(authentication_context.permission_restrictions),
+                )
             bench_request = session.bench_request or BenchRequest()
-            routed_definition = _with_ci_capabilities(definition, bench_request)
             command_timeout = (
                 self._session_timeout_seconds
                 if request.command_timeout_seconds is None
@@ -429,9 +565,14 @@ class DistributedCiSessionService:
             )
             dispatch = await self._workflows.run(
                 DistributedWorkflowRequest(
-                    definition=routed_definition,
+                    definition=definition,
                     owner=session.requested_by,
                     idempotency_key=_workflow_launch_key(session.id),
+                    owner_principal=_ci_reservation_owner(session),
+                    actor_context=_ci_actor_context(session),
+                    authentication_context=authentication_context,
+                    allow_legacy_authorisation=allow_legacy_authorisation,
+                    organisation_id=organisation_id,
                     inputs=dict(request.inputs),
                     bench_id=bench_request.explicit_bench_id,
                     kind=_requested_kind(bench_request),
@@ -447,6 +588,7 @@ class DistributedCiSessionService:
                         bench_request.required_agent_labels,
                         request.agent_labels,
                     ),
+                    required_capabilities=tuple(sorted(bench_request.required_capabilities)),
                     reservation_duration_seconds=(bench_request.reservation_duration_seconds),
                     lease_ttl_seconds=request.lease_ttl_seconds,
                     command_timeout_seconds=command_timeout,
@@ -466,8 +608,18 @@ class DistributedCiSessionService:
                 request_fingerprint=_dispatch_fingerprint(dispatch),
                 started_at=self._now(),
             )
-            current = attached or await self._require_session(session.id)
-            binding = await self._repository.get_distributed_workflow(session.id)
+            current = attached or await self._require_session(
+                session.id,
+                organisation_id=organisation_id,
+            )
+            binding = (
+                await self._repository.get_distributed_workflow(session.id)
+                if organisation_id is None
+                else await self._repository.get_distributed_workflow(  # type: ignore[call-arg]
+                    session.id,
+                    organisation_id=organisation_id,
+                )
+            )
             if (
                 binding is None
                 or binding.remote_command_id != dispatch.command.id
@@ -481,9 +633,26 @@ class DistributedCiSessionService:
                 )
             return await self._synchronize(current)
 
-    async def heartbeat(self, session_id: UUID) -> CiSession:
+    async def heartbeat(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> CiSession:
         async with self._session_lock(session_id):
-            session = await self._synchronize(await self._require_session(session_id))
+            session = await self._require_session(
+                session_id,
+                organisation_id=organisation_id,
+            )
+            await self._require_session_permission(
+                session,
+                authentication_context,
+                "ci:sessions:create",
+                allow_legacy_authorisation=allow_legacy_authorisation,
+            )
+            session = await self._synchronize(session)
             if session.status is CiSessionStatus.COMPLETED:
                 return session
             now = self._now()
@@ -496,9 +665,26 @@ class DistributedCiSessionService:
             await self._renew_if_needed(current, now)
             return current
 
-    async def cancel(self, session_id: UUID) -> CiSession:
+    async def cancel(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> CiSession:
         async with self._session_lock(session_id):
-            session = await self._synchronize(await self._require_session(session_id))
+            session = await self._require_session(
+                session_id,
+                organisation_id=organisation_id,
+            )
+            await self._require_session_permission(
+                session,
+                authentication_context,
+                "ci:sessions:cancel",
+                allow_legacy_authorisation=allow_legacy_authorisation,
+            )
+            session = await self._synchronize(session)
             if session.status is CiSessionStatus.COMPLETED:
                 return session
             if session.status in _SESSION_TERMINAL_STATUSES or (
@@ -516,19 +702,47 @@ class DistributedCiSessionService:
                 session = await self._compare_or_reload(cancelled, {session.status})
                 return await self._cleanup_locked(session)
             if session.status is not CiSessionStatus.CANCEL_REQUESTED:
+                cancellation_evidence: dict[str, object] = {}
+                if authentication_context is not None:
+                    cancellation_evidence = await self._create_cancellation_evidence(
+                        session,
+                        authentication_context,
+                    )
                 requested = session.model_copy(
                     update={
                         "status": CiSessionStatus.CANCEL_REQUESTED,
                         "outcome": CiOutcome.CANCELLED,
+                        **cancellation_evidence,
                     }
                 )
                 session = await self._compare_or_reload(requested, {session.status})
-            await self._try_send_cancel(session)
+            await self._try_send_cancel(
+                session,
+                authentication_context=authentication_context,
+                allow_legacy_authorisation=allow_legacy_authorisation,
+            )
             return await self._synchronize(session)
 
-    async def cleanup(self, session_id: UUID) -> CiSession:
+    async def cleanup(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> CiSession:
         async with self._session_lock(session_id):
-            session = await self._synchronize(await self._require_session(session_id))
+            session = await self._require_session(
+                session_id,
+                organisation_id=organisation_id,
+            )
+            await self._require_session_permission(
+                session,
+                authentication_context,
+                "ci:sessions:cancel",
+                allow_legacy_authorisation=allow_legacy_authorisation,
+            )
+            session = await self._synchronize(session)
             return await self._cleanup_locked(session)
 
     async def process_maintenance(self) -> DistributedCiMaintenanceResult:
@@ -744,12 +958,24 @@ class DistributedCiSessionService:
                 reservation = await self._reservations.get(session.reservation_id)
                 reservation_terminal = reservation.state in _RESERVATION_TERMINAL_STATES
                 if not reservation_terminal:
-                    released = await self._reservations.release(
-                        session.reservation_id,
-                        owner=session.requested_by,
-                        expected_lease_version=reservation.lease.lease_version,
-                        idempotency_key=_reservation_release_key(session.id),
-                    )
+                    if isinstance(
+                        self._reservations,
+                        CentralReservationLeaseService,
+                    ):
+                        released = await self._reservations.release(
+                            session.reservation_id,
+                            owner=session.requested_by,
+                            expected_lease_version=reservation.lease.lease_version,
+                            idempotency_key=_reservation_release_key(session.id),
+                            allow_internal_authorisation=True,
+                        )
+                    else:
+                        released = await self._reservations.release(
+                            session.reservation_id,
+                            owner=session.requested_by,
+                            expected_lease_version=reservation.lease.lease_version,
+                            idempotency_key=_reservation_release_key(session.id),
+                        )
                     reservation_terminal = released.state in _RESERVATION_TERMINAL_STATES
             except Exception as exc:  # cleanup is deliberately retryable
                 release_error = f"reservation release failed: {type(exc).__name__}"
@@ -806,7 +1032,13 @@ class DistributedCiSessionService:
         )
         return finalized or await self._require_session(session.id)
 
-    async def _try_send_cancel(self, session: CiSession) -> None:
+    async def _try_send_cancel(
+        self,
+        session: CiSession,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> None:
         binding = await self._repository.get_distributed_workflow(session.id)
         if binding is None:
             return
@@ -819,19 +1051,108 @@ class DistributedCiSessionService:
         }:
             return
         try:
-            await self._commands.request_cancel(
-                binding.remote_command_id,
-                reason=(
-                    "CI session timed out"
-                    if session.outcome is CiOutcome.TIMED_OUT
-                    else "CI session cancelled"
-                ),
+            reason = (
+                "CI session timed out"
+                if session.outcome is CiOutcome.TIMED_OUT
+                else "CI session cancelled"
             )
+            if isinstance(self._commands, RemoteCommandService):
+                cancellation_context = self._cancellation_context(session)
+                if cancellation_context is not None:
+                    await self._commands.request_ci_cancel(
+                        binding.remote_command_id,
+                        ci_session_id=session.id,
+                        reason=reason,
+                        authentication_context=cancellation_context,
+                    )
+                else:
+                    await self._commands.request_cancel(
+                        binding.remote_command_id,
+                        reason=reason,
+                        allow_legacy_authorisation=allow_legacy_authorisation,
+                        allow_internal_authorisation=not allow_legacy_authorisation,
+                    )
+            else:
+                await self._commands.request_cancel(
+                    binding.remote_command_id,
+                    reason=reason,
+                )
         except Exception as exc:  # cancellation remains pending and is retried
             await self._record_error_once(
                 session.id,
                 f"remote cancellation delivery failed: {type(exc).__name__}",
             )
+
+    async def _create_cancellation_evidence(
+        self,
+        session: CiSession,
+        context: AuthenticationContext,
+    ) -> dict[str, object]:
+        repository = self._authorisation_snapshots
+        if repository is None:
+            raise AuthenticationRequiredError(
+                "Authenticated CI cancellation requires a durable evidence store."
+            )
+        principal = context.principal
+        if principal.organisation_id != session.organisation_id:
+            raise PermissionDeniedError("CI cancellation principal organisation does not match.")
+        authorisation = self._authorisation
+        if authorisation is None:
+            raise AuthenticationRequiredError(
+                "Authenticated CI cancellation requires an authorisation service."
+            )
+        decision = await authorisation.evaluate_anywhere(
+            principal,
+            "ci:sessions:cancel",
+            credential_restrictions=context.permission_restrictions,
+        )
+        if not decision.allowed:
+            await authorisation.require_anywhere(
+                principal,
+                "ci:sessions:cancel",
+                credential_restrictions=context.permission_restrictions,
+            )
+        granting_assignments = sorted(decision.granting_assignment_ids, key=str)
+        snapshot = await repository.create_authorisation_snapshot(
+            principal.organisation_id,
+            AuthorisationSnapshot(
+                principal_id=principal.id,
+                permission="ci:sessions:cancel",
+                resource_type="CI_SESSION",
+                resource_id=str(session.id),
+                granted_by_assignments=granting_assignments,
+                evaluated_at=self._now(),
+            ),
+        )
+        actor = ActorContext(
+            principal_id=principal.id,
+            principal_type=principal.type,
+            display_name=principal.display_name,
+            organisation_id=principal.organisation_id,
+            authorisation_snapshot_id=snapshot.id,
+        )
+        return {
+            "cancel_actor_context": actor,
+            "cancel_authorisation_snapshot_id": snapshot.id,
+        }
+
+    @staticmethod
+    def _cancellation_context(
+        session: CiSession,
+    ) -> AuthenticationContext | None:
+        actor = session.cancel_actor_context
+        snapshot_id = session.cancel_authorisation_snapshot_id
+        if actor is None or snapshot_id is None:
+            return None
+        return AuthenticationContext(
+            principal=Principal(
+                id=actor.principal_id,
+                type=actor.principal_type,
+                organisation_id=actor.organisation_id,
+                display_name=actor.display_name,
+            ),
+            authorisation_snapshot_id=snapshot_id,
+        )
 
     async def _finalize_artifacts(
         self,
@@ -917,15 +1238,25 @@ class DistributedCiSessionService:
             remaining = (reservation.lease.valid_until - now).total_seconds()
             if remaining > self._lease_renewal_threshold_seconds:
                 return
-            await self._reservations.renew(
-                session.reservation_id,
-                owner=session.requested_by,
-                expected_lease_version=reservation.lease.lease_version,
-                idempotency_key=_lease_renewal_key(
-                    session.id,
-                    reservation.lease.lease_version,
-                ),
+            renewal_key = _lease_renewal_key(
+                session.id,
+                reservation.lease.lease_version,
             )
+            if isinstance(self._reservations, CentralReservationLeaseService):
+                await self._reservations.renew(
+                    session.reservation_id,
+                    owner=session.requested_by,
+                    expected_lease_version=reservation.lease.lease_version,
+                    idempotency_key=renewal_key,
+                    allow_internal_authorisation=True,
+                )
+            else:
+                await self._reservations.renew(
+                    session.reservation_id,
+                    owner=session.requested_by,
+                    expected_lease_version=reservation.lease.lease_version,
+                    idempotency_key=renewal_key,
+                )
         except Exception as exc:  # heartbeat persistence must survive a transient Agent outage
             await self._record_error_once(
                 session.id,
@@ -1016,8 +1347,108 @@ class DistributedCiSessionService:
         if error not in errors:
             await self._repository.append_error(session_id, error)
 
-    async def _require_session(self, session_id: UUID) -> CiSession:
-        session = await self._repository.get(session_id)
+    async def _require_create_authorisation(
+        self,
+        request: DistributedCiCreateRequest,
+    ) -> None:
+        authorisation = self._authorisation
+        if authorisation is None:
+            return
+        context = request.authentication_context
+        if context is None:
+            if request.allow_legacy_authorisation:
+                return
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to create a CI session."
+            )
+        if request.actor_context is None or request.owner_principal is None:
+            raise CiSessionConflictError(
+                "Authenticated CI creation requires durable principal context."
+            )
+        principal = context.principal
+        if (
+            principal.id != request.actor_context.principal_id
+            or principal.type is not request.actor_context.principal_type
+            or principal.organisation_id != request.actor_context.organisation_id
+            or principal.id != request.owner_principal.principal_id
+            or principal.type is not request.owner_principal.principal_type
+        ):
+            raise CiSessionConflictError(
+                "Authenticated CI principal does not match its durable actor context."
+            )
+        await authorisation.require_anywhere(
+            principal,
+            "ci:sessions:create",
+            credential_restrictions=context.permission_restrictions,
+        )
+
+    async def _require_session_permission(
+        self,
+        session: CiSession,
+        context: AuthenticationContext | None,
+        permission: str,
+        *,
+        allow_legacy_authorisation: bool,
+        owner_only: bool = False,
+    ) -> None:
+        if self._authorisation is None:
+            return
+        if context is None:
+            if allow_legacy_authorisation:
+                return
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to start a CI session."
+            )
+        principal = context.principal
+        owns_session = (
+            session.organisation_id == principal.organisation_id
+            and session.requested_by_principal_id == principal.id
+            and session.requested_by_principal_type is principal.type
+        )
+        if owner_only and not owns_session:
+            await self._authorisation.audit_permission_denied(
+                principal,
+                permission,
+                resource_type="CI_SESSION",
+                resource_id=str(session.id),
+                reason="Only the durable CI session principal may start its workflow.",
+            )
+            raise PermissionDeniedError(
+                "Only the CI session principal may start its workflow.",
+                ci_session_id=str(session.id),
+            )
+        if owns_session:
+            await self._authorisation.require_anywhere(
+                principal,
+                permission,
+                credential_restrictions=context.permission_restrictions,
+            )
+            return
+        await self._authorisation.require(
+            principal,
+            permission,
+            AuthorisationResource(
+                type=ResourceType.ORGANISATION,
+                id=str(principal.organisation_id),
+                organisation_id=principal.organisation_id,
+            ),
+            credential_restrictions=context.permission_restrictions,
+        )
+
+    async def _require_session(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CiSession:
+        session = (
+            await self._repository.get(session_id)
+            if organisation_id is None
+            else await self._repository.get(  # type: ignore[call-arg]
+                session_id,
+                organisation_id=organisation_id,
+            )
+        )
         if session is None:
             raise CiSessionNotFoundError(
                 f"CI session {session_id} does not exist.",
@@ -1083,21 +1514,25 @@ def _operation_session_result(
     return None
 
 
-def _with_ci_capabilities(
-    definition: WorkflowDefinition,
-    request: BenchRequest,
-) -> WorkflowDefinition:
-    requirements = definition.requirements
-    capabilities = sorted(
-        {
-            *(capability.casefold() for capability in requirements.capabilities),
-            *(capability.casefold() for capability in request.required_capabilities),
-        }
+def _ci_reservation_owner(session: CiSession) -> ReservationOwner | None:
+    if session.requested_by_principal_id is None or session.requested_by_principal_type is None:
+        return None
+    return ReservationOwner(
+        principal_id=session.requested_by_principal_id,
+        principal_type=session.requested_by_principal_type,
+        display_name=session.requested_by,
     )
-    if capabilities == requirements.capabilities:
-        return definition
-    return definition.model_copy(
-        update={"requirements": requirements.model_copy(update={"capabilities": capabilities})}
+
+
+def _ci_actor_context(session: CiSession) -> ActorContext | None:
+    owner = _ci_reservation_owner(session)
+    if owner is None or session.organisation_id is None:
+        return None
+    return ActorContext(
+        principal_id=owner.principal_id,
+        principal_type=owner.principal_type,
+        display_name=owner.display_name,
+        organisation_id=session.organisation_id,
     )
 
 
@@ -1123,6 +1558,9 @@ def _require_same_creation(
         "commit_sha",
         "actor",
         "requested_by",
+        "organisation_id",
+        "requested_by_principal_id",
+        "requested_by_principal_type",
         "bench_request",
     )
     if any(getattr(existing, name) != getattr(requested, name) for name in fields):
@@ -1137,6 +1575,15 @@ def _default_create_key(session: CiSession) -> str:
         "provider": session.provider.value,
         "external_run_id": session.external_run_id,
         "requested_by": session.requested_by,
+        "organisation_id": str(session.organisation_id) if session.organisation_id else None,
+        "requested_by_principal_id": (
+            str(session.requested_by_principal_id) if session.requested_by_principal_id else None
+        ),
+        "requested_by_principal_type": (
+            session.requested_by_principal_type.value
+            if session.requested_by_principal_type
+            else None
+        ),
     }
     digest = hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
     return f"distributed-ci-create:{digest}"

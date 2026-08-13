@@ -125,14 +125,22 @@ class SQLiteReservationRepository:
                 return _reservation_from_row(row)
             connection.execute(
                 "INSERT INTO reservations "
-                "(id, bench_id, owner, created_at, released_at, status, requested_at, "
+                "(id, bench_id, owner, owner_principal_id, owner_principal_type, "
+                "organisation_id, created_at, released_at, status, requested_at, "
                 "starts_at, ends_at, activated_at, expired_at, source, metadata, "
                 "idempotency_key, release_pending) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(reservation.id),
                     reservation.bench_id,
                     reservation.owner,
+                    (
+                        str(reservation.owner_principal_id)
+                        if reservation.owner_principal_id
+                        else None
+                    ),
+                    reservation.owner_principal_type,
+                    str(reservation.organisation_id),
                     reservation.created_at.isoformat(),
                     None,
                     reservation.status.value,
@@ -149,11 +157,20 @@ class SQLiteReservationRepository:
             )
         return reservation
 
-    async def get_active(self, bench_id: str) -> Reservation | None:
+    async def get_active(
+        self,
+        bench_id: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> Reservation | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (bench_id, str(organisation_id)) if organisation_id is not None else (bench_id,)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM reservations WHERE bench_id = ? AND status = 'active'",
-                (bench_id,),
+                f"SELECT * FROM reservations WHERE bench_id = ? AND status = 'active'{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _reservation_from_row(row) if row is not None else None
 
@@ -365,8 +382,11 @@ def _operation_values(operation: Operation) -> tuple[object, ...]:
 def _reservation_from_row(row: sqlite3.Row) -> Reservation:
     return Reservation(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         bench_id=row["bench_id"],
         owner=row["owner"],
+        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
+        owner_principal_type=row["owner_principal_type"],
         created_at=datetime.fromisoformat(row["created_at"]),
         released_at=_parse_datetime(row["released_at"]),
         status=ReservationStatus(row["status"]),

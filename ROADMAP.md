@@ -64,12 +64,80 @@ restart coverage. SQLite remains supported for the loopback demo and Agent-local
 
 See [the Phase 5 architecture, demo, and limitations](docs/PHASE_5.md).
 
+## Phase 6 — identity, teams, and access control (functional foundation implemented)
+
+Implemented in the 0.7.0-alpha foundation:
+
+- Organisation-scoped user, service-account, principal, team, membership, session, credential,
+  fixed-role, policy, snapshot, audit, and login-attempt models.
+- Strict configuration for local auth, OIDC, sessions, authorisation defaults, audit, login
+  throttling, and loopback-only development auto-login; safe runtime auto-login resolves an
+  existing user and applies normal RBAC.
+- Salted scrypt local passwords, opaque rotating sessions, revocable/IP-restrictable identity-bound
+  service credentials, audit sanitization, and login-attempt domain services.
+- Additive organisation/direct/team/resource RBAC with trusted Agent-to-bench inheritance,
+  assignment expiry, cross-organisation rejection, credential narrowing, and persisted
+  bench/workflow policy enforcement.
+- Schema version 10 identity and tenant persistence: transitional default-organisation backfill,
+  composite tenant workflow keys, organisation-scoped CI/artifact/reservation/queue retry keys, and
+  scoped adapters for the major distributed resources.
+- Supported `lab-control-plane bootstrap-admin` first-owner/recovery flow without plaintext
+  password arguments.
+- `labctl auth login/logout/status/whoami`, native macOS/Linux versioned session-bundle storage,
+  and transparent single-retry token rotation for stored interactive logins.
+- Control-plane local and OIDC login, refresh/logout/me/session routes and dual Phase 6/legacy
+  bearer acceptance on existing protected routes.
+- OIDC authorization-code login with discovery, S256 PKCE, strict RS256 ID-token validation, and
+  configurable username-claim mapping to pre-provisioned users without JIT provisioning.
+- Identity-only organisation/user/team/service-account/credential/role and bench/workflow
+  access-policy administration REST APIs, audit-read REST APIs, and matching `labctl` families.
+- Principal-bound identity reservation ownership, authenticated actor context on
+  manual/workflow/CI-launched remote commands, and service-account identity propagation into
+  distributed CI sessions.
+- Trusted exact-resource checks on named Agent, bench, reservation, workflow, and operation routes,
+  configurable resource-specific `404` hiding, durable authorisation snapshots for identity-backed
+  remote commands, and matching actor/snapshot attribution on principal-facing cancellation,
+  reconciliation, inventory-refresh, and drain/undrain control payloads.
+- Snapshot-safe idempotent command/workflow replay that binds the stable principal, tenant, request
+  content, and required permissions under credential restrictions while retaining the snapshot
+  accepted with the original work; workflow replay also fingerprints the effective restrictions.
+- Per-item RBAC filtering on Agent, bench, workflow, operation, and reservation collections;
+  application-service enforcement for commands, reservations, workflows, CI, drain, enrollment,
+  runtime lifecycle, and identity-facing artifact operations; and explicit legacy/internal escapes.
+- Parent-inherited artifact access across trusted operation, workflow-run, CI-session, and remote
+  command/bench relationships, including platform artifact deletion and fail-closed handling for
+  unresolved workflow-step parents.
+- Attributable success/denial events across protected identity administration, Agent/enrollment,
+  bench, reservation, workflow, operation, CI, access-policy, and artifact actions; bounded runtime
+  audit/login-attempt retention; and HTTP security headers on successful and error responses.
+- A copy-ready human/team/service-account access demonstration with an authorised SimLab ESP32
+  workflow, Viewer denial, least-privilege CI credential, and organisation-scoped audit review.
+
+Remaining before the Phase 6 cut line can be called complete:
+
+- Internal/background organisation propagation, lower-priority legacy storage conversion, and
+  removal or documented retention of remaining deployment-global Agent/bench identifiers.
+- A transactional replay outbox/state machine if principal control intents must be redelivered
+  automatically after restart. Current durable intents distinguish authorisation from a wire send,
+  while automatic/background work with no originating Phase 6 decision and legacy work
+  deliberately has no initiating actor/snapshot. CI cancellation maintenance can reuse evidence
+  persisted by the principal request.
+- Tenant-safe resolution for `WORKFLOW_STEP` artifact parents, and remote-artifact deletion if it
+  becomes a supported product operation.
+- Legacy-token conversion tooling and removal of its deployment-global compatibility trust
+  boundary.
+- Broader public-API/OIDC rate limiting, trusted-proxy/client-address policy, cookie/browser auth if
+  introduced, and broader background/distributed hardening.
+
+See [Phase 6 status and limitations](docs/PHASE_6.md).
+
 ## Later phases
 
-Deferred work includes full organizational identity, SSO, advanced RBAC, secret-vault integration,
-relays, hosted control plane, high availability, dashboards, arbitrary pipeline graphs, advanced
-analytics, billing, and production deployment hardening.
+Deferred work beyond the compact Phase 6 model includes SAML/SCIM/LDAP, external group-role
+mapping, custom policy languages, secret-vault integration, relays, hosted control plane, high
+availability, dashboards, arbitrary pipeline graphs, advanced analytics, billing, and production
+deployment hardening.
 
-The `0.6.0-alpha` reference control plane supports PostgreSQL and development-mode per-Agent bearer
+The `0.7.0-alpha` reference control plane supports PostgreSQL and development-mode per-Agent bearer
 credentials. mTLS, active-active/HA coordination, and broader production hardening remain later
-deployment work rather than hidden claims of Phase 5.
+deployment work rather than hidden claims of Phase 6.

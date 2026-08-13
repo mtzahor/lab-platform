@@ -533,8 +533,9 @@ def _translate_sql(query: str) -> str:
         flags=re.IGNORECASE,
     )
     translated = re.sub(
-        r"\bMAX\(\s*0\s*,\s*COUNT\(\*\)\s*-\s*COUNT\(DISTINCT\s+agent_id\)\s*\)",
-        "GREATEST(0, COUNT(*) - COUNT(DISTINCT agent_id))",
+        r"\bMAX\(\s*0\s*,\s*COUNT\(\*\)\s*-\s*COUNT\(DISTINCT\s+"
+        r"([A-Za-z_][A-Za-z0-9_.]*)\)\s*\)",
+        r"GREATEST(0, COUNT(*) - COUNT(DISTINCT \1))",
         translated,
         flags=re.IGNORECASE,
     )

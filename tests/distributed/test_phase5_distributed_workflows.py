@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine, Iterable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any
@@ -22,13 +23,22 @@ from lab_platform.control_plane_core.workflows import (
     DistributedWorkflowRequest,
     DistributedWorkflowReservationLifecycle,
     WorkflowArtifactTransferDescriptor,
+    WorkflowAuthorisationService,
 )
-from lab_platform.core.errors import BenchAlreadyReservedError, NoCompatibleBenchError
+from lab_platform.core.errors import (
+    AuthenticationRequiredError,
+    BenchAlreadyReservedError,
+    NoCompatibleBenchError,
+    PermissionDeniedError,
+)
 from lab_platform.core.workflows import WorkflowInvalidError
 from lab_platform.models import (
+    ActorContext,
     AgentRecord,
     AgentStatus,
     ArtifactReference,
+    AuthenticationContext,
+    AuthorisationResource,
     DistributedOperation,
     DistributedOperationStatus,
     EnrollmentStatus,
@@ -36,6 +46,8 @@ from lab_platform.models import (
     GlobalBenchRecord,
     GlobalBenchStatus,
     HealthStatus,
+    Principal,
+    PrincipalType,
     RemoteCommand,
     RemoteCommandStatus,
     RemoteCommandType,
@@ -43,6 +55,7 @@ from lab_platform.models import (
     ReservationLease,
     ReservationSource,
     ReservationStatus,
+    ResourceType,
     WorkflowDefinition,
 )
 
@@ -94,6 +107,7 @@ def _bench(
 ) -> GlobalBenchRecord:
     return GlobalBenchRecord(
         id=f"{agent.slug}/{local_id}",
+        organisation_id=agent.organisation_id,
         agent_id=agent.id,
         agent_slug=agent.slug,
         local_bench_id=local_id,
@@ -155,8 +169,101 @@ class FakePresence:
     def __init__(self, agents: list[AgentRecord]) -> None:
         self.agents = agents
 
-    async def list_agents(self) -> list[AgentRecord]:
-        return list(self.agents)
+    async def list_agents(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[AgentRecord]:
+        return [
+            agent
+            for agent in self.agents
+            if organisation_id is None or agent.organisation_id == organisation_id
+        ]
+
+
+class FakeWorkflowDefinitionCatalog:
+    def __init__(self, definitions: Iterable[WorkflowDefinition]) -> None:
+        self.definitions = {
+            (definition.organisation_id, definition.name, definition.version): definition
+            for definition in definitions
+        }
+        self.calls: list[tuple[UUID, str, int | None]] = []
+
+    async def get_definition(
+        self,
+        name: str,
+        version: int | None = None,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> WorkflowDefinition | None:
+        if organisation_id is None:
+            return None
+        self.calls.append((organisation_id, name, version))
+        if version is not None:
+            return self.definitions.get((organisation_id, name, version))
+        matches = [
+            definition
+            for (scope, candidate_name, _), definition in self.definitions.items()
+            if scope == organisation_id and candidate_name == name
+        ]
+        return max(matches, key=lambda item: item.version) if matches else None
+
+
+class FakeWorkflowAuthorisation:
+    def __init__(
+        self,
+        *,
+        workflow_allowed: bool = True,
+        allowed_benches: set[str] | None = None,
+    ) -> None:
+        self.workflow_allowed = workflow_allowed
+        self.allowed_benches = allowed_benches or set()
+        self.evaluated: list[tuple[str, AuthorisationResource]] = []
+        self.required: list[tuple[str, AuthorisationResource]] = []
+        self.audited: list[tuple[str, str, str | None, dict[str, object]]] = []
+
+    async def is_allowed(
+        self,
+        principal: Principal,
+        permission: str,
+        resource: AuthorisationResource,
+        *,
+        credential_restrictions: Iterable[str] | None = None,
+    ) -> bool:
+        del principal, credential_restrictions
+        self.evaluated.append((permission, resource))
+        return resource.id in self.allowed_benches
+
+    async def require(
+        self,
+        principal: Principal,
+        permission: str,
+        resource: AuthorisationResource,
+        *,
+        credential_restrictions: Iterable[str] | None = None,
+    ) -> None:
+        del principal, credential_restrictions
+        self.required.append((permission, resource))
+        allowed = self.workflow_allowed if permission == "workflows:run" else False
+        if not allowed:
+            raise PermissionDeniedError(
+                "permission denied",
+                required_permission=permission,
+                resource_id=resource.id,
+            )
+
+    async def audit_success(
+        self,
+        principal: Principal,
+        action: str,
+        *,
+        resource_type: str,
+        resource_id: str | None,
+        metadata: dict[str, object] | None = None,
+    ) -> object:
+        del principal
+        self.audited.append((action, resource_type, resource_id, metadata or {}))
+        return None
 
 
 class FakeReservations:
@@ -302,11 +409,37 @@ class FakeReservations:
         return released
 
 
+class StrictGlobalReplayFakeReservations(FakeReservations):
+    def __init__(self) -> None:
+        super().__init__()
+        self.replay_agents: dict[str, UUID] = {}
+
+    async def grant(self, **kwargs: Any) -> CoordinatedReservationLease:
+        key = str(kwargs["idempotency_key"])
+        agent_id = kwargs["agent_id"]
+        assert isinstance(agent_id, UUID)
+        existing_agent = self.replay_agents.get(key)
+        if existing_agent is not None and existing_agent != agent_id:
+            raise AssertionError("reservation replay key crossed tenant routes")
+        self.replay_agents[key] = agent_id
+        return await super().grant(**kwargs)
+
+
 class FakeArtifacts:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.descriptors: dict[str, WorkflowArtifactTransferDescriptor] = {}
         self.override_agent_id: UUID | None = None
+
+    async def require_access(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> None:
+        del artifact_id, organisation_id, authentication_context, allow_legacy_authorisation
 
     async def issue_download(
         self,
@@ -316,7 +449,11 @@ class FakeArtifacts:
         artifact_id: UUID,
         target_path: str,
         idempotency_key: str,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
     ) -> WorkflowArtifactTransferDescriptor:
+        del organisation_id, authentication_context, allow_legacy_authorisation
         existing = self.descriptors.get(idempotency_key)
         if existing is not None:
             return existing
@@ -361,7 +498,10 @@ class FakeCommands:
         reservation_lease: ReservationLease | None = None,
         operation_type: str | None = None,
         dispatch: bool = True,
+        actor_context: ActorContext | None = None,
+        authorisation_snapshot_id: UUID | None = None,
     ) -> tuple[RemoteCommand, DistributedOperation | None]:
+        del actor_context, authorisation_snapshot_id
         if self.create_error is not None:
             raise self.create_error
         existing = self.created.get(idempotency_key)
@@ -496,6 +636,8 @@ def _coordinator(
     reservations: FakeReservations | None = None,
     artifacts: FakeArtifacts | None = None,
     commands: FakeCommands | None = None,
+    authorisation: WorkflowAuthorisationService | None = None,
+    definition_catalog: FakeWorkflowDefinitionCatalog | None = None,
 ) -> tuple[DistributedWorkflowCoordinator, FakeReservations, FakeArtifacts, FakeCommands]:
     lease_service = reservations or FakeReservations()
     artifact_service = artifacts or FakeArtifacts()
@@ -506,6 +648,10 @@ def _coordinator(
         lease_service,
         artifact_service,
         command_service,
+        authorisation=authorisation,
+        definition_catalog=(
+            definition_catalog or FakeWorkflowDefinitionCatalog((_workflow(), _artifact_workflow()))
+        ),
         clock=lambda: NOW,
     )
     return coordinator, lease_service, artifact_service, command_service
@@ -728,8 +874,8 @@ async def test_typed_inputs_are_resolved_and_artifacts_are_agent_scoped() -> Non
         "enabled": False,
     }
     dispatched_definition = commands.calls[0]["payload"]["definition"]
-    assert dispatched_definition == _artifact_workflow().model_dump(mode="json")
-    assert dispatched_definition["steps"][0]["firmware"] == "${{ inputs.firmware }}"
+    assert dispatched_definition == result.definition.model_dump(mode="json")
+    assert dispatched_definition["steps"][0]["firmware"] == f"artifacts/{artifact_id}"
     assert commands.calls[0]["payload"]["reservation_lease"] == (
         result.reservation.lease.model_dump(mode="json")
     )
@@ -1359,3 +1505,486 @@ async def test_completed_idempotency_entries_are_bounded() -> None:
         )
     )
     assert len(coordinator._requests) == 1
+
+
+def _authenticated_workflow_actor(
+    definition: WorkflowDefinition,
+) -> tuple[AuthenticationContext, ActorContext]:
+    principal = Principal(
+        id=UUID(int=91),
+        type=PrincipalType.USER,
+        organisation_id=definition.organisation_id,
+        display_name="Phase 6 operator",
+    )
+    snapshot_id = UUID(int=92)
+    return (
+        AuthenticationContext(
+            principal=principal,
+            session_id=UUID(int=93),
+            permission_restrictions={"workflows:run", "benches:operate"},
+            authorisation_snapshot_id=snapshot_id,
+        ),
+        ActorContext(
+            principal_id=principal.id,
+            principal_type=principal.type,
+            display_name=principal.display_name,
+            organisation_id=principal.organisation_id,
+            authorisation_snapshot_id=snapshot_id,
+        ),
+    )
+
+
+@_run_async_test
+async def test_service_level_workflow_authorisation_precedes_all_side_effects() -> None:
+    definition = _artifact_workflow()
+    context, actor = _authenticated_workflow_actor(definition)
+    agent = _agent(1, "agent-a")
+    authorisation = FakeWorkflowAuthorisation(workflow_allowed=False)
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [agent],
+        [_bench(agent, "bench-a")],
+    )
+    coordinator.set_authorisation_service(authorisation)
+
+    with pytest.raises(PermissionDeniedError, match="permission denied"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=definition,
+                owner="phase6/operator",
+                idempotency_key="workflow-authz-denied",
+                authentication_context=context,
+                actor_context=actor,
+                organisation_id=definition.organisation_id,
+                inputs={
+                    "firmware": {"artifact_id": str(UUID(int=94))},
+                    "version": "1.0",
+                },
+            )
+        )
+
+    assert [(permission, resource.id) for permission, resource in authorisation.required] == [
+        ("workflows:run", definition.name)
+    ]
+    assert reservations.calls == []
+    assert artifacts.calls == []
+    assert commands.calls == []
+
+
+@_run_async_test
+async def test_authenticated_workflow_rejects_forged_catalog_definition_before_side_effects() -> (
+    None
+):
+    trusted = _workflow()
+    forged = WorkflowDefinition.model_validate(
+        {
+            **trusted.model_dump(mode="python"),
+            "requirements": {"capabilities": [], "labels": {}},
+            "steps": [{"action": "wait", "seconds": 1}],
+        }
+    )
+    context, actor = _authenticated_workflow_actor(trusted)
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    catalog = FakeWorkflowDefinitionCatalog((trusted,))
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [agent],
+        [bench],
+        authorisation=authorisation,
+        definition_catalog=catalog,
+    )
+
+    with pytest.raises(WorkflowInvalidError, match="trusted catalog"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=forged,
+                owner="phase6/operator",
+                idempotency_key="forged-definition",
+                authentication_context=context,
+                actor_context=actor,
+                organisation_id=trusted.organisation_id,
+            )
+        )
+
+    assert authorisation.required == []
+    assert authorisation.evaluated == []
+    assert reservations.calls == []
+    assert artifacts.calls == []
+    assert commands.calls == []
+    assert catalog.calls == [(context.principal.organisation_id, trusted.name, trusted.version)]
+
+
+@_run_async_test
+async def test_forged_definition_cannot_replay_legitimate_idempotent_dispatch() -> None:
+    trusted = _workflow()
+    forged = WorkflowDefinition.model_validate(
+        {
+            **trusted.model_dump(mode="python"),
+            "requirements": {"capabilities": [], "labels": {}},
+            "steps": [{"action": "wait", "seconds": 1}],
+        }
+    )
+    context, actor = _authenticated_workflow_actor(trusted)
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    catalog = FakeWorkflowDefinitionCatalog((trusted,))
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [agent],
+        [bench],
+        authorisation=authorisation,
+        definition_catalog=catalog,
+    )
+    request = DistributedWorkflowRequest(
+        definition=trusted,
+        owner="phase6/operator",
+        idempotency_key="trusted-then-forged",
+        authentication_context=context,
+        actor_context=actor,
+        organisation_id=trusted.organisation_id,
+    )
+    dispatched = await coordinator.run(request)
+    baseline = (
+        len(reservations.calls),
+        len(artifacts.calls),
+        len(commands.calls),
+        len(authorisation.required),
+    )
+
+    with pytest.raises(WorkflowInvalidError, match="trusted catalog"):
+        await coordinator.run(replace(request, definition=forged))
+
+    assert (
+        len(reservations.calls),
+        len(artifacts.calls),
+        len(commands.calls),
+        len(authorisation.required),
+    ) == baseline
+    payload = commands.calls[0]["payload"]["definition"]
+    assert payload == dispatched.definition.model_dump(mode="json")
+    assert payload["steps"][0]["action"] == "reset"
+    assert catalog.calls == [
+        (context.principal.organisation_id, trusted.name, trusted.version),
+        (context.principal.organisation_id, trusted.name, trusted.version),
+    ]
+
+
+@_run_async_test
+async def test_authenticated_workflow_fails_closed_without_catalog_or_valid_model() -> None:
+    trusted = _workflow()
+    context, actor = _authenticated_workflow_actor(trusted)
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    reservations = FakeReservations()
+    artifacts = FakeArtifacts()
+    commands = FakeCommands()
+    coordinator = DistributedWorkflowCoordinator(
+        InventoryService(InMemoryInventoryRepository((bench,))),
+        FakePresence([agent]),
+        reservations,
+        artifacts,
+        commands,
+        authorisation=authorisation,
+        clock=lambda: NOW,
+    )
+    request = DistributedWorkflowRequest(
+        definition=trusted,
+        owner="phase6/operator",
+        idempotency_key="missing-catalog",
+        authentication_context=context,
+        actor_context=actor,
+        organisation_id=trusted.organisation_id,
+    )
+    with pytest.raises(WorkflowInvalidError, match="trusted definition catalog"):
+        await coordinator.run(request)
+
+    coordinator.set_definition_catalog(FakeWorkflowDefinitionCatalog((trusted,)))
+    malformed = WorkflowDefinition.model_construct(name=trusted.name)
+    with pytest.raises(WorkflowInvalidError, match="incomplete or invalid"):
+        await coordinator.run(replace(request, definition=malformed))
+
+    assert authorisation.required == []
+    assert reservations.calls == []
+    assert artifacts.calls == []
+    assert commands.calls == []
+
+
+@_run_async_test
+async def test_workflow_idempotency_cache_is_scoped_by_organisation() -> None:
+    first_org = UUID(int=501)
+    second_org = UUID(int=502)
+    first_definition = _workflow().model_copy(update={"organisation_id": first_org})
+    second_definition = _workflow().model_copy(update={"organisation_id": second_org})
+    first_agent = _agent(501, "tenant-a").model_copy(update={"organisation_id": first_org})
+    second_agent = _agent(502, "tenant-b").model_copy(update={"organisation_id": second_org})
+    first_bench = _bench(first_agent, "bench")
+    second_bench = _bench(second_agent, "bench")
+    first_context, first_actor = _authenticated_workflow_actor(first_definition)
+    second_context, second_actor = _authenticated_workflow_actor(second_definition)
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={first_bench.id, second_bench.id})
+    reservations = StrictGlobalReplayFakeReservations()
+    commands = FakeCommands()
+    coordinator, _, _, _ = _coordinator(
+        [first_agent, second_agent],
+        [first_bench, second_bench],
+        reservations=reservations,
+        commands=commands,
+        authorisation=authorisation,
+        definition_catalog=FakeWorkflowDefinitionCatalog((first_definition, second_definition)),
+    )
+    shared_key = "same-tenant-scoped-key"
+    first_request = DistributedWorkflowRequest(
+        definition=first_definition,
+        owner="tenant-a",
+        idempotency_key=shared_key,
+        authentication_context=first_context,
+        actor_context=first_actor,
+        organisation_id=first_org,
+    )
+    second_request = DistributedWorkflowRequest(
+        definition=second_definition,
+        owner="tenant-b",
+        idempotency_key=shared_key,
+        authentication_context=second_context,
+        actor_context=second_actor,
+        organisation_id=second_org,
+    )
+
+    first_dispatch = await coordinator.run(first_request)
+    second_dispatch = await coordinator.run(second_request)
+
+    assert first_dispatch.bench.id == first_bench.id
+    assert second_dispatch.bench.id == second_bench.id
+    assert len(reservations.calls) == 2
+    assert len(reservations.replay_agents) == 2
+    assert len(commands.calls) == 2
+    with pytest.raises(WorkflowInvalidError, match="idempotency key"):
+        await coordinator.run(replace(first_request, owner="changed-owner"))
+    assert len(reservations.calls) == 2
+    assert len(commands.calls) == 2
+
+
+@_run_async_test
+async def test_workflow_replay_ignores_fresh_snapshot_id_but_binds_authentication() -> None:
+    definition = _workflow()
+    context, actor = _authenticated_workflow_actor(definition)
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [agent],
+        [bench],
+        authorisation=authorisation,
+    )
+    request = DistributedWorkflowRequest(
+        definition=definition,
+        owner="phase6/operator",
+        idempotency_key="fresh-snapshot-replay",
+        authentication_context=context,
+        actor_context=actor,
+        organisation_id=definition.organisation_id,
+    )
+    first = await coordinator.run(request)
+    new_snapshot_id = UUID(int=9_999)
+    replayed = await coordinator.run(
+        replace(
+            request,
+            authentication_context=context.model_copy(
+                update={"authorisation_snapshot_id": new_snapshot_id}
+            ),
+            actor_context=actor.model_copy(update={"authorisation_snapshot_id": new_snapshot_id}),
+        )
+    )
+    assert replayed == first
+    assert len(reservations.calls) == 1
+    assert artifacts.calls == []
+    assert len(commands.calls) == 1
+
+    # Authentication handles may rotate for one principal without turning a retry into
+    # new work. Effective credential restrictions remain immutable request content.
+    rotated = await coordinator.run(
+        replace(
+            request,
+            authentication_context=context.model_copy(
+                update={"session_id": UUID(int=6), "credential_id": UUID(int=7)}
+            ),
+        )
+    )
+    assert rotated == first
+    with pytest.raises(WorkflowInvalidError, match="idempotency key"):
+        await coordinator.run(
+            replace(
+                request,
+                authentication_context=context.model_copy(
+                    update={"permission_restrictions": {"workflows:run"}}
+                ),
+            )
+        )
+    assert len(reservations.calls) == 1
+    assert len(commands.calls) == 1
+
+
+@_run_async_test
+async def test_unauthorised_candidates_are_silently_skipped_before_reservation() -> None:
+    definition = _workflow()
+    context, actor = _authenticated_workflow_actor(definition)
+    first_agent = _agent(1, "agent-a")
+    second_agent = _agent(2, "agent-b")
+    first_bench = _bench(first_agent, "bench-a")
+    second_bench = _bench(second_agent, "bench-b")
+    authorisation = FakeWorkflowAuthorisation(
+        allowed_benches={second_bench.id},
+    )
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [first_agent, second_agent],
+        [first_bench, second_bench],
+        authorisation=authorisation,
+    )
+
+    dispatch = await coordinator.run(
+        DistributedWorkflowRequest(
+            definition=definition,
+            owner="phase6/operator",
+            idempotency_key="bench-authz-filter",
+            authentication_context=context,
+            actor_context=actor,
+            organisation_id=definition.organisation_id,
+        )
+    )
+
+    assert dispatch.bench.id == second_bench.id
+    assert [call[1].id for call in authorisation.evaluated] == [
+        first_bench.id,
+        second_bench.id,
+    ]
+    assert [(permission, resource.id) for permission, resource in authorisation.required] == [
+        ("workflows:run", definition.name)
+    ]
+    assert [call["bench_id"] for call in reservations.calls] == [second_bench.id]
+    assert artifacts.calls == []
+    assert len(commands.calls) == 1
+    assert authorisation.audited == [
+        (
+            "WORKFLOW_STARTED",
+            ResourceType.WORKFLOW.value,
+            definition.name,
+            {
+                "bench_id": second_bench.id,
+                "command_id": str(dispatch.command.id),
+                "operation_id": str(dispatch.operation.id),
+            },
+        )
+    ]
+
+
+@_run_async_test
+async def test_explicit_unauthorised_bench_uses_audited_require_without_side_effects() -> None:
+    definition = _workflow()
+    context, actor = _authenticated_workflow_actor(definition)
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation()
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [agent],
+        [bench],
+        authorisation=authorisation,
+    )
+
+    with pytest.raises(PermissionDeniedError, match="permission denied"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=definition,
+                owner="phase6/operator",
+                idempotency_key="explicit-bench-authz-denied",
+                authentication_context=context,
+                actor_context=actor,
+                organisation_id=definition.organisation_id,
+                bench_id=bench.id,
+            )
+        )
+
+    assert [(permission, resource.id) for permission, resource in authorisation.required] == [
+        ("workflows:run", definition.name),
+        ("benches:operate", bench.id),
+    ]
+    assert reservations.calls == []
+    assert artifacts.calls == []
+    assert commands.calls == []
+
+
+@_run_async_test
+async def test_runtime_authorisation_requires_identity_or_explicit_legacy_escape() -> None:
+    definition = _workflow()
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    coordinator, reservations, _, _ = _coordinator(
+        [agent],
+        [bench],
+        authorisation=authorisation,
+    )
+
+    with pytest.raises(AuthenticationRequiredError):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=definition,
+                owner="legacy",
+                idempotency_key="implicit-legacy-rejected",
+            )
+        )
+    escaped = await coordinator.run(
+        DistributedWorkflowRequest(
+            definition=definition,
+            owner="legacy",
+            idempotency_key="explicit-legacy-accepted",
+            allow_legacy_authorisation=True,
+        )
+    )
+
+    assert escaped.bench.id == bench.id
+    assert len(reservations.calls) == 1
+    assert authorisation.audited == []
+
+
+@_run_async_test
+async def test_authenticated_workflow_context_is_bound_to_actor_and_tenant() -> None:
+    definition = _workflow()
+    context, actor = _authenticated_workflow_actor(definition)
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    coordinator, reservations, artifacts, commands = _coordinator(
+        [agent],
+        [bench],
+        authorisation=authorisation,
+    )
+
+    with pytest.raises(WorkflowInvalidError, match="actor context"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=definition,
+                owner="phase6/operator",
+                idempotency_key="mismatched-actor",
+                authentication_context=context,
+                actor_context=actor.model_copy(update={"principal_id": UUID(int=999)}),
+                organisation_id=definition.organisation_id,
+            )
+        )
+    foreign_definition = definition.model_copy(update={"organisation_id": UUID(int=888)})
+    with pytest.raises(WorkflowInvalidError, match="trusted catalog"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=foreign_definition,
+                owner="phase6/operator",
+                idempotency_key="mismatched-tenant",
+                authentication_context=context,
+                actor_context=actor,
+                organisation_id=context.principal.organisation_id,
+            )
+        )
+
+    assert authorisation.required == []
+    assert reservations.calls == []
+    assert artifacts.calls == []
+    assert commands.calls == []

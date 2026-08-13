@@ -31,6 +31,8 @@ OTHER_AGENT_ID = UUID(int=102)
 BENCH_ID = "home-lab/bench-a"
 FINGERPRINT_A = "a" * 64
 FINGERPRINT_B = "b" * 64
+ORG_A = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+ORG_B = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
 
 def _database(path: Path) -> SQLiteDatabase:
@@ -230,6 +232,7 @@ def test_grant_persists_base_lease_coordination_and_restart_safe_replay(
         with pytest.raises(ReservationLeaseInvalidError):
             await repository.get_mutation_result(
                 "grant-1",
+                organisation_id=result.record.reservation.organisation_id,
                 request_fingerprint=FINGERPRINT_B,
             )
 
@@ -239,6 +242,7 @@ def test_grant_persists_base_lease_coordination_and_restart_safe_replay(
         assert await restarted.get(request.reservation.id) == result.record
         restarted_replay = await restarted.get_mutation_result(
             "grant-1",
+            organisation_id=result.record.reservation.organisation_id,
             request_fingerprint=FINGERPRINT_A,
         )
         assert restarted_replay is not None
@@ -252,6 +256,215 @@ def test_grant_persists_base_lease_coordination_and_restart_safe_replay(
         reopened.close()
 
     asyncio.run(scenario())
+
+
+def test_mutation_replay_is_tenant_scoped_for_direct_grants(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = _database(tmp_path / "tenant-mutations.db")
+        routes = (
+            (ORG_A, UUID(int=211), "tenant-a", "tenant-a/bench", UUID(int=213)),
+            (ORG_B, UUID(int=212), "tenant-b", "tenant-b/bench", UUID(int=214)),
+        )
+        with database.transaction(immediate=True) as connection:
+            for organisation_id, agent_id, slug, bench_id, _reservation_id in routes:
+                connection.execute(
+                    "INSERT INTO organisations "
+                    "(id, slug, name, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'ACTIVE', ?, ?)",
+                    (
+                        str(organisation_id),
+                        slug,
+                        slug,
+                        NOW.isoformat(),
+                        NOW.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO agents "
+                    "(id, slug, name, status, version, protocol_version, labels_json, "
+                    "registered_at, enrollment_status, organisation_id) "
+                    "VALUES (?, ?, ?, 'ONLINE', '0.6.0-alpha', '1.0', '{}', ?, "
+                    "'ENROLLED', ?)",
+                    (
+                        str(agent_id),
+                        slug,
+                        slug,
+                        (NOW - timedelta(days=1)).isoformat(),
+                        str(organisation_id),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO global_benches "
+                    "(id, agent_id, agent_slug, local_bench_id, name, backend_id, kind, "
+                    "status, health, capabilities_json, labels_json, last_seen_at, created_at, "
+                    "updated_at, organisation_id) "
+                    "VALUES (?, ?, ?, 'bench', ?, 'simlab', 'SIMULATED', 'ONLINE', "
+                    "'healthy', '[]', '{}', ?, ?, ?, ?)",
+                    (
+                        bench_id,
+                        str(agent_id),
+                        slug,
+                        bench_id,
+                        NOW.isoformat(),
+                        (NOW - timedelta(days=1)).isoformat(),
+                        NOW.isoformat(),
+                        str(organisation_id),
+                    ),
+                )
+
+        repository = SQLiteCentralReservationLeaseRepository(database)
+
+        def request_for(
+            organisation_id: UUID,
+            agent_id: UUID,
+            bench_id: str,
+            reservation_id: UUID,
+        ) -> ReservationGrantRequest:
+            return ReservationGrantRequest(
+                reservation=Reservation(
+                    id=reservation_id,
+                    organisation_id=organisation_id,
+                    bench_id=bench_id,
+                    owner=f"owner-{organisation_id}",
+                    created_at=NOW,
+                    requested_at=NOW,
+                    starts_at=NOW,
+                    ends_at=NOW + timedelta(hours=1),
+                    status=ReservationStatus.SCHEDULED,
+                    source=ReservationSource.API,
+                    idempotency_key="shared-direct-key",
+                ),
+                agent_id=agent_id,
+                lease_valid_until=NOW + timedelta(minutes=10),
+            )
+
+        requests = [
+            request_for(organisation_id, agent_id, bench_id, reservation_id)
+            for organisation_id, agent_id, _slug, bench_id, reservation_id in routes
+        ]
+        first = await repository.grant_if_eligible(
+            requests[0],
+            mutation_key="shared-direct-key",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        second = await repository.grant_if_eligible(
+            requests[1],
+            mutation_key="shared-direct-key",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        assert first is not None and first.disposition is LeaseWriteDisposition.APPLIED
+        assert second is not None and second.disposition is LeaseWriteDisposition.APPLIED
+        assert first.record.reservation.organisation_id == ORG_A
+        assert second.record.reservation.organisation_id == ORG_B
+        assert first.record.reservation.id != second.record.reservation.id
+
+        replay_a = await repository.grant_if_eligible(
+            requests[0],
+            mutation_key="shared-direct-key",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        replay_b = await repository.grant_if_eligible(
+            requests[1],
+            mutation_key="shared-direct-key",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        assert replay_a is not None and replay_a.disposition is LeaseWriteDisposition.REPLAY
+        assert replay_b is not None and replay_b.disposition is LeaseWriteDisposition.REPLAY
+        assert replay_a.record == first.record
+        assert replay_b.record == second.record
+        with pytest.raises(ReservationLeaseInvalidError):
+            await repository.get_mutation_result(
+                "shared-direct-key",
+                organisation_id=ORG_A,
+                request_fingerprint=FINGERPRINT_B,
+            )
+        with database.transaction() as connection:
+            mutation_scopes = connection.execute(
+                "SELECT organisation_id FROM reservation_lease_mutations "
+                "WHERE mutation_key = ? ORDER BY organisation_id",
+                ("shared-direct-key",),
+            ).fetchall()
+        assert [row[0] for row in mutation_scopes] == [str(ORG_A), str(ORG_B)]
+        database.close()
+
+    asyncio.run(scenario())
+
+
+def test_v9_mutation_replay_is_preserved_by_tenant_key_upgrade(tmp_path: Path) -> None:
+    async def seed(path: Path) -> CoordinatedReservationLease:
+        database = _database(path)
+        _seed_agent(database)
+        _seed_bench(database)
+        repository = SQLiteCentralReservationLeaseRepository(database)
+        result = await repository.grant_if_eligible(
+            _grant_request(UUID(int=215)),
+            mutation_key="legacy-mutation",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        assert result is not None
+        with database.transaction(immediate=True) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE reservation_lease_mutations_v9 (
+                    mutation_key TEXT PRIMARY KEY,
+                    request_fingerprint TEXT NOT NULL,
+                    reservation_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    organisation_id TEXT NOT NULL
+                );
+                INSERT INTO reservation_lease_mutations_v9
+                    (mutation_key, request_fingerprint, reservation_id, revision,
+                     result_json, created_at, organisation_id)
+                    SELECT mutation_key, request_fingerprint, reservation_id, revision,
+                           result_json, created_at, organisation_id
+                    FROM reservation_lease_mutations;
+                DROP TABLE reservation_lease_mutations;
+                ALTER TABLE reservation_lease_mutations_v9
+                    RENAME TO reservation_lease_mutations;
+                DELETE FROM schema_migrations WHERE version = 10;
+                """
+            )
+        database.close()
+        return result.record
+
+    async def verify(path: Path, expected: CoordinatedReservationLease) -> None:
+        upgraded = _database(path)
+        repository = SQLiteCentralReservationLeaseRepository(upgraded)
+        replay = await repository.get_mutation_result(
+            "legacy-mutation",
+            organisation_id=expected.reservation.organisation_id,
+            request_fingerprint=FINGERPRINT_A,
+        )
+        assert replay is not None
+        assert replay.disposition is LeaseWriteDisposition.REPLAY
+        assert replay.record == expected
+        with upgraded.transaction() as connection:
+            primary_key = [
+                row[1]
+                for row in sorted(
+                    connection.execute("PRAGMA table_info(reservation_lease_mutations)"),
+                    key=lambda row: row[5],
+                )
+                if row[5]
+            ]
+        assert primary_key == ["organisation_id", "mutation_key"]
+        upgraded.close()
+
+    path = tmp_path / "upgrade-mutation.db"
+    expected = asyncio.run(seed(path))
+    asyncio.run(verify(path, expected))
 
 
 def test_grant_atomically_checks_status_ownership_and_current_uniqueness(

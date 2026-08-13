@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from lab_platform.models import (
+    ActorContext,
     BenchRequest,
     CiOutcome,
     CiProvider,
@@ -21,6 +22,7 @@ from lab_platform.models import (
     ReservationStatus,
 )
 from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.migrations import DEFAULT_ORGANISATION_ID
 
 _ASSIGNABLE_SESSION_STATUSES = (
     CiSessionStatus.CREATED,
@@ -48,11 +50,12 @@ class SQLiteCiSessionRepository:
         idempotency_key: str | None = None,
         errors: Sequence[str] = (),
     ) -> CiSession:
+        organisation_id = _session_organisation_id(session)
         with self._database.transaction(immediate=True) as connection:
             if idempotency_key is not None:
                 existing = connection.execute(
-                    "SELECT * FROM ci_sessions WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT * FROM ci_sessions WHERE idempotency_key = ? AND organisation_id = ?",
+                    (idempotency_key, str(organisation_id)),
                 ).fetchone()
                 if existing is not None:
                     return _session_from_row(existing)
@@ -60,12 +63,15 @@ class SQLiteCiSessionRepository:
                 connection.execute(
                     "INSERT INTO ci_sessions "
                     "(id, provider, external_run_id, repository, ref, commit_sha, actor, "
-                    "requested_by, bench_id, reservation_id, workflow_run_id, status, "
+                    "requested_by, organisation_id, requested_by_principal_id, "
+                    "requested_by_principal_type, cancel_actor_context_json, "
+                    "cancel_authorisation_snapshot_id, bench_id, reservation_id, workflow_run_id, "
+                    "status, "
                     "created_at, started_at, completed_at, heartbeat_at, timeout_at, "
                     "cleanup_status, bench_request_json, idempotency_key, outcome, errors_json, "
                     "workflow_launch_idempotency_key, finalize_idempotency_key) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                    "?, ?)",
+                    "?, ?, ?, ?, ?, ?, ?)",
                     (
                         *_session_values(session),
                         idempotency_key,
@@ -79,39 +85,74 @@ class SQLiteCiSessionRepository:
                 if idempotency_key is None:
                     raise
                 existing = connection.execute(
-                    "SELECT * FROM ci_sessions WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT * FROM ci_sessions WHERE idempotency_key = ? AND organisation_id = ?",
+                    (idempotency_key, str(organisation_id)),
                 ).fetchone()
                 if existing is None:
                     raise
                 return _session_from_row(existing)
         return session
 
-    async def get(self, session_id: UUID) -> CiSession | None:
+    async def get(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CiSession | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(session_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(session_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM ci_sessions WHERE id = ?", (str(session_id),)
+                f"SELECT * FROM ci_sessions WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _session_from_row(row) if row is not None else None
 
-    async def get_by_idempotency_key(self, key: str) -> CiSession | None:
+    async def get_by_idempotency_key(
+        self,
+        key: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CiSession | None:
+        scope_id = organisation_id or UUID(DEFAULT_ORGANISATION_ID)
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM ci_sessions WHERE idempotency_key = ?", (key,)
+                "SELECT * FROM ci_sessions WHERE idempotency_key = ? AND organisation_id = ?",
+                (key, str(scope_id)),
             ).fetchone()
         return _session_from_row(row) if row is not None else None
 
-    async def get_by_workflow_launch_idempotency_key(self, key: str) -> CiSession | None:
+    async def get_by_workflow_launch_idempotency_key(
+        self,
+        key: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CiSession | None:
+        scope_id = organisation_id or UUID(DEFAULT_ORGANISATION_ID)
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM ci_sessions WHERE workflow_launch_idempotency_key = ?", (key,)
+                "SELECT * FROM ci_sessions WHERE workflow_launch_idempotency_key = ? "
+                "AND organisation_id = ?",
+                (key, str(scope_id)),
             ).fetchone()
         return _session_from_row(row) if row is not None else None
 
-    async def get_by_finalize_idempotency_key(self, key: str) -> CiSession | None:
+    async def get_by_finalize_idempotency_key(
+        self,
+        key: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CiSession | None:
+        scope_id = organisation_id or UUID(DEFAULT_ORGANISATION_ID)
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM ci_sessions WHERE finalize_idempotency_key = ?", (key,)
+                "SELECT * FROM ci_sessions WHERE finalize_idempotency_key = ? "
+                "AND organisation_id = ?",
+                (key, str(scope_id)),
             ).fetchone()
         return _session_from_row(row) if row is not None else None
 
@@ -149,8 +190,11 @@ class SQLiteCiSessionRepository:
         with self._database.transaction(immediate=True) as connection:
             cursor = connection.execute(
                 "UPDATE ci_sessions SET provider = ?, external_run_id = ?, repository = ?, "
-                "ref = ?, commit_sha = ?, actor = ?, requested_by = ?, bench_id = ?, "
-                "reservation_id = ?, workflow_run_id = ?, status = ?, created_at = ?, "
+                "ref = ?, commit_sha = ?, actor = ?, requested_by = ?, organisation_id = ?, "
+                "requested_by_principal_id = ?, requested_by_principal_type = ?, "
+                "cancel_actor_context_json = ?, cancel_authorisation_snapshot_id = ?, "
+                "bench_id = ?, reservation_id = ?, workflow_run_id = ?, status = ?, "
+                "created_at = ?, "
                 "started_at = ?, completed_at = ?, heartbeat_at = ?, timeout_at = ?, "
                 "cleanup_status = ?, bench_request_json = ?, outcome = ?, "
                 f"errors_json = {error_expression} WHERE id = ?{condition}",
@@ -161,6 +205,7 @@ class SQLiteCiSessionRepository:
     async def list(
         self,
         *,
+        organisation_id: UUID | None = None,
         status: CiSessionStatus | None = None,
         provider: CiProvider | None = None,
         limit: int = 500,
@@ -169,6 +214,9 @@ class SQLiteCiSessionRepository:
             raise ValueError("limit must be positive")
         conditions: list[str] = []
         values: list[object] = []
+        if organisation_id is not None:
+            conditions.append("organisation_id = ?")
+            values.append(str(organisation_id))
         if status is not None:
             conditions.append("status = ?")
             values.append(status.value)
@@ -218,10 +266,22 @@ class SQLiteCiSessionRepository:
             ).fetchall()
         return [_session_from_row(row) for row in rows]
 
-    async def errors(self, session_id: UUID) -> builtins.list[str]:
+    async def errors(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> builtins.list[str]:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(session_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(session_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT errors_json FROM ci_sessions WHERE id = ?", (str(session_id),)
+                f"SELECT errors_json FROM ci_sessions WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return list(json.loads(row["errors_json"])) if row is not None else []
 
@@ -251,23 +311,46 @@ class SQLiteCiSessionRepository:
         """Attach one workflow run and remember the launch idempotency key."""
 
         with self._database.transaction(immediate=True) as connection:
+            current = connection.execute(
+                "SELECT * FROM ci_sessions WHERE id = ?",
+                (str(session_id),),
+            ).fetchone()
+            if current is None:
+                return None
+            organisation_id = current["organisation_id"]
             row = connection.execute(
-                "SELECT * FROM ci_sessions WHERE workflow_launch_idempotency_key = ?",
-                (idempotency_key,),
+                "SELECT * FROM ci_sessions WHERE workflow_launch_idempotency_key = ? "
+                "AND organisation_id = ?",
+                (idempotency_key, organisation_id),
             ).fetchone()
             if row is not None:
                 return _session_from_row(row)
+            if (
+                connection.execute(
+                    "SELECT 1 FROM workflow_runs WHERE id = ? AND organisation_id = ?",
+                    (str(workflow_run_id), organisation_id),
+                ).fetchone()
+                is None
+            ):
+                return None
             cursor = connection.execute(
                 "UPDATE ci_sessions SET workflow_run_id = ?, "
                 "workflow_launch_idempotency_key = ?, status = 'running', "
                 "started_at = COALESCE(started_at, ?) WHERE id = ? "
-                "AND workflow_run_id IS NULL AND status = 'reserved'",
-                (str(workflow_run_id), idempotency_key, started_at.isoformat(), str(session_id)),
+                "AND organisation_id = ? AND workflow_run_id IS NULL AND status = 'reserved'",
+                (
+                    str(workflow_run_id),
+                    idempotency_key,
+                    started_at.isoformat(),
+                    str(session_id),
+                    organisation_id,
+                ),
             )
             if cursor.rowcount != 1:
                 return None
             updated = connection.execute(
-                "SELECT * FROM ci_sessions WHERE id = ?", (str(session_id),)
+                "SELECT * FROM ci_sessions WHERE id = ? AND organisation_id = ?",
+                (str(session_id), organisation_id),
             ).fetchone()
         return _session_from_row(updated)
 
@@ -295,21 +378,28 @@ class SQLiteCiSessionRepository:
         """
 
         with self._database.transaction(immediate=True) as connection:
-            claimed = connection.execute(
-                "SELECT ci.* FROM distributed_ci_workflows binding "
-                "JOIN ci_sessions ci ON ci.id = binding.ci_session_id "
-                "WHERE binding.launch_idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            if claimed is not None:
-                return _session_from_row(claimed)
             current = connection.execute(
                 "SELECT * FROM ci_sessions WHERE id = ?",
                 (str(session_id),),
             ).fetchone()
+            if current is None:
+                return None
+            organisation_id = current["organisation_id"]
+            # These identifiers are not accepted from a raw API request: the distributed
+            # coordinator has already selected, authorised, and durably persisted them.
+            # This projection therefore fences replay and mutation by the session's stored
+            # tenant while the source repositories enforce their own tenant ownership.
+            claimed = connection.execute(
+                "SELECT ci.* FROM distributed_ci_workflows binding "
+                "JOIN ci_sessions ci ON ci.id = binding.ci_session_id "
+                "WHERE binding.launch_idempotency_key = ? "
+                "AND binding.organisation_id = ?",
+                (idempotency_key, organisation_id),
+            ).fetchone()
+            if claimed is not None:
+                return _session_from_row(claimed)
             if (
-                current is None
-                or current["bench_id"] is not None
+                current["bench_id"] is not None
                 or current["reservation_id"] is not None
                 or current["workflow_run_id"] is not None
                 or current["workflow_launch_idempotency_key"] is not None
@@ -318,11 +408,13 @@ class SQLiteCiSessionRepository:
                 return None
             connection.execute(
                 "INSERT INTO distributed_ci_workflows "
-                "(ci_session_id, remote_command_id, operation_id, agent_id, bench_id, "
+                "(ci_session_id, organisation_id, remote_command_id, operation_id, "
+                "agent_id, bench_id, "
                 "reservation_id, workflow_name, workflow_version, launch_idempotency_key, "
-                "request_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "request_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(session_id),
+                    current["organisation_id"],
                     str(remote_command_id),
                     str(operation_id),
                     str(agent_id),
@@ -339,7 +431,8 @@ class SQLiteCiSessionRepository:
                 "UPDATE ci_sessions SET bench_id = ?, reservation_id = ?, "
                 "workflow_launch_idempotency_key = ?, "
                 "status = 'running', started_at = COALESCE(started_at, ?) "
-                "WHERE id = ? AND bench_id IS NULL AND reservation_id IS NULL "
+                "WHERE id = ? AND organisation_id = ? "
+                "AND bench_id IS NULL AND reservation_id IS NULL "
                 "AND workflow_run_id IS NULL AND workflow_launch_idempotency_key IS NULL "
                 "AND status IN ('created', 'waiting_for_bench')",
                 (
@@ -348,23 +441,52 @@ class SQLiteCiSessionRepository:
                     idempotency_key,
                     started_at.isoformat(),
                     str(session_id),
+                    organisation_id,
                 ),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("Distributed CI workflow attachment lost its transaction")
             updated = connection.execute(
-                "SELECT * FROM ci_sessions WHERE id = ?", (str(session_id),)
+                "SELECT * FROM ci_sessions WHERE id = ? AND organisation_id = ?",
+                (str(session_id), organisation_id),
             ).fetchone()
         return _session_from_row(updated)
 
     async def get_distributed_workflow(
         self,
         session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
     ) -> DistributedCiWorkflowBinding | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(session_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(session_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM distributed_ci_workflows WHERE ci_session_id = ?",
-                (str(session_id),),
+                f"SELECT * FROM distributed_ci_workflows WHERE ci_session_id = ?{scope}",  # noqa: S608
+                values,
+            ).fetchone()
+        return _distributed_binding_from_row(row) if row is not None else None
+
+    async def get_distributed_workflow_for_operation(
+        self,
+        operation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> DistributedCiWorkflowBinding | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(operation_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(operation_id),)
+        )
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                f"SELECT * FROM distributed_ci_workflows WHERE operation_id = ?{scope} LIMIT 1",  # noqa: S608
+                values,
             ).fetchone()
         return _distributed_binding_from_row(row) if row is not None else None
 
@@ -377,10 +499,12 @@ class SQLiteCiSessionRepository:
     ) -> CiSession | None:
         """Persist final state exactly once for a retryable finalization request."""
 
+        organisation_id = _session_organisation_id(session)
         with self._database.transaction(immediate=True) as connection:
             existing = connection.execute(
-                "SELECT * FROM ci_sessions WHERE finalize_idempotency_key = ?",
-                (idempotency_key,),
+                "SELECT * FROM ci_sessions WHERE finalize_idempotency_key = ? "
+                "AND organisation_id = ?",
+                (idempotency_key, str(organisation_id)),
             ).fetchone()
             if existing is not None:
                 return _session_from_row(existing)
@@ -391,21 +515,25 @@ class SQLiteCiSessionRepository:
             ]
             if errors is not None:
                 values.append(_dump_errors(errors))
-            values.extend((idempotency_key, str(session.id)))
+            values.extend((idempotency_key, str(session.id), str(organisation_id)))
             cursor = connection.execute(
                 "UPDATE ci_sessions SET provider = ?, external_run_id = ?, repository = ?, "
-                "ref = ?, commit_sha = ?, actor = ?, requested_by = ?, bench_id = ?, "
-                "reservation_id = ?, workflow_run_id = ?, status = ?, created_at = ?, "
+                "ref = ?, commit_sha = ?, actor = ?, requested_by = ?, organisation_id = ?, "
+                "requested_by_principal_id = ?, requested_by_principal_type = ?, "
+                "cancel_actor_context_json = ?, cancel_authorisation_snapshot_id = ?, "
+                "bench_id = ?, reservation_id = ?, workflow_run_id = ?, status = ?, "
+                "created_at = ?, "
                 "started_at = ?, completed_at = ?, heartbeat_at = ?, timeout_at = ?, "
                 "cleanup_status = ?, bench_request_json = ?, outcome = ?, "
                 f"errors_json = {error_expression}, finalize_idempotency_key = ? WHERE id = ? "
-                "AND finalize_idempotency_key IS NULL",
+                "AND organisation_id = ? AND finalize_idempotency_key IS NULL",
                 values,
             )
             if cursor.rowcount != 1:
                 return None
             updated = connection.execute(
-                "SELECT * FROM ci_sessions WHERE id = ?", (str(session.id),)
+                "SELECT * FROM ci_sessions WHERE id = ? AND organisation_id = ?",
+                (str(session.id), str(organisation_id)),
             ).fetchone()
         return _session_from_row(updated)
 
@@ -488,7 +616,13 @@ class SQLiteCiSessionRepository:
                 if CiSessionStatus(session_row["status"]) not in _ASSIGNABLE_SESSION_STATUSES:
                     return None
 
-                candidates = _compatible_candidates(connection, request, now)
+                organisation_id = UUID(session_row["organisation_id"])
+                candidates = _compatible_candidates(
+                    connection,
+                    request,
+                    now,
+                    organisation_id=organisation_id,
+                )
                 selected = next(
                     (candidate for candidate in candidates if candidate.available), None
                 )
@@ -501,14 +635,19 @@ class SQLiteCiSessionRepository:
                 metadata = json.dumps({"ci_session_id": str(session_id)}, sort_keys=True)
                 connection.execute(
                     "INSERT INTO reservations "
-                    "(id, bench_id, owner, created_at, released_at, status, requested_at, "
+                    "(id, bench_id, owner, owner_principal_id, owner_principal_type, "
+                    "organisation_id, "
+                    "created_at, released_at, status, requested_at, "
                     "starts_at, ends_at, activated_at, expired_at, source, metadata, "
                     "idempotency_key, release_pending) "
-                    "VALUES (?, ?, ?, ?, NULL, 'active', ?, ?, ?, ?, NULL, 'ci', ?, ?, 0)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?, ?, ?, NULL, 'ci', ?, ?, 0)",
                     (
                         str(created_reservation_id),
                         selected.bench_id,
                         requested_by,
+                        session_row["requested_by_principal_id"],
+                        session_row["requested_by_principal_type"],
+                        session_row["organisation_id"],
                         now.isoformat(),
                         now.isoformat(),
                         now.isoformat(),
@@ -563,12 +702,16 @@ def _compatible_candidates(
     connection: sqlite3.Connection,
     request: BenchRequest,
     now: datetime,
+    *,
+    organisation_id: UUID,
 ) -> list[_Candidate]:
     rows = connection.execute(
         "SELECT catalog.id, catalog.capabilities_json, catalog.labels_json, backend.type "
         "AS backend_type FROM bench_catalog catalog "
         "JOIN backend_registrations backend ON backend.id = catalog.backend_id "
-        "WHERE catalog.online = 1 ORDER BY catalog.id"
+        "WHERE catalog.online = 1 AND catalog.organisation_id = ? "
+        "AND backend.organisation_id = ? ORDER BY catalog.id",
+        (str(organisation_id), str(organisation_id)),
     ).fetchall()
     required_capabilities = {item.casefold() for item in request.required_capabilities}
     candidates: list[_Candidate] = []
@@ -589,14 +732,20 @@ def _compatible_candidates(
         labels = {str(key): str(value) for key, value in json.loads(row["labels_json"]).items()}
         if any(labels.get(key) != value for key, value in request.required_labels.items()):
             continue
-        available = _bench_is_available(connection, bench_id, now, request)
+        available = _bench_is_available(
+            connection,
+            bench_id,
+            now,
+            request,
+            organisation_id=organisation_id,
+        )
         preferred_score = sum(
             1 for key, value in request.preferred_labels.items() if labels.get(key) == value
         )
         last_used_row = connection.execute(
             "SELECT MAX(activated_at) AS last_used_at FROM reservations "
-            "WHERE bench_id = ? AND activated_at IS NOT NULL",
-            (bench_id,),
+            "WHERE bench_id = ? AND organisation_id = ? AND activated_at IS NOT NULL",
+            (bench_id, str(organisation_id)),
         ).fetchone()
         candidates.append(
             _Candidate(
@@ -623,21 +772,24 @@ def _bench_is_available(
     bench_id: str,
     now: datetime,
     request: BenchRequest,
+    *,
+    organisation_id: UUID,
 ) -> bool:
     if (
         connection.execute(
-            "SELECT 1 FROM operation_locks WHERE bench_id = ? LIMIT 1", (bench_id,)
+            "SELECT 1 FROM operation_locks WHERE bench_id = ? AND organisation_id = ? LIMIT 1",
+            (bench_id, str(organisation_id)),
         ).fetchone()
         is not None
     ):
         return False
     requested_end = now + timedelta(seconds=request.reservation_duration_seconds)
     conflict = connection.execute(
-        "SELECT 1 FROM reservations WHERE bench_id = ? AND ("
+        "SELECT 1 FROM reservations WHERE bench_id = ? AND organisation_id = ? AND ("
         "status IN ('active', 'expired_pending_operation') OR ("
         "status = 'scheduled' AND (starts_at IS NULL OR ends_at IS NULL OR "
         "(starts_at < ? AND ends_at > ?)))) LIMIT 1",
-        (bench_id, requested_end.isoformat(), now.isoformat()),
+        (bench_id, str(organisation_id), requested_end.isoformat(), now.isoformat()),
     ).fetchone()
     return conflict is None
 
@@ -652,6 +804,27 @@ def _session_values(session: CiSession) -> tuple[object, ...]:
         session.commit_sha,
         session.actor,
         session.requested_by,
+        str(_session_organisation_id(session)),
+        (
+            str(session.requested_by_principal_id)
+            if session.requested_by_principal_id is not None
+            else None
+        ),
+        (
+            session.requested_by_principal_type.value
+            if session.requested_by_principal_type is not None
+            else None
+        ),
+        (
+            session.cancel_actor_context.model_dump_json()
+            if session.cancel_actor_context is not None
+            else None
+        ),
+        (
+            str(session.cancel_authorisation_snapshot_id)
+            if session.cancel_authorisation_snapshot_id is not None
+            else None
+        ),
         session.bench_id,
         str(session.reservation_id) if session.reservation_id is not None else None,
         str(session.workflow_run_id) if session.workflow_run_id is not None else None,
@@ -670,6 +843,10 @@ def _session_update_values(session: CiSession) -> tuple[object, ...]:
     return _session_values(session)[1:]
 
 
+def _session_organisation_id(session: CiSession) -> UUID:
+    return session.organisation_id or UUID(DEFAULT_ORGANISATION_ID)
+
+
 def _session_from_row(row: sqlite3.Row) -> CiSession:
     bench_request = row["bench_request_json"]
     return CiSession(
@@ -681,6 +858,25 @@ def _session_from_row(row: sqlite3.Row) -> CiSession:
         commit_sha=row["commit_sha"],
         actor=row["actor"],
         requested_by=row["requested_by"],
+        organisation_id=(
+            UUID(row["organisation_id"])
+            if row["requested_by_principal_id"] and row["organisation_id"]
+            else None
+        ),
+        requested_by_principal_id=(
+            UUID(row["requested_by_principal_id"]) if row["requested_by_principal_id"] else None
+        ),
+        requested_by_principal_type=row["requested_by_principal_type"],
+        cancel_actor_context=(
+            ActorContext.model_validate_json(row["cancel_actor_context_json"])
+            if row["cancel_actor_context_json"]
+            else None
+        ),
+        cancel_authorisation_snapshot_id=(
+            UUID(row["cancel_authorisation_snapshot_id"])
+            if row["cancel_authorisation_snapshot_id"]
+            else None
+        ),
         bench_id=row["bench_id"],
         reservation_id=UUID(row["reservation_id"]) if row["reservation_id"] else None,
         workflow_run_id=UUID(row["workflow_run_id"]) if row["workflow_run_id"] else None,
@@ -715,8 +911,11 @@ def _distributed_binding_from_row(row: sqlite3.Row) -> DistributedCiWorkflowBind
 def _reservation_from_row(row: sqlite3.Row) -> Reservation:
     return Reservation(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         bench_id=row["bench_id"],
         owner=row["owner"],
+        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
+        owner_principal_type=row["owner_principal_type"],
         created_at=datetime.fromisoformat(row["created_at"]),
         released_at=_parse_datetime(row["released_at"]),
         status=ReservationStatus(row["status"]),

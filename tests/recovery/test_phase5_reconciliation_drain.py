@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -30,15 +30,21 @@ from lab_platform.control_plane_core.reconciliation import (
     ReportClaimStatus,
     reconciliation_report_digest,
 )
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError, PermissionDeniedError
 from lab_platform.models import (
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
     DistributedOperation,
     DistributedOperationStatus,
     EnrollmentStatus,
     GlobalBenchKind,
     GlobalBenchStatus,
     HealthStatus,
+    OrganisationMembership,
+    Principal,
+    PrincipalType,
     ReconciliationBenchSnapshot,
     ReconciliationCommandState,
     ReconciliationReport,
@@ -46,12 +52,50 @@ from lab_platform.models import (
     RemoteCommandStatus,
     RemoteCommandType,
     ReservationLease,
+    ResourceType,
+    RoleAssignment,
+    RoleName,
+    RoleSubjectType,
 )
 
 NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 AGENT_ID = UUID(int=1)
 OLD_BOOT_ID = UUID(int=101)
 NEW_BOOT_ID = UUID(int=102)
+PHASE6_DRAIN_PRINCIPAL_ID = UUID(int=80_001)
+
+
+class ScopedAuthorisationRepository:
+    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
+        self.assignments = tuple(assignments)
+
+    async def get_organisation_membership(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> OrganisationMembership | None:
+        del organisation_id, user_id
+        return None
+
+    async def list_team_ids_for_user(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> Collection[UUID]:
+        del organisation_id, user_id
+        return ()
+
+    async def list_role_assignments(
+        self,
+        organisation_id: UUID,
+        subjects: Collection[tuple[RoleSubjectType, UUID]],
+    ) -> Sequence[RoleAssignment]:
+        return tuple(
+            assignment
+            for assignment in self.assignments
+            if assignment.organisation_id == organisation_id
+            and (assignment.subject_type, assignment.subject_id) in subjects
+        )
 
 
 def _agent(status: AgentStatus = AgentStatus.ONLINE, *, number: int = 1) -> AgentRecord:
@@ -849,6 +893,42 @@ def _drain_snapshot(
     )
 
 
+def _phase6_drain_identity(
+    role: RoleName,
+    *,
+    resource_id: UUID = AGENT_ID,
+    permission_restrictions: set[str] | None = None,
+    principal_id: UUID = PHASE6_DRAIN_PRINCIPAL_ID,
+) -> tuple[AuthorisationService, AuthenticationContext]:
+    organisation_id = _agent().organisation_id
+    principal = Principal(
+        id=principal_id,
+        type=PrincipalType.USER,
+        organisation_id=organisation_id,
+        display_name=role.value,
+    )
+    assignment = RoleAssignment(
+        organisation_id=organisation_id,
+        subject_type=RoleSubjectType.USER,
+        subject_id=principal.id,
+        role=role,
+        resource_type=ResourceType.AGENT,
+        resource_id=str(resource_id),
+        created_by=principal.id,
+        created_at=NOW - timedelta(minutes=1),
+    )
+    return (
+        AuthorisationService(
+            ScopedAuthorisationRepository((assignment,)),
+            clock=lambda: NOW,
+        ),
+        AuthenticationContext(
+            principal=principal,
+            permission_restrictions=permission_restrictions,
+        ),
+    )
+
+
 def test_drain_closes_gate_and_waits_for_every_workload_class() -> None:
     async def scenario() -> None:
         repository = FakeDrainRepository(
@@ -974,5 +1054,121 @@ def test_drain_status_validation_and_degraded_entry() -> None:
             await service.drain(revoked.agent.id)
         with pytest.raises(AgentNotFoundError):
             await service.drain(UUID(int=999))
+
+    asyncio.run(scenario())
+
+
+def test_phase6_drain_authorisation_precedes_status_and_queue_mutations() -> None:
+    async def scenario() -> None:
+        repository = FakeDrainRepository(
+            _drain_snapshot(
+                AgentStatus.ONLINE,
+                workload=AgentWorkload(queued_ci_sessions=2),
+            )
+        )
+        service = AgentDrainService(repository)
+        viewer, viewer_context = _phase6_drain_identity(RoleName.VIEWER)
+        service.set_authorisation_service(viewer)
+
+        with pytest.raises(AuthenticationRequiredError):
+            await service.drain(AGENT_ID)
+        with pytest.raises(PermissionDeniedError):
+            await service.drain(
+                AGENT_ID,
+                cancel_queued_work=True,
+                authentication_context=viewer_context,
+            )
+        assert repository.cas_calls == []
+        assert repository.cancel_statuses == []
+        assert repository.snapshots[AGENT_ID].agent.status is AgentStatus.ONLINE
+
+        wrong_scope, wrong_context = _phase6_drain_identity(
+            RoleName.LAB_ADMIN,
+            resource_id=UUID(int=80_010),
+            principal_id=UUID(int=80_002),
+        )
+        service.set_authorisation_service(wrong_scope)
+        with pytest.raises(PermissionDeniedError):
+            await service.drain(AGENT_ID, authentication_context=wrong_context)
+
+        narrowed, narrowed_context = _phase6_drain_identity(
+            RoleName.LAB_ADMIN,
+            permission_restrictions={"agents:read"},
+            principal_id=UUID(int=80_003),
+        )
+        service.set_authorisation_service(narrowed)
+        with pytest.raises(PermissionDeniedError):
+            await service.drain(AGENT_ID, authentication_context=narrowed_context)
+        assert repository.cas_calls == []
+        assert repository.cancel_statuses == []
+
+        administrator, admin_context = _phase6_drain_identity(
+            RoleName.LAB_ADMIN,
+            principal_id=UUID(int=80_004),
+        )
+        service.set_authorisation_service(administrator)
+        result = await service.drain(
+            AGENT_ID,
+            cancel_queued_work=True,
+            authentication_context=admin_context,
+        )
+        assert result.agent.status is AgentStatus.DRAINED
+        assert result.cancelled_queued_work == 2
+
+        legacy_repository = FakeDrainRepository(_drain_snapshot(AgentStatus.ONLINE))
+        legacy_service = AgentDrainService(legacy_repository)
+        legacy_service.set_authorisation_service(viewer)
+        legacy = await legacy_service.drain(
+            AGENT_ID,
+            allow_legacy_authorisation=True,
+        )
+        assert legacy.agent.status is AgentStatus.DRAINED
+
+    asyncio.run(scenario())
+
+
+def test_phase6_refresh_and_undrain_authorise_before_cas() -> None:
+    async def scenario() -> None:
+        viewer, viewer_context = _phase6_drain_identity(RoleName.VIEWER)
+
+        refresh_repository = FakeDrainRepository(
+            _drain_snapshot(AgentStatus.DRAINING),
+        )
+        refresh_service = AgentDrainService(refresh_repository)
+        refresh_service.set_authorisation_service(viewer)
+        with pytest.raises(PermissionDeniedError):
+            await refresh_service.refresh(
+                AGENT_ID,
+                authentication_context=viewer_context,
+            )
+        assert refresh_repository.cas_calls == []
+        refreshed = await refresh_service.refresh(
+            AGENT_ID,
+            allow_internal_authorisation=True,
+        )
+        assert refreshed.agent.status is AgentStatus.DRAINED
+
+        undrain_repository = FakeDrainRepository(
+            _drain_snapshot(AgentStatus.DRAINED),
+        )
+        undrain_service = AgentDrainService(undrain_repository)
+        undrain_service.set_authorisation_service(viewer)
+        with pytest.raises(PermissionDeniedError):
+            await undrain_service.undrain(
+                AGENT_ID,
+                authentication_context=viewer_context,
+            )
+        assert undrain_repository.cas_calls == []
+
+        administrator, admin_context = _phase6_drain_identity(
+            RoleName.LAB_ADMIN,
+            principal_id=UUID(int=80_005),
+        )
+        undrain_service.set_authorisation_service(administrator)
+        restored = await undrain_service.undrain(
+            AGENT_ID,
+            authentication_context=admin_context,
+        )
+        assert restored.status is AgentStatus.ONLINE
 
     asyncio.run(scenario())

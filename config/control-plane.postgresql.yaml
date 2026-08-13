@@ -37,6 +37,40 @@ distributed:
   operation_reconciliation_timeout_seconds: 600
   queue_commands_for_offline_agents: false
 
+identity:
+  enabled: true
+  default_organisation_slug: default
+  default_organisation_name: Default Organisation
+  local_auth:
+    enabled: true
+    minimum_password_length: 12
+  oidc:
+    enabled: false
+    # Set issuer_url, client_id, and client_secret_env before enabling OIDC.
+    scopes:
+      - openid
+      - profile
+      - email
+  sessions:
+    access_token_minutes: 15
+    session_hours: 12
+    maximum_session_days: 7
+
+authorisation:
+  default_bench_visibility: organisation
+  hide_unauthorised_resources: true
+  legacy_token_compatibility_enabled: true
+
+audit:
+  enabled: true
+  retention_days: 90
+
+security:
+  login_rate_limit:
+    attempts: 10
+    window_minutes: 15
+
 development:
+  enabled: false
   allow_insecure_agent_transport: false
   allow_tls_termination_proxy: false

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from lab_platform.agent_protocol import (
@@ -33,9 +33,16 @@ from lab_platform.control_plane_core.errors import (
     RemoteCommandExpiredError,
     RemoteCommandNotFoundError,
 )
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError, PermissionDeniedError
 from lab_platform.models import (
+    ActorContext,
     AgentRecord,
     AgentStatus,
+    AuditEvent,
+    AuthenticationContext,
+    AuthorisationSnapshot,
+    DistributedCiWorkflowBinding,
     DistributedOperation,
     DistributedOperationStatus,
     EnrollmentStatus,
@@ -43,11 +50,19 @@ from lab_platform.models import (
     GlobalBenchRecord,
     GlobalBenchStatus,
     HealthStatus,
+    OrganisationMembership,
+    Principal,
+    PrincipalType,
     RemoteCommand,
     RemoteCommandAttempt,
     RemoteCommandStatus,
     RemoteCommandType,
     ReservationLease,
+    ResourceType,
+    RoleAssignment,
+    RoleName,
+    RoleSubjectType,
+    WorkflowDefinition,
 )
 
 NOW = datetime(2026, 7, 29, 9, tzinfo=UTC)
@@ -56,6 +71,103 @@ OTHER_AGENT_ID = UUID("10000000-0000-0000-0000-000000000002")
 CONNECTION_ID = UUID("20000000-0000-0000-0000-000000000001")
 RESERVATION_ID = UUID("30000000-0000-0000-0000-000000000001")
 BENCH_ID = "home-lab/esp32-01"
+PHASE6_PRINCIPAL_ID = UUID(int=60_001)
+
+
+class ScopedAuthorisationRepository:
+    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
+        self.assignments = tuple(assignments)
+
+    async def get_organisation_membership(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> OrganisationMembership | None:
+        del organisation_id, user_id
+        return None
+
+    async def list_team_ids_for_user(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> Collection[UUID]:
+        del organisation_id, user_id
+        return ()
+
+    async def list_role_assignments(
+        self,
+        organisation_id: UUID,
+        subjects: Collection[tuple[RoleSubjectType, UUID]],
+    ) -> Sequence[RoleAssignment]:
+        return tuple(
+            assignment
+            for assignment in self.assignments
+            if assignment.organisation_id == organisation_id
+            and (assignment.subject_type, assignment.subject_id) in subjects
+        )
+
+
+class InMemoryAuthorisationSnapshotRepository:
+    def __init__(self) -> None:
+        self.records: dict[tuple[UUID, UUID], AuthorisationSnapshot] = {}
+
+    async def create_authorisation_snapshot(
+        self,
+        organisation_id: UUID,
+        snapshot: AuthorisationSnapshot,
+    ) -> AuthorisationSnapshot:
+        self.records[(organisation_id, snapshot.id)] = snapshot
+        return snapshot
+
+    async def get_authorisation_snapshot(
+        self,
+        organisation_id: UUID,
+        snapshot_id: UUID,
+    ) -> AuthorisationSnapshot | None:
+        return self.records.get((organisation_id, snapshot_id))
+
+
+class InMemoryWorkflowDefinitionCatalog:
+    def __init__(self, *definitions: WorkflowDefinition) -> None:
+        self.definitions = {
+            (definition.organisation_id, definition.name, definition.version): definition
+            for definition in definitions
+        }
+
+    async def get_definition(
+        self,
+        name: str,
+        version: int | None = None,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> WorkflowDefinition | None:
+        assert version is not None
+        assert organisation_id is not None
+        return self.definitions.get((organisation_id, name, version))
+
+
+class InMemoryCiCancellationBindings:
+    def __init__(self, binding: DistributedCiWorkflowBinding) -> None:
+        self.binding = binding
+
+    async def get_distributed_workflow(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> DistributedCiWorkflowBinding | None:
+        if session_id != self.binding.ci_session_id or organisation_id != _bench().organisation_id:
+            return None
+        return self.binding
+
+
+class InMemoryAuditRepository:
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def create_audit_event(self, event: AuditEvent) -> AuditEvent:
+        self.events.append(event)
+        return event
 
 
 @dataclass
@@ -198,6 +310,50 @@ def _lease(
     )
 
 
+def _phase6_command_identity(
+    role: RoleName,
+    *,
+    resource_id: str = BENCH_ID,
+    permission_restrictions: set[str] | None = None,
+    principal_id: UUID = PHASE6_PRINCIPAL_ID,
+) -> tuple[AuthorisationService, AuthenticationContext, ActorContext]:
+    organisation_id = _bench().organisation_id
+    principal = Principal(
+        id=principal_id,
+        type=PrincipalType.USER,
+        organisation_id=organisation_id,
+        display_name=role.value,
+    )
+    assignment = RoleAssignment(
+        organisation_id=organisation_id,
+        subject_type=RoleSubjectType.USER,
+        subject_id=principal.id,
+        role=role,
+        resource_type=ResourceType.BENCH,
+        resource_id=resource_id,
+        created_by=principal.id,
+        created_at=NOW - timedelta(minutes=1),
+    )
+    context = AuthenticationContext(
+        principal=principal,
+        permission_restrictions=permission_restrictions,
+    )
+    actor = ActorContext(
+        principal_id=principal.id,
+        principal_type=principal.type,
+        display_name=principal.display_name,
+        organisation_id=principal.organisation_id,
+    )
+    return (
+        AuthorisationService(
+            ScopedAuthorisationRepository((assignment,)),
+            clock=lambda: NOW,
+        ),
+        context,
+        actor,
+    )
+
+
 def _stack(
     *,
     status: AgentStatus = AgentStatus.ONLINE,
@@ -223,6 +379,7 @@ def _stack(
         reconciliation_timeout_seconds=90,
         clock=clock,
     )
+    service.set_authorisation_snapshot_repository(InMemoryAuthorisationSnapshotRepository())
     return clock, directory, transport, records, service
 
 
@@ -897,5 +1054,516 @@ def test_constructor_timestamp_and_expiry_validation() -> None:
         )
         with pytest.raises(ValueError, match="timezone-aware"):
             await invalid_clock_service.expire_due()
+
+    asyncio.run(scenario())
+
+
+def test_phase6_command_create_enforces_exact_action_scope_before_persistence() -> None:
+    async def scenario() -> None:
+        _, _, transport, records, service = _stack()
+        viewer, viewer_context, viewer_actor = _phase6_command_identity(RoleName.VIEWER)
+        service.set_authorisation_service(viewer)
+
+        with pytest.raises(AuthenticationRequiredError):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.PROBE,
+                payload={},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="implicit-legacy-probe",
+                dispatch=False,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.PROBE,
+                payload={},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="viewer-probe",
+                dispatch=False,
+                actor_context=viewer_actor,
+                authentication_context=viewer_context,
+            )
+        assert await records.list_commands() == []
+        assert transport.sent == []
+
+        operator, operator_context, operator_actor = _phase6_command_identity(RoleName.OPERATOR)
+        service.set_authorisation_service(operator)
+        command, _ = await service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.RESET,
+            payload={},
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="operator-reset",
+            reservation_lease=_lease(),
+            dispatch=False,
+            actor_context=operator_actor,
+            authentication_context=operator_context,
+        )
+        assert (await records.get_command(command.id)) == command
+
+        narrowed, narrowed_context, narrowed_actor = _phase6_command_identity(
+            RoleName.OPERATOR,
+            permission_restrictions={"benches:read"},
+            principal_id=UUID(int=60_002),
+        )
+        service.set_authorisation_service(narrowed)
+        with pytest.raises(PermissionDeniedError):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.RESET,
+                payload={},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="narrowed-reset",
+                reservation_lease=_lease(),
+                dispatch=False,
+                actor_context=narrowed_actor,
+                authentication_context=narrowed_context,
+            )
+
+        wrong_scope, wrong_context, wrong_actor = _phase6_command_identity(
+            RoleName.OPERATOR,
+            resource_id="home-lab/other-bench",
+            principal_id=UUID(int=60_003),
+        )
+        service.set_authorisation_service(wrong_scope)
+        with pytest.raises(PermissionDeniedError):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.PROBE,
+                payload={},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="cross-resource-probe",
+                dispatch=False,
+                actor_context=wrong_actor,
+                authentication_context=wrong_context,
+            )
+        assert [item.id for item in await records.list_commands()] == [command.id]
+        assert transport.sent == []
+
+        _, _, legacy_transport, legacy_records, legacy_service = _stack()
+        legacy_service.set_authorisation_service(viewer)
+        legacy_command, _ = await legacy_service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.PROBE,
+            payload={},
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="explicit-legacy-probe",
+            dispatch=False,
+            allow_legacy_authorisation=True,
+        )
+        assert await legacy_records.get_command(legacy_command.id) == legacy_command
+        assert legacy_transport.sent == []
+
+    asyncio.run(scenario())
+
+
+def test_phase6_command_snapshot_boundary_preserves_exact_replay_evidence() -> None:
+    async def scenario() -> None:
+        _, _, _, records, service = _stack()
+        snapshots = InMemoryAuthorisationSnapshotRepository()
+        service.set_authorisation_snapshot_repository(snapshots)
+        operator, context, actor = _phase6_command_identity(RoleName.OPERATOR)
+        service.set_authorisation_service(operator)
+
+        command, operation = await service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.RESET,
+            payload={"owner": "phase6/operator"},
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="snapshot-replay",
+            reservation_lease=_lease(),
+            dispatch=False,
+            actor_context=actor,
+            authentication_context=context,
+        )
+        assert command.authorisation_snapshot_id is not None
+        assert command.actor_context is not None
+        assert command.actor_context.authorisation_snapshot_id == command.authorisation_snapshot_id
+        snapshot = await snapshots.get_authorisation_snapshot(
+            command.organisation_id,
+            command.authorisation_snapshot_id,
+        )
+        assert snapshot is not None
+        assert snapshot.principal_id == context.principal.id
+        assert snapshot.permission == "benches:reset"
+        assert snapshot.resource_type is ResourceType.BENCH
+        assert snapshot.resource_id == BENCH_ID
+
+        # An exact retry keeps the evidence accepted with the original command. It does
+        # not become new work merely because the HTTP permission dependency minted a
+        # fresh decision snapshot, and it remains attributable after the role is removed.
+        audit = InMemoryAuditRepository()
+        service.set_authorisation_service(
+            AuthorisationService(
+                ScopedAuthorisationRepository(()),
+                audit_repository=audit,
+                clock=lambda: NOW,
+            )
+        )
+        fresh_snapshot_id = uuid4()
+        replayed, replayed_operation = await service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.RESET,
+            payload={"owner": "phase6/operator"},
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="snapshot-replay",
+            reservation_lease=_lease(),
+            dispatch=False,
+            actor_context=actor.model_copy(update={"authorisation_snapshot_id": fresh_snapshot_id}),
+            authorisation_snapshot_id=fresh_snapshot_id,
+            authentication_context=context.model_copy(
+                update={"authorisation_snapshot_id": fresh_snapshot_id}
+            ),
+        )
+        assert replayed == command
+        assert replayed_operation == operation
+        assert replayed.authorisation_snapshot_id == snapshot.id
+
+        with pytest.raises(PermissionDeniedError):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.RESET,
+                payload={"owner": "phase6/operator"},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="new-work-after-role-removal",
+                reservation_lease=_lease(),
+                dispatch=False,
+                actor_context=actor,
+                authentication_context=context,
+            )
+
+        narrowed = context.model_copy(update={"permission_restrictions": {"benches:read"}})
+        with pytest.raises(PermissionDeniedError, match="cannot replay"):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.RESET,
+                payload={"owner": "phase6/operator"},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="snapshot-replay",
+                reservation_lease=_lease(),
+                dispatch=False,
+                actor_context=actor,
+                authentication_context=narrowed,
+            )
+        assert audit.events[-1].action == "PERMISSION_DENIED"
+        assert audit.events[-1].metadata == {"required_permission": "benches:reset"}
+        assert await records.get_command(command.id) == command
+
+    asyncio.run(scenario())
+
+
+def test_phase6_command_snapshot_boundary_rejects_missing_or_forged_evidence_store() -> None:
+    async def scenario() -> None:
+        clock, directory, transport, records, _ = _stack()
+        operator, context, actor = _phase6_command_identity(RoleName.OPERATOR)
+        missing_store = RemoteCommandService(
+            records,
+            directory,
+            transport,
+            clock=clock,
+        )
+        missing_store.set_authorisation_service(operator)
+        with pytest.raises(AuthenticationRequiredError, match="snapshot store"):
+            await missing_store.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.PROBE,
+                payload={},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="missing-snapshot-store",
+                dispatch=False,
+                actor_context=actor,
+                authentication_context=context,
+            )
+
+        snapshots = InMemoryAuthorisationSnapshotRepository()
+        missing_store.set_authorisation_snapshot_repository(snapshots)
+        forged_id = uuid4()
+        forged_context = context.model_copy(update={"authorisation_snapshot_id": forged_id})
+        forged_actor = actor.model_copy(update={"authorisation_snapshot_id": forged_id})
+        with pytest.raises(ValueError, match="unresolved or mismatched"):
+            await missing_store.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.PROBE,
+                payload={},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="forged-snapshot",
+                dispatch=False,
+                actor_context=forged_actor,
+                authorisation_snapshot_id=forged_id,
+                authentication_context=forged_context,
+            )
+        assert await records.list_commands() == []
+
+    asyncio.run(scenario())
+
+
+def test_phase6_workflow_command_mints_trusted_workflow_evidence_for_ci() -> None:
+    async def scenario() -> None:
+        definition = WorkflowDefinition.model_validate(
+            {
+                "name": "trusted-ci",
+                "version": 2,
+                "requirements": {"capabilities": ["reset"], "labels": {}},
+                "steps": [{"action": "reset"}],
+            }
+        )
+        principal = Principal(
+            id=PHASE6_PRINCIPAL_ID,
+            type=PrincipalType.SERVICE_ACCOUNT,
+            organisation_id=definition.organisation_id,
+            display_name="trusted-ci",
+        )
+        assignments = tuple(
+            RoleAssignment(
+                organisation_id=definition.organisation_id,
+                subject_type=RoleSubjectType.SERVICE_ACCOUNT,
+                subject_id=principal.id,
+                role=RoleName.WORKFLOW_RUNNER,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                created_by=principal.id,
+                created_at=NOW - timedelta(minutes=1),
+            )
+            for resource_type, resource_id in (
+                (ResourceType.WORKFLOW, definition.name),
+                (ResourceType.BENCH, BENCH_ID),
+            )
+        )
+        context = AuthenticationContext(
+            principal=principal,
+            permission_restrictions={"workflows:run", "benches:operate"},
+        )
+        actor = ActorContext(
+            principal_id=principal.id,
+            principal_type=principal.type,
+            display_name=principal.display_name,
+            organisation_id=principal.organisation_id,
+        )
+        _, _, _, records, service = _stack()
+        snapshots = InMemoryAuthorisationSnapshotRepository()
+        service.set_authorisation_snapshot_repository(snapshots)
+        service.set_workflow_definition_catalog(InMemoryWorkflowDefinitionCatalog(definition))
+        service.set_authorisation_service(
+            AuthorisationService(
+                ScopedAuthorisationRepository(assignments),
+                clock=lambda: NOW,
+            )
+        )
+        payload = {
+            "definition": definition.model_dump(mode="json"),
+            "inputs": {},
+            "artifact_transfers": [],
+        }
+        command, _ = await service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.RUN_WORKFLOW,
+            payload=payload,
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="ci-mints-workflow-snapshot",
+            reservation_lease=_lease(),
+            dispatch=False,
+            actor_context=actor,
+            authentication_context=context,
+        )
+        assert command.authorisation_snapshot_id is not None
+        snapshot = await snapshots.get_authorisation_snapshot(
+            command.organisation_id,
+            command.authorisation_snapshot_id,
+        )
+        assert snapshot is not None
+        assert snapshot.permission == "workflows:run"
+        assert snapshot.resource_type is ResourceType.WORKFLOW
+        assert snapshot.resource_id == definition.name
+
+        forged = WorkflowDefinition.model_validate(
+            {
+                **definition.model_dump(mode="python"),
+                "requirements": {"capabilities": [], "labels": {}},
+                "steps": [{"action": "wait", "seconds": 1}],
+            }
+        )
+        with pytest.raises(ValueError, match="trusted catalog"):
+            await service.create(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                command_type=RemoteCommandType.RUN_WORKFLOW,
+                payload={**payload, "definition": forged.model_dump(mode="json")},
+                expires_at=NOW + timedelta(minutes=5),
+                idempotency_key="forged-workflow-definition",
+                reservation_lease=_lease(),
+                dispatch=False,
+                actor_context=actor,
+                authentication_context=context,
+            )
+        assert len(await records.list_commands()) == 1
+
+    asyncio.run(scenario())
+
+
+def test_phase6_command_cancel_requires_exact_operation_permission_without_mutation() -> None:
+    async def scenario() -> None:
+        _, _, transport, records, service = _stack()
+        command, _ = await service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.PROBE,
+            payload={},
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="cancel-target",
+            dispatch=False,
+        )
+
+        viewer, viewer_context, _ = _phase6_command_identity(RoleName.VIEWER)
+        service.set_authorisation_service(viewer)
+        with pytest.raises(PermissionDeniedError):
+            await service.request_cancel(
+                command.id,
+                authentication_context=viewer_context,
+            )
+        unchanged = await records.get_command(command.id)
+        assert unchanged is not None
+        assert unchanged.status is RemoteCommandStatus.CREATED
+        assert transport.cancelled == []
+
+        administrator, admin_context, _ = _phase6_command_identity(
+            RoleName.LAB_ADMIN,
+            principal_id=UUID(int=60_004),
+        )
+        service.set_authorisation_service(administrator)
+        cancelled = await service.request_cancel(
+            command.id,
+            authentication_context=admin_context,
+        )
+        assert cancelled.status is RemoteCommandStatus.CANCELLED
+
+    asyncio.run(scenario())
+
+
+def test_phase6_dispatched_cancel_requires_snapshot_evidence_before_protocol_send() -> None:
+    async def scenario() -> None:
+        _, _, transport, _records, service = _stack()
+        command, _ = await _create_probe(service, operation_type="PROBE")
+        administrator, context, _ = _phase6_command_identity(RoleName.LAB_ADMIN)
+        service.set_authorisation_service(administrator)
+
+        with pytest.raises(AuthenticationRequiredError, match="durable authorisation evidence"):
+            await service.request_cancel(
+                command.id,
+                authentication_context=context,
+            )
+        assert transport.cancelled == []
+
+    asyncio.run(scenario())
+
+
+def test_phase6_ci_cancel_accepts_only_exact_snapshot_and_trusted_work_binding() -> None:
+    async def scenario() -> None:
+        _, _, transport, _records, service = _stack()
+        snapshots = InMemoryAuthorisationSnapshotRepository()
+        service.set_authorisation_snapshot_repository(snapshots)
+        command, operation = await service.create(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            command_type=RemoteCommandType.RUN_WORKFLOW,
+            payload={},
+            expires_at=NOW + timedelta(minutes=5),
+            idempotency_key="ci-cancel-boundary",
+            reservation_lease=_lease(),
+            operation_type=RemoteCommandType.RUN_WORKFLOW.value,
+        )
+        assert operation is not None
+        session_id = uuid4()
+        binding = DistributedCiWorkflowBinding(
+            ci_session_id=session_id,
+            remote_command_id=command.id,
+            operation_id=operation.id,
+            agent_id=command.agent_id,
+            bench_id=command.bench_id,
+            reservation_id=RESERVATION_ID,
+            workflow_name="trusted-ci",
+            workflow_version=1,
+            launch_idempotency_key="ci-cancel-boundary",
+            request_fingerprint="a" * 64,
+            created_at=NOW,
+        )
+        bindings = InMemoryCiCancellationBindings(binding)
+        service.set_ci_cancellation_binding_repository(bindings)
+        principal = Principal(
+            id=PHASE6_PRINCIPAL_ID,
+            type=PrincipalType.USER,
+            organisation_id=command.organisation_id,
+            display_name="Workflow Runner",
+        )
+        snapshot = await snapshots.create_authorisation_snapshot(
+            command.organisation_id,
+            AuthorisationSnapshot(
+                principal_id=principal.id,
+                permission="ci:sessions:cancel",
+                resource_type="CI_SESSION",
+                resource_id=str(session_id),
+                evaluated_at=NOW,
+            ),
+        )
+        context = AuthenticationContext(
+            principal=principal,
+            authorisation_snapshot_id=snapshot.id,
+        )
+
+        returned = await service.request_ci_cancel(
+            command.id,
+            ci_session_id=session_id,
+            reason="CI requested",
+            authentication_context=context,
+        )
+        assert returned == command
+        assert len(transport.cancelled) == 1
+        assert transport.cancelled[0].actor_context is not None
+        assert transport.cancelled[0].actor_context.principal_id == principal.id
+        assert transport.cancelled[0].authorisation_snapshot_id == snapshot.id
+
+        bindings.binding = binding.model_copy(update={"operation_id": uuid4()})
+        with pytest.raises(ValueError, match="trusted remote work"):
+            await service.request_ci_cancel(
+                command.id,
+                ci_session_id=session_id,
+                reason=None,
+                authentication_context=context,
+            )
+        assert len(transport.cancelled) == 1
+
+        wrong_snapshot = await snapshots.create_authorisation_snapshot(
+            command.organisation_id,
+            AuthorisationSnapshot(
+                principal_id=principal.id,
+                permission="operations:cancel",
+                resource_type=ResourceType.BENCH,
+                resource_id=BENCH_ID,
+                evaluated_at=NOW,
+            ),
+        )
+        with pytest.raises(ValueError, match="unresolved or mismatched"):
+            await service.request_ci_cancel(
+                command.id,
+                ci_session_id=session_id,
+                reason=None,
+                authentication_context=context.model_copy(
+                    update={"authorisation_snapshot_id": wrong_snapshot.id}
+                ),
+            )
+        assert len(transport.cancelled) == 1
 
     asyncio.run(scenario())

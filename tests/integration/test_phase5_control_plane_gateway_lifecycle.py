@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
@@ -303,7 +304,13 @@ def test_authenticated_gateway_lifecycle_inventory_admin_and_disconnect(tmp_path
             assert refresh_message["message_type"] == MessageType.INVENTORY_REFRESH_REQUEST.value
 
             assert client.portal is not None
-            request_id = client.portal.call(runtime.request_reconciliation, agent_id)
+            request_id = client.portal.call(
+                partial(
+                    runtime.request_reconciliation,
+                    agent_id,
+                    allow_internal_authorisation=True,
+                )
+            )
             requested = websocket.receive_json()
             assert requested["message_type"] == MessageType.RECONCILIATION_REQUEST.value
             assert requested["correlation_id"] == str(request_id)

@@ -136,12 +136,120 @@ class AuthenticationRequiredError(PlatformError):
     code = "AUTHENTICATION_REQUIRED"
 
 
+class AuthenticationFailedError(PlatformError):
+    code = "AUTHENTICATION_FAILED"
+
+
+class InvalidCredentialsError(PlatformError):
+    code = "INVALID_CREDENTIALS"
+
+
+class SessionExpiredError(PlatformError):
+    code = "SESSION_EXPIRED"
+
+
+class SessionRevokedError(PlatformError):
+    code = "SESSION_REVOKED"
+
+
+class TokenExpiredError(PlatformError):
+    code = "TOKEN_EXPIRED"
+
+
+class TokenRevokedError(PlatformError):
+    code = "TOKEN_REVOKED"
+
+
 class InvalidApiTokenError(PlatformError):
     code = "INVALID_API_TOKEN"
 
 
 class PermissionDeniedError(PlatformError):
     code = "PERMISSION_DENIED"
+
+
+class UserNotFoundError(PlatformError):
+    code = "USER_NOT_FOUND"
+
+
+class UserDisabledError(PlatformError):
+    code = "USER_DISABLED"
+
+
+class UserLockedError(PlatformError):
+    code = "USER_LOCKED"
+
+
+class UsernameAlreadyExistsError(PlatformError):
+    code = "USERNAME_ALREADY_EXISTS"
+
+
+class ServiceAccountNotFoundError(PlatformError):
+    code = "SERVICE_ACCOUNT_NOT_FOUND"
+
+
+class ServiceAccountDisabledError(PlatformError):
+    code = "SERVICE_ACCOUNT_DISABLED"
+
+
+class TeamNotFoundError(PlatformError):
+    code = "TEAM_NOT_FOUND"
+
+
+class TeamAlreadyExistsError(PlatformError):
+    code = "TEAM_ALREADY_EXISTS"
+
+
+class TeamMembershipNotFoundError(PlatformError):
+    code = "TEAM_MEMBERSHIP_NOT_FOUND"
+
+
+class RoleAssignmentNotFoundError(PlatformError):
+    code = "ROLE_ASSIGNMENT_NOT_FOUND"
+
+
+class RoleAssignmentConflictError(PlatformError):
+    code = "ROLE_ASSIGNMENT_CONFLICT"
+
+
+class RoleNotAllowedError(PlatformError):
+    code = "ROLE_NOT_ALLOWED"
+
+
+class ResourceAccessDeniedError(PlatformError):
+    code = "RESOURCE_ACCESS_DENIED"
+
+
+class OrganisationNotFoundError(PlatformError):
+    code = "ORGANISATION_NOT_FOUND"
+
+
+class OrganisationSuspendedError(PlatformError):
+    code = "ORGANISATION_SUSPENDED"
+
+
+class CrossOrganisationAccessDeniedError(PlatformError):
+    code = "CROSS_ORGANISATION_ACCESS_DENIED"
+
+
+class OidcConfigurationInvalidError(PlatformError):
+    code = "OIDC_CONFIGURATION_INVALID"
+
+
+class OidcLoginFailedError(PlatformError):
+    code = "OIDC_LOGIN_FAILED"
+
+
+class OidcIdentityNotMappedError(PlatformError):
+    code = "OIDC_IDENTITY_NOT_MAPPED"
+
+
+class AuditEventNotFoundError(PlatformError):
+    code = "AUDIT_EVENT_NOT_FOUND"
+
+
+class LoginRateLimitExceededError(PlatformError):
+    code = "LOGIN_RATE_LIMIT_EXCEEDED"
 
 
 class ArtifactNotFoundError(PlatformError):

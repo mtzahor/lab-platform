@@ -9,6 +9,9 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+_ORGANISATION_SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$"
+_ENVIRONMENT_VARIABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
 
 class ControlPlaneConfigModel(BaseModel):
     """Strict, immutable base for control-plane configuration."""
@@ -144,7 +147,146 @@ class ControlPlaneArtifactSettings(ControlPlaneConfigModel):
         return value
 
 
+class LocalAuthSettings(ControlPlaneConfigModel):
+    enabled: bool = True
+    minimum_password_length: int = Field(default=12, ge=12, le=1024)
+
+
+class OidcSettings(ControlPlaneConfigModel):
+    enabled: bool = False
+    issuer_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    client_id: str | None = Field(default=None, min_length=1, max_length=500)
+    client_secret_env: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        pattern=_ENVIRONMENT_VARIABLE_PATTERN,
+    )
+    scopes: tuple[str, ...] = Field(
+        default=("openid", "profile", "email"),
+        min_length=1,
+        max_length=32,
+    )
+    username_claim: str = Field(
+        default="preferred_username",
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z][A-Za-z0-9_.:-]*$",
+    )
+    transaction_ttl_seconds: int = Field(default=600, ge=60, le=1800)
+    clock_skew_seconds: int = Field(default=60, ge=0, le=300)
+
+    @field_validator("issuer_url")
+    @classmethod
+    def validate_issuer_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            raise ValueError("identity.oidc.issuer_url must be an absolute HTTP or HTTPS URL")
+        if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+            raise ValueError("identity.oidc.issuer_url must use HTTPS except on loopback")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("identity.oidc.issuer_url must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("identity.oidc.issuer_url must not contain a query or fragment")
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("identity.oidc.issuer_url contains an invalid port") from exc
+        return value
+
+    @field_validator("scopes", mode="before")
+    @classmethod
+    def parse_scopes(cls, value: object) -> object:
+        # YAML represents sequences as lists while the immutable settings model
+        # exposes scopes as a tuple.
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not scope or any(character.isspace() for character in scope) for scope in value):
+            raise ValueError("identity.oidc.scopes must contain non-empty scope names")
+        if len(set(value)) != len(value):
+            raise ValueError("identity.oidc.scopes must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def require_enabled_configuration(self) -> OidcSettings:
+        if not self.enabled:
+            return self
+        missing = [
+            field
+            for field in ("issuer_url", "client_id", "client_secret_env")
+            if getattr(self, field) is None
+        ]
+        if missing:
+            raise ValueError("enabled OIDC requires issuer_url, client_id, and client_secret_env")
+        if "openid" not in self.scopes:
+            raise ValueError("enabled OIDC requires the openid scope")
+        return self
+
+
+class SessionSettings(ControlPlaneConfigModel):
+    access_token_minutes: int = Field(default=15, ge=1, le=1440)
+    session_hours: int = Field(default=12, ge=1, le=8760)
+    maximum_session_days: int = Field(default=7, ge=1, le=3650)
+
+    @model_validator(mode="after")
+    def validate_lifetime_ordering(self) -> SessionSettings:
+        session_minutes = self.session_hours * 60
+        maximum_session_minutes = self.maximum_session_days * 24 * 60
+        if self.access_token_minutes >= session_minutes:
+            raise ValueError("access-token lifetime must be shorter than session lifetime")
+        if session_minutes > maximum_session_minutes:
+            raise ValueError("session lifetime must not exceed maximum session lifetime")
+        return self
+
+
+class IdentitySettings(ControlPlaneConfigModel):
+    enabled: bool = True
+    default_organisation_slug: str = Field(
+        default="default",
+        min_length=1,
+        max_length=100,
+        pattern=_ORGANISATION_SLUG_PATTERN,
+    )
+    default_organisation_name: str = Field(
+        default="Default Organisation",
+        min_length=1,
+        max_length=200,
+    )
+    local_auth: LocalAuthSettings = Field(default_factory=LocalAuthSettings)
+    oidc: OidcSettings = Field(default_factory=OidcSettings)
+    sessions: SessionSettings = Field(default_factory=SessionSettings)
+
+
+class AuthorisationSettings(ControlPlaneConfigModel):
+    default_bench_visibility: Literal["private", "organisation", "restricted"] = "organisation"
+    hide_unauthorised_resources: bool = True
+    legacy_token_compatibility_enabled: bool = True
+
+
+class AuditSettings(ControlPlaneConfigModel):
+    enabled: bool = True
+    retention_days: int = Field(default=90, ge=1, le=3650)
+
+
+class LoginRateLimitSettings(ControlPlaneConfigModel):
+    attempts: int = Field(default=10, ge=1, le=10_000)
+    window_minutes: int = Field(default=15, ge=1, le=10_080)
+
+
+class SecuritySettings(ControlPlaneConfigModel):
+    login_rate_limit: LoginRateLimitSettings = Field(default_factory=LoginRateLimitSettings)
+
+
 class ControlPlaneDevelopmentSettings(ControlPlaneConfigModel):
+    enabled: bool = False
+    auto_login_user: str | None = Field(default=None, min_length=1, max_length=200)
     allow_insecure_agent_transport: bool = False
     allow_tls_termination_proxy: bool = False
 
@@ -155,6 +297,10 @@ class ControlPlaneConfig(ControlPlaneConfigModel):
     agent_gateway: AgentGatewaySettings = Field(default_factory=AgentGatewaySettings)
     distributed: DistributedSettings = Field(default_factory=DistributedSettings)
     artifacts: ControlPlaneArtifactSettings = Field(default_factory=ControlPlaneArtifactSettings)
+    identity: IdentitySettings = Field(default_factory=IdentitySettings)
+    authorisation: AuthorisationSettings = Field(default_factory=AuthorisationSettings)
+    audit: AuditSettings = Field(default_factory=AuditSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
     development: ControlPlaneDevelopmentSettings = Field(
         default_factory=ControlPlaneDevelopmentSettings
     )
@@ -194,6 +340,29 @@ class ControlPlaneConfig(ControlPlaneConfigModel):
             raise ValueError(
                 "Insecure HTTP/WS Agent transport is allowed only on loopback interfaces"
             )
+        return self
+
+    @model_validator(mode="after")
+    def require_safe_development_auto_login(self) -> ControlPlaneConfig:
+        if self.development.auto_login_user is None:
+            return self
+        if not self.development.enabled:
+            raise ValueError("development auto-login requires development.enabled")
+        public_url = urlsplit(self.control_plane.public_url)
+        if not (
+            _is_loopback_host(self.control_plane.host)
+            and public_url.hostname is not None
+            and _is_loopback_host(public_url.hostname)
+        ):
+            raise ValueError(
+                "development auto-login is allowed only with loopback bind and public hosts"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_identity_for_oidc(self) -> ControlPlaneConfig:
+        if self.identity.oidc.enabled and not self.identity.enabled:
+            raise ValueError("OIDC authentication requires identity.enabled")
         return self
 
     @property

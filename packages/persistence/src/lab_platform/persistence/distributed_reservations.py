@@ -77,8 +77,11 @@ _ALLOWED_TRANSITIONS: dict[
 
 _IMMUTABLE_RESERVATION_FIELDS = (
     "id",
+    "organisation_id",
     "bench_id",
     "owner",
+    "owner_principal_id",
+    "owner_principal_type",
     "created_at",
     "requested_at",
     "starts_at",
@@ -101,23 +104,42 @@ class SQLiteCentralReservationLeaseRepository:
     def __init__(self, database: SQLiteDatabase) -> None:
         self._database = database
 
-    async def get(self, reservation_id: UUID) -> CoordinatedReservationLease | None:
+    async def get(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CoordinatedReservationLease | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(reservation_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(reservation_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT record_json FROM coordinated_reservation_leases WHERE reservation_id = ?",
-                (str(reservation_id),),
+                "SELECT record_json FROM coordinated_reservation_leases WHERE reservation_id = ?"
+                f"{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _record_from_json(row["record_json"]) if row is not None else None
 
     async def get_current_for_bench(
         self,
         bench_id: str,
+        *,
+        organisation_id: UUID | None = None,
     ) -> CoordinatedReservationLease | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (bench_id, str(organisation_id)) if organisation_id is not None else (bench_id,)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
                 "SELECT record_json FROM coordinated_reservation_leases "
-                "WHERE bench_id = ? AND state NOT IN ('RELEASED', 'EXPIRED', 'REVOKED')",
-                (bench_id,),
+                "WHERE bench_id = ? AND state NOT IN ('RELEASED', 'EXPIRED', 'REVOKED')"
+                f"{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _record_from_json(row["record_json"]) if row is not None else None
 
@@ -125,12 +147,14 @@ class SQLiteCentralReservationLeaseRepository:
         self,
         mutation_key: str,
         *,
+        organisation_id: UUID,
         request_fingerprint: str,
     ) -> LeaseWriteResult | None:
         with self._database.transaction() as connection:
             return _mutation_result(
                 connection,
                 mutation_key,
+                organisation_id=organisation_id,
                 request_fingerprint=request_fingerprint,
             )
 
@@ -145,9 +169,17 @@ class SQLiteCentralReservationLeaseRepository:
     ) -> LeaseWriteResult | None:
         try:
             with self._database.transaction(immediate=True) as connection:
+                organisation_id = _route_organisation_id(
+                    connection,
+                    request.agent_id,
+                    request.reservation.bench_id,
+                )
+                if organisation_id is None:
+                    return None
                 replay = _mutation_result(
                     connection,
                     mutation_key,
+                    organisation_id=organisation_id,
                     request_fingerprint=request_fingerprint,
                 )
                 if replay is not None:
@@ -160,39 +192,42 @@ class SQLiteCentralReservationLeaseRepository:
                     expected_bench_status=expected_bench_status,
                 ):
                     return None
+                reservation = request.reservation.model_copy(
+                    update={"organisation_id": organisation_id}
+                )
                 if _has_current_coordination(
                     connection,
-                    request.reservation.bench_id,
+                    reservation.bench_id,
                 ) or _has_uncoordinated_current_reservation(
                     connection,
-                    request.reservation.bench_id,
+                    reservation.bench_id,
                 ):
                     return None
 
                 maximum_row = connection.execute(
                     "SELECT MAX(lease_version) AS maximum_version "
                     "FROM reservation_leases WHERE bench_id = ?",
-                    (request.reservation.bench_id,),
+                    (reservation.bench_id,),
                 ).fetchone()
                 maximum_version = maximum_row["maximum_version"]
                 lease_version = (int(maximum_version) if maximum_version is not None else 0) + 1
-                valid_from = request.reservation.starts_at or request.reservation.created_at
+                valid_from = reservation.starts_at or reservation.created_at
                 lease = ReservationLease(
-                    reservation_id=request.reservation.id,
+                    reservation_id=reservation.id,
                     agent_id=request.agent_id,
-                    bench_id=request.reservation.bench_id,
-                    owner=request.reservation.owner,
+                    bench_id=reservation.bench_id,
+                    owner=reservation.owner,
                     valid_from=valid_from,
                     valid_until=request.lease_valid_until,
                     lease_version=lease_version,
                 )
                 record = CoordinatedReservationLease(
-                    reservation=request.reservation,
+                    reservation=reservation,
                     lease=lease,
                     state=ReservationLeaseState.ACTIVATING,
                     revision=1,
                 )
-                _insert_reservation(connection, request.reservation)
+                _insert_reservation(connection, reservation)
                 _insert_lease(connection, lease)
                 _insert_coordination(connection, record)
                 _insert_mutation(
@@ -222,6 +257,7 @@ class SQLiteCentralReservationLeaseRepository:
                 replay = _mutation_result(
                     connection,
                     mutation_key,
+                    organisation_id=record.reservation.organisation_id,
                     request_fingerprint=request_fingerprint,
                 )
                 if replay is not None:
@@ -277,6 +313,7 @@ class SQLiteCentralReservationLeaseRepository:
     async def list(
         self,
         *,
+        organisation_id: UUID | None = None,
         agent_id: UUID | None = None,
         states: Iterable[ReservationLeaseState] | None = None,
         limit: int = 10_000,
@@ -285,6 +322,9 @@ class SQLiteCentralReservationLeaseRepository:
             raise ValueError("limit must be positive")
         conditions: list[str] = []
         values: list[object] = []
+        if organisation_id is not None:
+            conditions.append("organisation_id = ?")
+            values.append(str(organisation_id))
         if agent_id is not None:
             conditions.append("agent_id = ?")
             values.append(str(agent_id))
@@ -315,7 +355,9 @@ def _route_is_eligible(
 ) -> bool:
     row = connection.execute(
         "SELECT agents.status AS agent_status, global_benches.status AS bench_status, "
-        "global_benches.agent_id AS bench_agent_id FROM agents "
+        "global_benches.agent_id AS bench_agent_id, "
+        "agents.organisation_id AS agent_organisation_id, "
+        "global_benches.organisation_id AS bench_organisation_id FROM agents "
         "JOIN global_benches ON global_benches.id = ? "
         "WHERE agents.id = ?",
         (bench_id, str(agent_id)),
@@ -325,7 +367,25 @@ def _route_is_eligible(
         and row["agent_status"] == expected_agent_status.value
         and row["bench_status"] == expected_bench_status.value
         and row["bench_agent_id"] == str(agent_id)
+        and row["agent_organisation_id"] == row["bench_organisation_id"]
     )
+
+
+def _route_organisation_id(
+    connection: sqlite3.Connection,
+    agent_id: UUID,
+    bench_id: str,
+) -> UUID | None:
+    row = connection.execute(
+        "SELECT agents.organisation_id AS agent_organisation_id, "
+        "global_benches.organisation_id AS bench_organisation_id "
+        "FROM agents JOIN global_benches ON global_benches.id = ? "
+        "AND global_benches.agent_id = agents.id WHERE agents.id = ?",
+        (bench_id, str(agent_id)),
+    ).fetchone()
+    if row is None or row["agent_organisation_id"] != row["bench_organisation_id"]:
+        return None
+    return UUID(row["bench_organisation_id"])
 
 
 def _optional_route_predicates_match(
@@ -340,7 +400,9 @@ def _optional_route_predicates_match(
         return True
     row = connection.execute(
         "SELECT agents.status AS agent_status, global_benches.status AS bench_status, "
-        "global_benches.agent_id AS bench_agent_id FROM agents "
+        "global_benches.agent_id AS bench_agent_id, "
+        "agents.organisation_id AS agent_organisation_id, "
+        "global_benches.organisation_id AS bench_organisation_id FROM agents "
         "JOIN global_benches ON global_benches.id = ? "
         "WHERE agents.id = ?",
         (bench_id, str(agent_id)),
@@ -350,6 +412,7 @@ def _optional_route_predicates_match(
     return bool(
         (expected_agent_status is None or row["agent_status"] == expected_agent_status.value)
         and (expected_bench_status is None or row["bench_status"] == expected_bench_status.value)
+        and row["agent_organisation_id"] == row["bench_organisation_id"]
     )
 
 
@@ -510,9 +573,11 @@ def _insert_reservation(
 ) -> None:
     connection.execute(
         "INSERT INTO reservations "
-        "(id, bench_id, owner, created_at, released_at, status, requested_at, "
+        "(id, bench_id, owner, owner_principal_id, owner_principal_type, "
+        "organisation_id, created_at, released_at, status, requested_at, "
         "starts_at, ends_at, activated_at, expired_at, source, metadata, "
-        "idempotency_key, release_pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "idempotency_key, release_pending) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         _reservation_values(reservation),
     )
 
@@ -522,9 +587,11 @@ def _update_reservation(
     reservation: Reservation,
 ) -> None:
     cursor = connection.execute(
-        "UPDATE reservations SET bench_id = ?, owner = ?, created_at = ?, released_at = ?, "
-        "status = ?, requested_at = ?, starts_at = ?, ends_at = ?, activated_at = ?, "
-        "expired_at = ?, source = ?, metadata = ?, idempotency_key = ?, release_pending = ? "
+        "UPDATE reservations SET bench_id = ?, owner = ?, owner_principal_id = ?, "
+        "owner_principal_type = ?, organisation_id = ?, created_at = ?, released_at = ?, "
+        "status = ?, "
+        "requested_at = ?, starts_at = ?, ends_at = ?, activated_at = ?, expired_at = ?, "
+        "source = ?, metadata = ?, idempotency_key = ?, release_pending = ? "
         "WHERE id = ?",
         (*_reservation_values(reservation)[1:], str(reservation.id)),
     )
@@ -538,9 +605,11 @@ def _update_reservation(
 def _insert_lease(connection: sqlite3.Connection, lease: ReservationLease) -> None:
     connection.execute(
         "INSERT INTO reservation_leases "
-        "(reservation_id, agent_id, bench_id, owner, valid_from, valid_until, "
-        "lease_version, released_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(reservation_id, organisation_id, agent_id, bench_id, owner, valid_from, valid_until, "
+        "lease_version, released_at) VALUES (?, (SELECT organisation_id FROM reservations "
+        "WHERE id = ?), ?, ?, ?, ?, ?, ?, ?)",
         (
+            str(lease.reservation_id),
             str(lease.reservation_id),
             str(lease.agent_id),
             lease.bench_id,
@@ -559,10 +628,11 @@ def _insert_coordination(
 ) -> None:
     connection.execute(
         "INSERT INTO coordinated_reservation_leases "
-        "(reservation_id, agent_id, bench_id, state, revision, lease_version, "
-        "record_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(reservation_id, organisation_id, agent_id, bench_id, state, revision, lease_version, "
+        "record_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(record.reservation.id),
+            str(record.reservation.organisation_id),
             str(record.lease.agent_id),
             record.lease.bench_id,
             record.state.value,
@@ -583,10 +653,11 @@ def _insert_mutation(
 ) -> None:
     connection.execute(
         "INSERT INTO reservation_lease_mutations "
-        "(mutation_key, request_fingerprint, reservation_id, revision, result_json, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(mutation_key, organisation_id, request_fingerprint, reservation_id, revision, "
+        "result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             mutation_key,
+            str(record.reservation.organisation_id),
             request_fingerprint,
             str(record.reservation.id),
             record.revision,
@@ -600,11 +671,12 @@ def _mutation_result(
     connection: sqlite3.Connection,
     mutation_key: str,
     *,
+    organisation_id: UUID,
     request_fingerprint: str,
 ) -> LeaseWriteResult | None:
     row = connection.execute(
-        "SELECT * FROM reservation_lease_mutations WHERE mutation_key = ?",
-        (mutation_key,),
+        "SELECT * FROM reservation_lease_mutations WHERE organisation_id = ? AND mutation_key = ?",
+        (str(organisation_id), mutation_key),
     ).fetchone()
     if row is None:
         return None
@@ -630,6 +702,9 @@ def _reservation_values(reservation: Reservation) -> tuple[object, ...]:
         str(reservation.id),
         reservation.bench_id,
         reservation.owner,
+        str(reservation.owner_principal_id) if reservation.owner_principal_id else None,
+        reservation.owner_principal_type,
+        str(reservation.organisation_id),
         reservation.created_at.isoformat(),
         _datetime_value(reservation.released_at),
         reservation.status.value,

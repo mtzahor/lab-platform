@@ -21,14 +21,20 @@ from lab_platform.control_plane_core.errors import (
     AgentIncompatibleError,
     AgentNotFoundError,
 )
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError, PermissionDeniedError
 from lab_platform.models import (
+    LEGACY_ORGANISATION_ID,
     AgentCredential,
     AgentCredentialKind,
     AgentEnrollmentToken,
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
+    AuthorisationResource,
     EnrollmentStatus,
     EventRecord,
+    ResourceType,
 )
 from pydantic import SecretStr
 
@@ -67,17 +73,29 @@ class AgentEnrollmentRepository(Protocol):
         audit_event: EventRecord,
     ) -> AgentEnrollmentToken: ...
 
-    async def get_token(self, token_id: UUID) -> AgentEnrollmentToken | None: ...
+    async def get_token(
+        self,
+        token_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentEnrollmentToken | None: ...
 
     async def get_token_by_hash(self, token_hash: str) -> AgentEnrollmentToken | None: ...
 
-    async def list_tokens(self, *, limit: int = 500) -> list[AgentEnrollmentToken]: ...
+    async def list_tokens(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[AgentEnrollmentToken]: ...
 
     async def revoke_token(
         self,
         token_id: UUID,
         revoked_at: datetime,
         audit_event: EventRecord,
+        *,
+        organisation_id: UUID | None = None,
     ) -> AgentEnrollmentToken | None: ...
 
     async def consume_token(
@@ -91,9 +109,19 @@ class AgentEnrollmentRepository(Protocol):
         audit_event: EventRecord,
     ) -> EnrollmentConsumeResult: ...
 
-    async def get_agent(self, agent_id: UUID) -> AgentRecord | None: ...
+    async def get_agent(
+        self,
+        agent_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentRecord | None: ...
 
-    async def list_agents(self, *, limit: int = 500) -> list[AgentRecord]: ...
+    async def list_agents(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[AgentRecord]: ...
 
     async def authenticate_agent(
         self,
@@ -117,6 +145,8 @@ class AgentEnrollmentRepository(Protocol):
         agent_id: UUID,
         revoked_at: datetime,
         audit_event: EventRecord,
+        *,
+        organisation_id: UUID | None = None,
     ) -> AgentRecord | None: ...
 
 
@@ -125,6 +155,7 @@ class EnrollmentTokenView:
     """Enrollment-token metadata safe to expose outside persistence."""
 
     id: UUID
+    organisation_id: UUID
     name: str
     created_at: datetime
     expires_at: datetime
@@ -187,6 +218,10 @@ class AgentEnrollmentService:
         self._token_factory = token_factory
         self._credential_factory = credential_factory
         self._id_factory = id_factory
+        self._authorisation: AuthorisationService | None = None
+
+    def set_authorisation_service(self, authorisation: AuthorisationService) -> None:
+        self._authorisation = authorisation
 
     async def issue_token(
         self,
@@ -194,7 +229,18 @@ class AgentEnrollmentService:
         name: str,
         expires_at: datetime,
         allowed_labels: Mapping[str, str] | None = None,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> IssuedEnrollmentToken:
+        await self._require_organisation_permission(
+            organisation_id,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         now = self._now()
         if expires_at.tzinfo is None or expires_at.utcoffset() is None:
             raise ValueError("Enrollment token expiry must be timezone-aware")
@@ -205,6 +251,7 @@ class AgentEnrollmentService:
         self._validate_generated_enrollment_secret(plaintext)
         record = AgentEnrollmentToken(
             id=self._id_factory(),
+            organisation_id=organisation_id or LEGACY_ORGANISATION_ID,
             name=name,
             token_hash=self.hash_secret(plaintext),
             created_at=now,
@@ -226,7 +273,32 @@ class AgentEnrollmentService:
             plaintext=SecretStr(plaintext),
         )
 
-    async def revoke_token(self, token_id: UUID) -> EnrollmentTokenView:
+    async def revoke_token(
+        self,
+        token_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> EnrollmentTokenView:
+        self._validate_authorisation_mode(
+            authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        persisted = await self._repository.get_token(token_id)
+        if persisted is None or (
+            organisation_id is not None and persisted.organisation_id != organisation_id
+        ):
+            raise AgentEnrollmentTokenInvalidError("The Agent enrollment token does not exist.")
+        await self._require_organisation_permission(
+            persisted.organisation_id,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         now = self._now()
         event = EventRecord(
             id=self._id_factory(),
@@ -237,7 +309,16 @@ class AgentEnrollmentService:
             payload={"enrollment_token_id": str(token_id)},
             deduplication_key=f"agent-enrollment-token-revoked:{token_id}",
         )
-        token = await self._repository.revoke_token(token_id, now, event)
+        token = (
+            await self._repository.revoke_token(token_id, now, event)
+            if organisation_id is None
+            else await self._repository.revoke_token(
+                token_id,
+                now,
+                event,
+                organisation_id=persisted.organisation_id,
+            )
+        )
         if token is None:
             raise AgentEnrollmentTokenInvalidError("The Agent enrollment token does not exist.")
         return _token_view(token)
@@ -276,6 +357,7 @@ class AgentEnrollmentService:
         agent_id = self._id_factory()
         agent = AgentRecord(
             id=agent_id,
+            organisation_id=token.organisation_id,
             slug=_stable_agent_slug(token.name, agent_id),
             name=token.name,
             status=AgentStatus.OFFLINE,
@@ -288,6 +370,7 @@ class AgentEnrollmentService:
         )
         credential = AgentCredential(
             id=self._id_factory(),
+            organisation_id=token.organisation_id,
             agent_id=agent.id,
             kind=AgentCredentialKind.OPAQUE_TOKEN,
             credential_hash=self.hash_secret(credential_secret),
@@ -366,6 +449,7 @@ class AgentEnrollmentService:
         now = self._now()
         replacement = AgentCredential(
             id=self._id_factory(),
+            organisation_id=authenticated.agent.organisation_id,
             agent_id=agent_id,
             kind=AgentCredentialKind.OPAQUE_TOKEN,
             credential_hash=self.hash_secret(replacement_secret),
@@ -397,7 +481,32 @@ class AgentEnrollmentService:
             plaintext=SecretStr(replacement_secret),
         )
 
-    async def revoke_agent(self, agent_id: UUID) -> AgentRecord:
+    async def revoke_agent(
+        self,
+        agent_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> AgentRecord:
+        self._validate_authorisation_mode(
+            authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        persisted = await self._repository.get_agent(agent_id)
+        if persisted is None or (
+            organisation_id is not None and persisted.organisation_id != organisation_id
+        ):
+            raise AgentNotFoundError("The Agent does not exist.", agent_id=str(agent_id))
+        await self._require_agent_permission(
+            persisted,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         now = self._now()
         event = EventRecord(
             id=self._id_factory(),
@@ -408,16 +517,232 @@ class AgentEnrollmentService:
             payload={"agent_id": str(agent_id)},
             deduplication_key=f"agent-revoked:{agent_id}",
         )
-        agent = await self._repository.revoke_agent(agent_id, now, event)
+        agent = (
+            await self._repository.revoke_agent(agent_id, now, event)
+            if organisation_id is None
+            else await self._repository.revoke_agent(
+                agent_id,
+                now,
+                event,
+                organisation_id=persisted.organisation_id,
+            )
+        )
         if agent is None:
             raise AgentNotFoundError("The Agent does not exist.", agent_id=str(agent_id))
         return agent
 
-    async def list_agents(self) -> list[AgentRecord]:
-        return await self._repository.list_agents()
+    async def list_agents(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> list[AgentRecord]:
+        self._validate_authorisation_mode(
+            authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        await self._require_exact_organisation(
+            organisation_id,
+            "agents:read",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if self._authorisation is not None and authentication_context is not None:
+            await self._authorisation.require_anywhere(
+                authentication_context.principal,
+                "agents:read",
+                credential_restrictions=authentication_context.permission_restrictions,
+            )
+        agents = (
+            await self._repository.list_agents()
+            if organisation_id is None
+            else await self._repository.list_agents(organisation_id=organisation_id)
+        )
+        if self._authorisation is None or authentication_context is None:
+            return agents
+        decisions = [
+            await self._authorisation.is_allowed(
+                authentication_context.principal,
+                "agents:read",
+                AuthorisationResource(
+                    type=ResourceType.AGENT,
+                    id=str(agent.id),
+                    organisation_id=agent.organisation_id,
+                ),
+                credential_restrictions=authentication_context.permission_restrictions,
+            )
+            for agent in agents
+        ]
+        return [agent for agent, allowed in zip(agents, decisions, strict=True) if allowed]
 
-    async def list_tokens(self) -> list[EnrollmentTokenView]:
-        return [_token_view(token) for token in await self._repository.list_tokens()]
+    async def list_tokens(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> list[EnrollmentTokenView]:
+        await self._require_organisation_permission(
+            organisation_id,
+            "agents:manage",
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        tokens = (
+            await self._repository.list_tokens()
+            if organisation_id is None
+            else await self._repository.list_tokens(organisation_id=organisation_id)
+        )
+        return [_token_view(token) for token in tokens]
+
+    async def _require_organisation_permission(
+        self,
+        organisation_id: UUID | None,
+        permission: str,
+        *,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> None:
+        await self._require_exact_organisation(
+            organisation_id,
+            permission,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if (
+            self._authorisation is None
+            or allow_legacy_authorisation
+            or allow_internal_authorisation
+        ):
+            return
+        assert organisation_id is not None
+        assert authentication_context is not None
+        await self._authorisation.require(
+            authentication_context.principal,
+            permission,
+            AuthorisationResource(
+                type=ResourceType.ORGANISATION,
+                id=str(organisation_id),
+                organisation_id=organisation_id,
+            ),
+            credential_restrictions=authentication_context.permission_restrictions,
+        )
+
+    async def _require_agent_permission(
+        self,
+        agent: AgentRecord,
+        permission: str,
+        *,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> None:
+        self._validate_authorisation_mode(
+            authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if (
+            self._authorisation is None
+            or allow_legacy_authorisation
+            or allow_internal_authorisation
+        ):
+            return
+        if authentication_context is None:
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to administer Agents."
+            )
+        if authentication_context.principal.organisation_id != agent.organisation_id:
+            await self._authorisation.audit_permission_denied(
+                authentication_context.principal,
+                permission,
+                resource_type=ResourceType.AGENT.value,
+                resource_id=str(agent.id),
+                reason="The Agent belongs to another organisation.",
+            )
+            raise PermissionDeniedError(
+                "The principal cannot administer an Agent in another organisation.",
+                required_permission=permission,
+                resource_type=ResourceType.AGENT.value,
+                resource_id=str(agent.id),
+            )
+        await self._authorisation.require(
+            authentication_context.principal,
+            permission,
+            AuthorisationResource(
+                type=ResourceType.AGENT,
+                id=str(agent.id),
+                organisation_id=agent.organisation_id,
+            ),
+            credential_restrictions=authentication_context.permission_restrictions,
+        )
+
+    async def _require_exact_organisation(
+        self,
+        organisation_id: UUID | None,
+        permission: str,
+        *,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> None:
+        self._validate_authorisation_mode(
+            authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if (
+            self._authorisation is None
+            or allow_legacy_authorisation
+            or allow_internal_authorisation
+        ):
+            return
+        if authentication_context is None:
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to administer Agent enrollment."
+            )
+        principal = authentication_context.principal
+        if organisation_id is not None and organisation_id == principal.organisation_id:
+            return
+        await self._authorisation.audit_permission_denied(
+            principal,
+            permission,
+            resource_type=ResourceType.ORGANISATION.value,
+            resource_id=str(organisation_id) if organisation_id is not None else None,
+            reason="The requested organisation does not match the authenticated principal.",
+        )
+        raise PermissionDeniedError(
+            "The requested organisation does not match the authenticated principal.",
+            required_permission=permission,
+            resource_type=ResourceType.ORGANISATION.value,
+            resource_id=str(organisation_id) if organisation_id is not None else None,
+        )
+
+    @staticmethod
+    def _validate_authorisation_mode(
+        authentication_context: AuthenticationContext | None,
+        *,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> None:
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError(
+                "Legacy and internal Agent enrollment authorisation escapes are mutually exclusive"
+            )
+        if authentication_context is not None and (
+            allow_legacy_authorisation or allow_internal_authorisation
+        ):
+            raise ValueError(
+                "Agent enrollment authorisation escapes cannot carry an authenticated principal"
+            )
 
     @staticmethod
     def hash_secret(plaintext: str) -> str:
@@ -471,6 +796,7 @@ class AgentEnrollmentService:
 def _token_view(token: AgentEnrollmentToken) -> EnrollmentTokenView:
     return EnrollmentTokenView(
         id=token.id,
+        organisation_id=token.organisation_id,
         name=token.name,
         created_at=token.created_at,
         expires_at=token.expires_at,
