@@ -7,7 +7,8 @@ from enum import IntEnum, StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from lab_platform.models.domain import HealthStatus, LabModel, utc_now
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID, HealthStatus, LabModel, utc_now
+from lab_platform.models.identity import ActorContext
 from pydantic import Field, field_validator, model_validator
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -255,6 +256,7 @@ class AgentConnectionRecord(LabModel):
 
 class GlobalBenchRecord(LabModel):
     id: str = Field(min_length=3, max_length=600)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     agent_id: UUID
     agent_slug: str = Field(min_length=1, max_length=100)
     local_bench_id: str = Field(min_length=1, max_length=500)
@@ -336,6 +338,7 @@ class ReservationLease(LabModel):
 
 class RemoteCommand(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     agent_id: UUID
     bench_id: str = Field(min_length=3, max_length=600)
     command_type: RemoteCommandType
@@ -354,6 +357,30 @@ class RemoteCommand(LabModel):
     lease_version: int | None = Field(default=None, ge=1, strict=True)
     error_code: str | None = Field(default=None, max_length=200)
     error_message: str | None = Field(default=None, max_length=2000)
+    actor_context: ActorContext | None = None
+    authorisation_snapshot_id: UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_organisation_from_actor(cls, value: object) -> object:
+        if not isinstance(value, dict) or "organisation_id" in value:
+            return value
+        actor = value.get("actor_context")
+        if isinstance(actor, ActorContext):
+            return {**value, "organisation_id": actor.organisation_id}
+        if isinstance(actor, dict) and actor.get("organisation_id") is not None:
+            return {**value, "organisation_id": actor["organisation_id"]}
+        return value
+
+    @model_validator(mode="after")
+    def validate_actor_snapshot(self) -> RemoteCommand:
+        if (
+            self.actor_context is not None
+            and self.authorisation_snapshot_id is not None
+            and self.actor_context.authorisation_snapshot_id != self.authorisation_snapshot_id
+        ):
+            raise ValueError("actor context and command authorisation snapshot IDs differ")
+        return self
 
     @field_validator("payload", mode="before")
     @classmethod
@@ -451,6 +478,7 @@ class RemoteCommandAttempt(LabModel):
 
 class DistributedOperation(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     remote_command_id: UUID
     agent_id: UUID
     bench_id: str = Field(min_length=3, max_length=600)
@@ -637,6 +665,7 @@ class BufferedAgentEvent(LabModel):
 
 class RemoteArtifactMetadata(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     agent_id: UUID
     local_artifact_id: UUID
     command_id: UUID

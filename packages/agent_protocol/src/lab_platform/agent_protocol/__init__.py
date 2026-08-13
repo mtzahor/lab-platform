@@ -1,4 +1,5 @@
 from lab_platform.agent_protocol.commands import (
+    ActorAttributedControlPayload,
     ArtifactUploadRequestPayload,
     CommandCancelPayload,
     CommandRequestPayload,
@@ -101,6 +102,7 @@ __all__ = [
     "AgentStatus",
     "AgentStatusEnvelope",
     "AgentStatusPayload",
+    "ActorAttributedControlPayload",
     "ArtifactCreatedEnvelope",
     "ArtifactCreatedPayload",
     "ArtifactUploadRequestEnvelope",

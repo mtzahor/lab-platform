@@ -478,6 +478,20 @@ def test_distributed_reservation_commands_cover_fencing_and_queue_outputs(
         ),
         (
             "POST",
+            "/api/v1/reservations/reservation-1/revoke",
+            (
+                "reservation",
+                "revoke",
+                "reservation-1",
+                "--expected-lease-version",
+                "3",
+                "--idempotency-key",
+                "admin-revoke-1",
+            ),
+            "table",
+        ),
+        (
+            "POST",
             "/api/v1/reservations/reservation-1/extend",
             (
                 "reservation",

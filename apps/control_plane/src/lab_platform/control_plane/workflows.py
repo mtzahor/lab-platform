@@ -4,13 +4,21 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
+from lab_platform.control_plane.artifact_access import ProtectedArtifactService
 from lab_platform.control_plane_core.artifacts import (
     DistributedArtifactService,
     FilesystemTransferStore,
 )
 from lab_platform.control_plane_core.workflows import WorkflowArtifactTransferDescriptor
 from lab_platform.core.artifacts import ArtifactService
-from lab_platform.models import ArtifactTransferDirection, RemoteCommand, RemoteCommandType
+from lab_platform.core.errors import ArtifactNotFoundError, AuthenticationRequiredError
+from lab_platform.models import (
+    ArtifactRecord,
+    ArtifactTransferDirection,
+    AuthenticationContext,
+    RemoteCommand,
+    RemoteCommandType,
+)
 
 _DURABLE_DESCRIPTOR_KEYS = frozenset(
     {"input_name", "agent_id", "artifact_id", "sha256", "size_bytes", "target_path"}
@@ -34,6 +42,30 @@ class ControlPlaneWorkflowArtifactPort:
         self._store = store
         self._public_url = public_url.rstrip("/")
         self._maximum_size = maximum_size_bytes
+        self._protected_artifacts: ProtectedArtifactService | None = None
+
+    def set_protected_artifact_service(
+        self,
+        artifacts: ProtectedArtifactService,
+    ) -> None:
+        self._protected_artifacts = artifacts
+
+    async def require_access(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> None:
+        await self._authorised_record(
+            artifact_id,
+            organisation_id=organisation_id,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
 
     async def issue_download(
         self,
@@ -43,14 +75,27 @@ class ControlPlaneWorkflowArtifactPort:
         artifact_id: UUID,
         target_path: str,
         idempotency_key: str,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> WorkflowArtifactTransferDescriptor:
         del idempotency_key
-        record = await self._artifacts.get(artifact_id)
+        record = await self._authorised_record(
+            artifact_id,
+            organisation_id=organisation_id,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         await self._store.stage_verified_file(
             record.id,
             record.sha256,
             record.size_bytes,
-            await self._artifacts.content_path(record.id),
+            await self._artifacts.content_path(
+                record.id,
+                organisation_id=record.organisation_id,
+            ),
             maximum_size_bytes=self._maximum_size,
         )
         return WorkflowArtifactTransferDescriptor(
@@ -60,6 +105,51 @@ class ControlPlaneWorkflowArtifactPort:
             sha256=record.sha256,
             size_bytes=record.size_bytes,
             target_path=target_path,
+        )
+
+    async def _authorised_record(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> ArtifactRecord:
+        protected = self._protected_artifacts
+        if protected is not None:
+            record = await protected.get(
+                artifact_id,
+                authentication_context=authentication_context,
+                allow_legacy_authorisation=allow_legacy_authorisation,
+                allow_internal_authorisation=allow_internal_authorisation,
+                organisation_id=organisation_id,
+            )
+            if isinstance(record, ArtifactRecord):
+                return record
+            raise ArtifactNotFoundError(
+                "Workflow inputs must reference a platform-managed artifact.",
+                artifact_id=str(artifact_id),
+            )
+
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError("Legacy and internal workflow artifact escapes are mutually exclusive")
+        if authentication_context is not None and (
+            allow_legacy_authorisation or allow_internal_authorisation
+        ):
+            raise ValueError("Workflow artifact escapes cannot carry an authenticated principal")
+        if authentication_context is not None:
+            principal_scope = authentication_context.principal.organisation_id
+            if organisation_id is not None and organisation_id != principal_scope:
+                raise ValueError("Workflow artifact organisation does not match the principal")
+            organisation_id = principal_scope
+        elif not (allow_legacy_authorisation or allow_internal_authorisation):
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to stage workflow artifacts."
+            )
+        return await self._artifacts.get(
+            artifact_id,
+            organisation_id=organisation_id,
         )
 
     async def hydrate_payload(self, command: RemoteCommand) -> Mapping[str, Any]:

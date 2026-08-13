@@ -18,20 +18,26 @@ from lab_platform.control_plane_core.reservations import (
     CoordinatedReservationLease,
     ReservationLeaseState,
 )
-from lab_platform.core.errors import ConfigurationError
+from lab_platform.core.errors import ConfigurationError, PermissionDeniedError
 from lab_platform.models import (
+    AgentRecord,
     AgentStatus,
     ArtifactTransferStatus,
+    AuthenticationContext,
+    EnrollmentStatus,
     GlobalBenchKind,
     GlobalBenchRecord,
     GlobalBenchStatus,
     HealthStatus,
+    Principal,
+    PrincipalType,
     RemoteArtifactMetadata,
     RemoteCommand,
     RemoteCommandStatus,
     RemoteCommandType,
     Reservation,
     ReservationLease,
+    ResourceType,
 )
 
 
@@ -109,6 +115,7 @@ def test_runtime_reissues_unrecoverable_artifact_capabilities_and_reuses_live_on
             token = await runtime.enrollment.issue_token(
                 name="artifact-agent",
                 expires_at=now + timedelta(minutes=10),
+                allow_internal_authorisation=True,
             )
             enrolled = await runtime.enrollment.enroll(
                 plaintext_token=token.plaintext.get_secret_value(),
@@ -407,7 +414,10 @@ def test_runtime_monitor_drives_timeout_cleanup_and_suppresses_drain_refresh_fai
         workflow_cleanup.assert_awaited_once_with()
         ci_maintenance.assert_awaited_once_with()
         list_agents.assert_awaited_once_with(status=AgentStatus.DRAINING)
-        assert refresh.await_args_list == [call(UUID(int=602)), call(UUID(int=603))]
+        assert refresh.await_args_list == [
+            call(UUID(int=602), allow_internal_authorisation=True),
+            call(UUID(int=603), allow_internal_authorisation=True),
+        ]
 
     asyncio.run(scenario())
 
@@ -428,7 +438,116 @@ def test_sqlite_path_validation_and_disconnected_reconciliation(
         monkeypatch.setattr(runtime.presence, "active_connection", AsyncMock(return_value=None))
         monkeypatch.setattr(runtime.presence, "get_agent", get_agent)
         with pytest.raises(RuntimeError, match="not connected"):
-            await runtime.request_reconciliation(UUID(int=700))
+            await runtime.request_reconciliation(
+                UUID(int=700),
+                allow_legacy_authorisation=True,
+            )
         get_agent.assert_awaited_once_with(UUID(int=700))
+
+    asyncio.run(scenario())
+
+
+def test_phase6_runtime_agent_wrappers_authorise_exact_tenant_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        runtime = _runtime(tmp_path)
+        organisation_id = UUID(int=90_001)
+        agent = AgentRecord(
+            id=UUID(int=90_002),
+            organisation_id=organisation_id,
+            slug="phase6-agent",
+            name="Phase 6 Agent",
+            status=AgentStatus.ONLINE,
+            version="0.6.0-alpha",
+            protocol_version="1.0",
+            registered_at=datetime.now(UTC) - timedelta(days=1),
+            enrollment_status=EnrollmentStatus.ENROLLED,
+        )
+        context = AuthenticationContext(
+            principal=Principal(
+                id=UUID(int=90_003),
+                type=PrincipalType.USER,
+                organisation_id=organisation_id,
+                display_name="Denied administrator",
+            )
+        )
+        get_agent = AsyncMock(return_value=agent)
+        evaluate = AsyncMock(
+            return_value=SimpleNamespace(allowed=False, granting_assignment_ids=frozenset())
+        )
+        require = AsyncMock(side_effect=PermissionDeniedError("denied"))
+        active_connection = AsyncMock()
+        hub_send = AsyncMock()
+        hub_close = AsyncMock()
+        drain = AsyncMock()
+        undrain = AsyncMock()
+        revoke = AsyncMock()
+        timeline = AsyncMock()
+        monkeypatch.setattr(runtime.presence, "get_agent", get_agent)
+        monkeypatch.setattr(runtime.presence, "active_connection", active_connection)
+        monkeypatch.setattr(runtime.authorisation, "evaluate", evaluate)
+        monkeypatch.setattr(runtime.authorisation, "require", require)
+        monkeypatch.setattr(runtime.hub, "send", hub_send)
+        monkeypatch.setattr(runtime.hub, "close_agent", hub_close)
+        monkeypatch.setattr(runtime.drain, "drain", drain)
+        monkeypatch.setattr(runtime.drain, "undrain", undrain)
+        monkeypatch.setattr(runtime.enrollment, "revoke_agent", revoke)
+        monkeypatch.setattr(runtime, "record_timeline", timeline)
+
+        with pytest.raises(PermissionDeniedError):
+            await runtime.refresh_inventory(
+                agent.id,
+                authentication_context=context,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await runtime.request_reconciliation(
+                agent.id,
+                authentication_context=context,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await runtime.drain_agent(
+                agent.id,
+                authentication_context=context,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await runtime.undrain_agent(
+                agent.id,
+                authentication_context=context,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await runtime.revoke_agent(
+                agent.id,
+                authentication_context=context,
+            )
+
+        assert (
+            get_agent.await_args_list
+            == [
+                call(agent.id, organisation_id=organisation_id),
+            ]
+            * 5
+        )
+        assert [item.args[1] for item in require.await_args_list] == [
+            "agents:manage",
+            "agents:manage",
+            "agents:drain",
+            "agents:drain",
+            "agents:manage",
+        ]
+        assert all(
+            item.args[2].type is ResourceType.AGENT
+            and item.args[2].id == str(agent.id)
+            and item.args[2].organisation_id == organisation_id
+            for item in require.await_args_list
+        )
+        active_connection.assert_not_awaited()
+        hub_send.assert_not_awaited()
+        hub_close.assert_not_awaited()
+        drain.assert_not_awaited()
+        undrain.assert_not_awaited()
+        revoke.assert_not_awaited()
+        timeline.assert_not_awaited()
 
     asyncio.run(scenario())

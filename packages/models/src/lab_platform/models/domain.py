@@ -8,6 +8,12 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Phase 6 migrates every pre-existing operational record into this seeded
+# organisation.  Keeping the compatibility UUID in the model layer lets Phase 5
+# callers omit tenant context without producing records whose ownership is
+# ambiguous after persistence.
+LEGACY_ORGANISATION_ID = UUID("00000000-0000-0000-0000-000000000001")
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -134,8 +140,13 @@ class BenchSnapshot(LabModel):
 
 class Reservation(LabModel):
     id: UUID
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     bench_id: str
     owner: str
+    # ``owner`` remains as a readable/legacy compatibility value. Phase 6
+    # ownership decisions use these stable identity fields when present.
+    owner_principal_id: UUID | None = None
+    owner_principal_type: Literal["USER", "SERVICE_ACCOUNT"] | None = None
     created_at: datetime = Field(default_factory=utc_now)
     released_at: datetime | None = None
     status: ReservationStatus = ReservationStatus.ACTIVE

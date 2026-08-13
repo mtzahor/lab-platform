@@ -16,7 +16,12 @@ from lab_platform.core.errors import (
     ArtifactTooLargeError,
     InvalidArtifactError,
 )
-from lab_platform.models import ArtifactOwnerType, ArtifactRecord, EventRecord
+from lab_platform.models import (
+    LEGACY_ORGANISATION_ID,
+    ArtifactOwnerType,
+    ArtifactRecord,
+    EventRecord,
+)
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -45,7 +50,12 @@ class ArtifactRetentionRepository(Protocol):
         self, *, expires_at_or_before: datetime, limit: int
     ) -> list[ArtifactRecord]: ...
 
-    async def delete(self, artifact_id: UUID) -> bool: ...
+    async def delete(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> bool: ...
 
 
 class ArtifactEventRepository(Protocol):
@@ -89,9 +99,18 @@ class ArtifactService:
         expires_at: datetime | None = None,
         metadata: Mapping[str, str] | None = None,
         idempotency_key: str | None = None,
+        organisation_id: UUID | None = None,
     ) -> ArtifactRecord:
         if idempotency_key:
-            existing = await self._repository.get_by_idempotency_key(owner_id, idempotency_key)
+            existing = (
+                await self._repository.get_by_idempotency_key(owner_id, idempotency_key)
+                if organisation_id is None
+                else await self._repository.get_by_idempotency_key(  # type: ignore[call-arg]
+                    owner_id,
+                    idempotency_key,
+                    organisation_id=organisation_id,
+                )
+            )
             if existing is not None:
                 return existing
         safe_name = normalize_artifact_name(name)
@@ -144,6 +163,7 @@ class ArtifactService:
                 effective_expiry = created_at + timedelta(seconds=self._retention_seconds)
             record = ArtifactRecord(
                 id=artifact_id,
+                organisation_id=organisation_id or LEGACY_ORGANISATION_ID,
                 owner_type=owner_type,
                 owner_id=owner_id,
                 name=safe_name,
@@ -184,6 +204,7 @@ class ArtifactService:
         expires_at: datetime | None = None,
         metadata: Mapping[str, str] | None = None,
         idempotency_key: str | None = None,
+        organisation_id: UUID | None = None,
     ) -> ArtifactRecord:
         async def chunks() -> AsyncIterable[bytes]:
             yield content
@@ -199,10 +220,23 @@ class ArtifactService:
             expires_at=expires_at,
             metadata=metadata,
             idempotency_key=idempotency_key,
+            organisation_id=organisation_id,
         )
 
-    async def get(self, artifact_id: UUID) -> ArtifactRecord:
-        record = await self._repository.get(artifact_id)
+    async def get(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> ArtifactRecord:
+        record = (
+            await self._repository.get(artifact_id)
+            if organisation_id is None
+            else await self._repository.get(  # type: ignore[call-arg]
+                artifact_id,
+                organisation_id=organisation_id,
+            )
+        )
         if record is None:
             raise ArtifactNotFoundError(
                 f"Artifact {artifact_id} does not exist.", artifact_id=str(artifact_id)
@@ -213,16 +247,39 @@ class ArtifactService:
         self,
         owner_id: UUID,
         idempotency_key: str,
+        *,
+        organisation_id: UUID | None = None,
     ) -> ArtifactRecord | None:
-        return await self._repository.get_by_idempotency_key(owner_id, idempotency_key)
+        if organisation_id is None:
+            return await self._repository.get_by_idempotency_key(owner_id, idempotency_key)
+        return await self._repository.get_by_idempotency_key(  # type: ignore[call-arg]
+            owner_id,
+            idempotency_key,
+            organisation_id=organisation_id,
+        )
 
     async def list_for_owner(
-        self, owner_type: ArtifactOwnerType, owner_id: UUID
+        self,
+        owner_type: ArtifactOwnerType,
+        owner_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
     ) -> list[ArtifactRecord]:
-        return await self._repository.list_for_owner(owner_type, owner_id)
+        if organisation_id is None:
+            return await self._repository.list_for_owner(owner_type, owner_id)
+        return await self._repository.list_for_owner(  # type: ignore[call-arg]
+            owner_type,
+            owner_id,
+            organisation_id=organisation_id,
+        )
 
-    async def content_path(self, artifact_id: UUID) -> Path:
-        record = await self.get(artifact_id)
+    async def content_path(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> Path:
+        record = await self.get(artifact_id, organisation_id=organisation_id)
         path = Path(record.path).resolve()
         root = self._storage_root.resolve()
         if not path.is_relative_to(root) or not path.is_file():
@@ -231,6 +288,34 @@ class ArtifactService:
             )
         await self._emit("ARTIFACT_DOWNLOADED", record)
         return path
+
+    async def delete(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> ArtifactRecord:
+        """Delete one platform-managed artifact within its tenant boundary.
+
+        Filesystem cleanup follows the same generated-path validation and ordering
+        used by retention expiry. Legacy callers may omit ``organisation_id``;
+        Phase 6 callers must pass their authenticated tenant.
+        """
+
+        record = await self.get(artifact_id, organisation_id=organisation_id)
+        self._remove_managed_content(record)
+        repository = cast(ArtifactRetentionRepository, self._repository)
+        deleted = await repository.delete(
+            artifact_id,
+            organisation_id=organisation_id,
+        )
+        if not deleted:
+            raise ArtifactNotFoundError(
+                f"Artifact {artifact_id} does not exist.",
+                artifact_id=str(artifact_id),
+            )
+        await self._emit("ARTIFACT_DELETED", record)
+        return record
 
     async def expire_due(
         self,

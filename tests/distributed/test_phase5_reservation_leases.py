@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -27,25 +27,71 @@ from lab_platform.control_plane_core.reservations import (
     ReservationGrantRequest,
     ReservationLeaseState,
 )
+from lab_platform.core.authorisation import AuthorisationService
 from lab_platform.core.errors import (
+    AuthenticationRequiredError,
     BenchAlreadyReservedError,
+    PermissionDeniedError,
     ReservationOwnerMismatchError,
 )
 from lab_platform.models import (
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
     EnrollmentStatus,
     GlobalBenchKind,
     GlobalBenchRecord,
     GlobalBenchStatus,
     HealthStatus,
+    OrganisationMembership,
+    Principal,
+    PrincipalType,
     ReservationLease,
+    ReservationOwner,
     ReservationStatus,
+    ResourceType,
+    RoleAssignment,
+    RoleName,
+    RoleSubjectType,
 )
 
 NOW = datetime(2026, 7, 28, 14, tzinfo=UTC)
 AGENT_ID = UUID(int=1)
 BENCH_ID = "home-lab/bench-a"
+PHASE6_PRINCIPAL_ID = UUID(int=70_001)
+
+
+class ScopedAuthorisationRepository:
+    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
+        self.assignments = tuple(assignments)
+
+    async def get_organisation_membership(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> OrganisationMembership | None:
+        del organisation_id, user_id
+        return None
+
+    async def list_team_ids_for_user(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> Collection[UUID]:
+        del organisation_id, user_id
+        return ()
+
+    async def list_role_assignments(
+        self,
+        organisation_id: UUID,
+        subjects: Collection[tuple[RoleSubjectType, UUID]],
+    ) -> Sequence[RoleAssignment]:
+        return tuple(
+            assignment
+            for assignment in self.assignments
+            if assignment.organisation_id == organisation_id
+            and (assignment.subject_type, assignment.subject_id) in subjects
+        )
 
 
 class MutableClock:
@@ -137,7 +183,7 @@ class FakeCentralReservationLeaseRepository:
         self.records: dict[UUID, CoordinatedReservationLease] = {}
         self.current_by_bench: dict[str, UUID] = {}
         self.history: dict[str, list[ReservationLease]] = {}
-        self.mutations: dict[str, _Mutation] = {}
+        self.mutations: dict[tuple[UUID, str], _Mutation] = {}
         self.agent_status_on_next_grant: AgentStatus | None = None
         self.race_on_next_replace: CoordinatedReservationLease | None = None
 
@@ -155,9 +201,10 @@ class FakeCentralReservationLeaseRepository:
         self,
         mutation_key: str,
         *,
+        organisation_id: UUID,
         request_fingerprint: str,
     ) -> LeaseWriteResult | None:
-        mutation = self.mutations.get(mutation_key)
+        mutation = self.mutations.get((organisation_id, mutation_key))
         if mutation is None:
             return None
         if mutation.fingerprint != request_fingerprint:
@@ -179,8 +226,12 @@ class FakeCentralReservationLeaseRepository:
         expected_agent_status: AgentStatus,
         expected_bench_status: GlobalBenchStatus,
     ) -> LeaseWriteResult | None:
+        bench = self.directory.benches.get(request.reservation.bench_id)
+        if bench is None:
+            return None
         replay = await self.get_mutation_result(
             mutation_key,
+            organisation_id=bench.organisation_id,
             request_fingerprint=request_fingerprint,
         )
         if replay is not None:
@@ -211,8 +262,11 @@ class FakeCentralReservationLeaseRepository:
             valid_until=request.lease_valid_until,
             lease_version=lease_version,
         )
+        reservation = request.reservation.model_copy(
+            update={"organisation_id": bench.organisation_id}
+        )
         record = CoordinatedReservationLease(
-            reservation=request.reservation,
+            reservation=reservation,
             lease=lease,
             state=ReservationLeaseState.ACTIVATING,
             revision=1,
@@ -221,7 +275,10 @@ class FakeCentralReservationLeaseRepository:
         self.records[record.reservation.id] = record
         self.current_by_bench[record.lease.bench_id] = record.reservation.id
         history.append(lease)
-        self.mutations[mutation_key] = _Mutation(request_fingerprint, result)
+        self.mutations[(record.reservation.organisation_id, mutation_key)] = _Mutation(
+            request_fingerprint,
+            result,
+        )
         return result
 
     async def replace_if_current(
@@ -236,6 +293,7 @@ class FakeCentralReservationLeaseRepository:
     ) -> LeaseWriteResult | None:
         replay = await self.get_mutation_result(
             mutation_key,
+            organisation_id=record.reservation.organisation_id,
             request_fingerprint=request_fingerprint,
         )
         if replay is not None:
@@ -282,7 +340,10 @@ class FakeCentralReservationLeaseRepository:
             ]
         self._persist_record(record)
         result = LeaseWriteResult(record, LeaseWriteDisposition.APPLIED)
-        self.mutations[mutation_key] = _Mutation(request_fingerprint, result)
+        self.mutations[(record.reservation.organisation_id, mutation_key)] = _Mutation(
+            request_fingerprint,
+            result,
+        )
         return result
 
     async def list(
@@ -392,6 +453,47 @@ def _stack(
         offline_reservation_grace_seconds=offline_grace_seconds,
     )
     return service, repository, directory, synchronizer, clock
+
+
+def _phase6_reservation_identity(
+    role: RoleName,
+    *,
+    resource_id: str = BENCH_ID,
+    permission_restrictions: set[str] | None = None,
+    principal_id: UUID = PHASE6_PRINCIPAL_ID,
+) -> tuple[AuthorisationService, AuthenticationContext, ReservationOwner]:
+    organisation_id = _bench().organisation_id
+    principal = Principal(
+        id=principal_id,
+        type=PrincipalType.USER,
+        organisation_id=organisation_id,
+        display_name=role.value,
+    )
+    assignment = RoleAssignment(
+        organisation_id=organisation_id,
+        subject_type=RoleSubjectType.USER,
+        subject_id=principal.id,
+        role=role,
+        resource_type=ResourceType.BENCH,
+        resource_id=resource_id,
+        created_by=principal.id,
+        created_at=NOW - timedelta(minutes=1),
+    )
+    return (
+        AuthorisationService(
+            ScopedAuthorisationRepository((assignment,)),
+            clock=lambda: NOW,
+        ),
+        AuthenticationContext(
+            principal=principal,
+            permission_restrictions=permission_restrictions,
+        ),
+        ReservationOwner(
+            principal_id=principal.id,
+            principal_type=principal.type,
+            display_name=principal.display_name,
+        ),
+    )
 
 
 def test_grant_is_tentative_until_exact_agent_confirmation() -> None:
@@ -1059,5 +1161,158 @@ def test_renewal_cas_does_not_overwrite_concurrent_release() -> None:
                 idempotency_key="renew-race",
             )
         assert repository.records[active.reservation.id] == concurrent_release
+
+    asyncio.run(scenario())
+
+
+def test_phase6_reservation_lifecycle_requires_reserver_scope_before_side_effects() -> None:
+    async def scenario() -> None:
+        service, repository, _, synchronizer, clock = _stack()
+        viewer, viewer_context, viewer_owner = _phase6_reservation_identity(RoleName.VIEWER)
+        service.set_authorisation_service(viewer)
+        with pytest.raises(AuthenticationRequiredError):
+            await service.grant(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                owner="implicit legacy",
+                idempotency_key="implicit-legacy-grant",
+            )
+        with pytest.raises(PermissionDeniedError):
+            await service.grant(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                owner=viewer_context.principal.display_name,
+                owner_principal=viewer_owner,
+                idempotency_key="viewer-grant",
+                authentication_context=viewer_context,
+            )
+        assert repository.records == {}
+        assert repository.mutations == {}
+        assert synchronizer.apply_calls == []
+
+        reserver, context, owner = _phase6_reservation_identity(
+            RoleName.RESERVER,
+            principal_id=UUID(int=70_002),
+        )
+        service.set_authorisation_service(reserver)
+        with pytest.raises(ValueError, match="owner does not match"):
+            await service.grant(
+                agent_id=AGENT_ID,
+                bench_id=BENCH_ID,
+                owner="spoofed owner",
+                owner_principal=owner,
+                idempotency_key="spoofed-grant",
+                authentication_context=context,
+            )
+        assert repository.records == {}
+
+        active = await service.grant(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            owner=context.principal.display_name,
+            owner_principal=owner,
+            idempotency_key="reserver-grant",
+            authentication_context=context,
+        )
+        assert active.reservation.organisation_id == context.principal.organisation_id
+        assert active.reservation.owner_principal_id == context.principal.id
+
+        clock.now += timedelta(seconds=1)
+        renewed = await service.renew(
+            active.reservation.id,
+            owner=context.principal.display_name,
+            owner_principal=owner,
+            expected_lease_version=active.lease.lease_version,
+            idempotency_key="reserver-renew",
+            authentication_context=context,
+        )
+        assert renewed.lease.lease_version == 2
+        released = await service.release(
+            active.reservation.id,
+            owner=context.principal.display_name,
+            owner_principal=owner,
+            expected_lease_version=renewed.lease.lease_version,
+            idempotency_key="reserver-release",
+            authentication_context=context,
+        )
+        assert released.state is ReservationLeaseState.RELEASED
+        legacy = await service.grant(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            owner="explicit legacy",
+            idempotency_key="explicit-legacy-grant",
+            allow_legacy_authorisation=True,
+        )
+        assert legacy.state is ReservationLeaseState.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_phase6_reservation_scope_and_credential_narrowing_deny_without_grant() -> None:
+    async def scenario() -> None:
+        for authorisation, context, owner in (
+            _phase6_reservation_identity(
+                RoleName.RESERVER,
+                resource_id="home-lab/other-bench",
+                principal_id=UUID(int=70_003),
+            ),
+            _phase6_reservation_identity(
+                RoleName.RESERVER,
+                permission_restrictions={"benches:read"},
+                principal_id=UUID(int=70_004),
+            ),
+        ):
+            service, repository, _, synchronizer, _ = _stack()
+            service.set_authorisation_service(authorisation)
+            with pytest.raises(PermissionDeniedError):
+                await service.grant(
+                    agent_id=AGENT_ID,
+                    bench_id=BENCH_ID,
+                    owner=context.principal.display_name,
+                    owner_principal=owner,
+                    idempotency_key=f"denied-{context.principal.id}",
+                    authentication_context=context,
+                )
+            assert repository.records == {}
+            assert repository.mutations == {}
+            assert synchronizer.apply_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_phase6_reservation_revoke_requires_bench_management_scope() -> None:
+    async def scenario() -> None:
+        service, repository, _, synchronizer, _ = _stack()
+        active = await service.grant(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            owner="legacy owner",
+            idempotency_key="revoke-target",
+        )
+        viewer, viewer_context, _ = _phase6_reservation_identity(RoleName.VIEWER)
+        service.set_authorisation_service(viewer)
+        with pytest.raises(PermissionDeniedError):
+            await service.revoke(
+                active.reservation.id,
+                expected_lease_version=active.lease.lease_version,
+                idempotency_key="viewer-revoke",
+                authentication_context=viewer_context,
+            )
+        assert repository.records[active.reservation.id].state is ReservationLeaseState.ACTIVE
+        assert synchronizer.release_calls == []
+
+        administrator, admin_context, _ = _phase6_reservation_identity(
+            RoleName.LAB_ADMIN,
+            principal_id=UUID(int=70_005),
+        )
+        service.set_authorisation_service(administrator)
+        revoked = await service.revoke(
+            active.reservation.id,
+            expected_lease_version=active.lease.lease_version,
+            idempotency_key="admin-revoke",
+            authentication_context=admin_context,
+        )
+        assert revoked.state is ReservationLeaseState.REVOKED
+        assert synchronizer.release_calls[-1] == revoked.lease
 
     asyncio.run(scenario())

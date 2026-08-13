@@ -1,8 +1,8 @@
 # REST API
 
-Phase 5 has two HTTP applications. Clients use the central control plane; the owning Agent is
-selected by global bench identity and never appears in a client URL. Each Agent also retains its
-local compatibility/diagnostic API.
+The distributed platform has two HTTP applications. Clients use the central control plane; the
+owning Agent is selected by global bench identity and never appears in a client URL. Each Agent
+also retains its local compatibility/diagnostic API.
 
 Both expose Swagger at `/docs`, ReDoc at `/redoc`, and OpenAPI at `/openapi.json`; public resources
 use `/api/v1`. Checked-in contracts are
@@ -10,12 +10,21 @@ use `/api/v1`. Checked-in contracts are
 [`docs/openapi.json`](docs/openapi.json) for the standalone Agent. REST responses include
 `X-Request-ID`.
 
-## Phase 5 control-plane API
+## Control-plane authentication
 
-Client requests use a hashed, scoped bearer token. If the control-plane token store is empty, the
-first `POST /api/v1/tokens` request may bootstrap it without a bearer; that first token must grant
-all nine supported scopes. Only this token-creation route participates in empty-store bootstrap.
-Once a token exists, route dependencies enforce the following scopes:
+The control plane recognizes a Phase 6 user session or identity-bound service-account credential
+first. It derives the organisation and principal from that bearer, resolves trusted resources,
+applies roles/access policies/credential narrowing, and passes the authenticated context into
+protected application services. Identity-only administration routes never accept a legacy token.
+
+When `authorisation.legacy_token_compatibility_enabled` is true, protected operational routes may
+fall back to a hashed Phase 4/5 scope-bearing token. If that token store is empty, the first
+`POST /api/v1/tokens` request may bootstrap it without a bearer and must grant all nine supported
+scopes. Only this token-creation route participates in empty-store bootstrap. Legacy tokens have no
+organisation principal; their inventory and operational compatibility queries remain
+deployment-global and are excluded from Phase 6 tenant-isolation guarantees.
+
+The legacy scope map is:
 
 | Scope | Protected control-plane resources |
 | --- | --- |
@@ -55,34 +64,64 @@ before reconnecting.
 | Remote workflows | `/api/v1/workflows`, `/api/v1/workflows/{name}/runs` |
 | Remote operations | `/api/v1/operations`, `/{id}`, `/{id}/cancel`, `/{id}/reconcile`, `/{id}/artifacts/serial` |
 | Distributed CI | `/api/v1/ci/sessions`, `/{id}/run`, `/{id}/heartbeat`, `/{id}/cancel`, `/{id}/finalize`, `/{id}/artifacts` |
-| Artifacts | `GET/POST /api/v1/artifacts`, `/api/v1/artifacts/{id}`, `/{id}/content`, `/{id}/transfers` |
+| Artifacts | `GET/POST /api/v1/artifacts`, `GET/DELETE /api/v1/artifacts/{id}`, `/{id}/content`, `/{id}/transfers` |
 | Transfer capabilities | `/api/v1/artifact-transfers/{id}/content` |
+| User authentication | `/api/v1/auth/login`, `/refresh`, `/logout`, `/me`, `/sessions` |
+| OIDC | `/api/v1/auth/oidc/login`, `/callback` |
+| Identity administration | `/api/v1/organisation`, `/users`, `/teams`, `/service-accounts`, `/role-assignments`, `/permissions/effective` |
+| Access policies and audit | `/api/v1/access-policies/benches`, `/access-policies/workflows`, `/audit-events` |
 
 Global bench IDs contain a slash, for example `home-lab/esp32-01`. Action and detail routes use a
 path-capturing parameter, so preserve that separator in the request path (the CLI does this for
 you) and percent-encode unsafe characters within each component. Reservation creation does not
 return an active assignment until the Agent confirms the versioned lease. Remote operations can
 become `UNKNOWN` during a disconnection and are finalized only by reconciliation or its configured
-timeout. See [Phase 5](docs/PHASE_5.md) for these state machines and the generated control-plane
-OpenAPI contract for exact request/response schemas.
+timeout. See [Phase 5](docs/PHASE_5.md) for these state machines,
+[Phase 6](docs/PHASE_6.md) for the principal boundary, and the generated control-plane OpenAPI
+contract for exact request/response schemas.
+
+For a Phase 6 principal, identity-backed direct/workflow/CI remote commands persist the initiating
+actor and exact decision snapshot. Principal-initiated operation cancellation/reconciliation and
+Agent inventory-refresh/drain/undrain requests put matching actor/snapshot evidence on their Agent
+control payloads; inconsistent evidence is rejected before dispatch. Principal-requested CI cancel
+atomically persists an exact `CI_SESSION` snapshot and actor with `CANCEL_REQUESTED`, validates the
+trusted session-to-command/operation/Agent/bench/reservation route, and reuses the actor/evidence
+for restart-time delivery retry. A timeout-originated cancellation remains unattributed and cannot
+later adopt a caller. An exact idempotent retry is bound to the stable principal, tenant, request
+content, and still-allowed required permissions and returns the original accepted work and
+snapshot; workflow replay also fingerprints the effective credential
+restrictions. A fresh session or route-decision snapshot does not create duplicate work, while
+changed content, a different principal, or credential restrictions that remove a required
+permission are rejected. System timeouts/automatic maintenance and legacy calls without identity
+evidence omit Phase 6 actor/snapshot fields.
+
+Phase 6 artifact list/read/content/upload/transfer/platform-delete operations inherit permissions
+from trusted operation, workflow-run, CI-session, command, Agent, and bench relationships. Linked
+CI artifacts require session access plus `artifacts:*` on both the workflow and actual bench.
+Collections filter inaccessible records; named denials follow the configured hidden-`404` policy.
+`WORKFLOW_STEP` parents currently fail closed for a Phase 6 principal, and remote-artifact deletion
+is not supported. The transfer-capability content routes remain a separate short-lived bearer
+boundary. See [Artifacts](docs/ARTIFACTS.md#phase-6-parent-inherited-access).
 
 ### Direct remote actions
 
 These client-facing routes hide Agent routing and always return `202` with a global
 `operation_id`, durable `command_id`, and current status:
 
-| Method | Path | Scope and reservation rule |
+| Method | Path | Legacy scope / Phase 6 permission and reservation rule |
 | --- | --- | --- |
-| POST | `/api/v1/benches/{global_id}/actions/probe` | `workflows:run`; capability `probe`; no reservation required |
-| POST | `/api/v1/benches/{global_id}/actions/read-serial` | `workflows:run`; capability `serial`; no reservation required |
-| POST | `/api/v1/benches/{global_id}/actions/reset` | `workflows:run`; active confirmed lease owned by request `owner` |
-| POST | `/api/v1/benches/{global_id}/actions/flash` | `workflows:run` + `artifacts:write`; active confirmed lease owned by multipart `owner` |
+| POST | `/api/v1/benches/{global_id}/actions/probe` | `workflows:run` / `benches:operate`; capability `probe`; no reservation |
+| POST | `/api/v1/benches/{global_id}/actions/read-serial` | `workflows:run` / `benches:serial`; capability `serial`; no reservation |
+| POST | `/api/v1/benches/{global_id}/actions/reset` | `workflows:run` / `benches:reset`; active confirmed owned lease |
+| POST | `/api/v1/benches/{global_id}/actions/flash` | `workflows:run` + `artifacts:write` / `benches:flash` + inherited `artifacts:write`; active confirmed owned lease |
 
 Probe/reset accept JSON `{"owner": "..."}`. Serial read additionally accepts
 `timeout_seconds`, `until_pattern`, and `max_lines`. Flash is multipart with `firmware`, `owner`,
 and optional `version`. All accept an optional `Idempotency-Key` header. Firmware content is staged
 in control-plane artifact storage and delivered to the owning Agent by a fresh short-lived
 capability; it is not embedded in durable command payloads or sent over the WebSocket.
+For a Phase 6 principal, the server derives reservation/operation ownership from the principal and
+does not trust the supplied owner string.
 
 Poll `GET /api/v1/operations/{operation_id}` for the Agent-confirmed terminal result. A successful
 serial command exposes its synchronized text through
@@ -101,7 +140,8 @@ when the process binds to loopback and `development.allow_tls_termination_proxy:
 rejected on non-loopback binds. An HTTPS URL with neither direct certificates nor that constrained
 proxy mode is rejected rather than serving misleading plaintext.
 
-The production control-plane store is PostgreSQL. Both `postgresql://` and
+The production control-plane store is PostgreSQL. Schema v10 uses composite tenant workflow keys
+and organisation-scoped CI/artifact/reservation/queue retry keys. Both `postgresql://` and
 `postgresql+psycopg://` configuration spellings are accepted; the latter is normalized to a
 Psycopg/libpq `postgresql://` DSN. SQLite remains available for the loopback developer demo, but
 is not the recommended central production store. Apply migrations before starting a deployment

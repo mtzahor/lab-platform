@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from lab_platform.models.domain import LabModel, utc_now
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID, LabModel, utc_now
 from pydantic import Field, field_validator, model_validator
 
 _AGENT_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$")
@@ -38,6 +38,7 @@ class AgentCredentialKind(StrEnum):
 
 class AgentRecord(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     slug: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=200)
     status: AgentStatus = AgentStatus.PENDING
@@ -117,6 +118,7 @@ class AgentRecord(LabModel):
 
 class AgentEnrollmentToken(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     name: str = Field(min_length=1, max_length=200)
     token_hash: str = Field(min_length=64, max_length=64)
     created_at: datetime = Field(default_factory=utc_now)
@@ -174,6 +176,7 @@ class AgentEnrollmentToken(LabModel):
 
 class AgentCredential(LabModel):
     id: UUID = Field(default_factory=uuid4)
+    organisation_id: UUID = LEGACY_ORGANISATION_ID
     agent_id: UUID
     kind: AgentCredentialKind = AgentCredentialKind.OPAQUE_TOKEN
     credential_hash: str = Field(min_length=64, max_length=64)

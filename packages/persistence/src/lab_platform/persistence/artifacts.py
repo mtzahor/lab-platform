@@ -5,7 +5,7 @@ import sqlite3
 from datetime import UTC, datetime
 from uuid import UUID
 
-from lab_platform.models import ArtifactOwnerType, ArtifactRecord
+from lab_platform.models import LEGACY_ORGANISATION_ID, ArtifactOwnerType, ArtifactRecord
 from lab_platform.persistence.database import SQLiteDatabase
 
 
@@ -24,17 +24,19 @@ class SQLiteGenericArtifactRepository:
         with self._database.transaction(immediate=True) as connection:
             if idempotency_key is not None:
                 existing = connection.execute(
-                    "SELECT * FROM artifacts WHERE owner_id = ? AND idempotency_key = ?",
-                    (str(record.owner_id), idempotency_key),
+                    "SELECT * FROM artifacts WHERE owner_id = ? AND idempotency_key = ? "
+                    "AND organisation_id = ?",
+                    (str(record.owner_id), idempotency_key, str(record.organisation_id)),
                 ).fetchone()
                 if existing is not None:
                     return _artifact_from_row(existing)
             try:
                 connection.execute(
                     "INSERT INTO artifacts "
-                    "(id, owner_type, owner_id, name, artifact_type, content_type, path, "
+                    "(id, organisation_id, owner_type, owner_id, name, artifact_type, "
+                    "content_type, path, "
                     "size_bytes, sha256, created_at, expires_at, metadata_json, idempotency_key) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (*_artifact_values(record), idempotency_key),
                 )
             except sqlite3.IntegrityError:
@@ -43,18 +45,31 @@ class SQLiteGenericArtifactRepository:
                 if idempotency_key is None:
                     raise
                 existing = connection.execute(
-                    "SELECT * FROM artifacts WHERE owner_id = ? AND idempotency_key = ?",
-                    (str(record.owner_id), idempotency_key),
+                    "SELECT * FROM artifacts WHERE owner_id = ? AND idempotency_key = ? "
+                    "AND organisation_id = ?",
+                    (str(record.owner_id), idempotency_key, str(record.organisation_id)),
                 ).fetchone()
                 if existing is None:
                     raise
                 return _artifact_from_row(existing)
         return record
 
-    async def get(self, artifact_id: UUID) -> ArtifactRecord | None:
+    async def get(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> ArtifactRecord | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(artifact_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(artifact_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM artifacts WHERE id = ?", (str(artifact_id),)
+                f"SELECT * FROM artifacts WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _artifact_from_row(row) if row is not None else None
 
@@ -62,11 +77,15 @@ class SQLiteGenericArtifactRepository:
         self,
         owner_id: UUID,
         key: str,
+        *,
+        organisation_id: UUID | None = None,
     ) -> ArtifactRecord | None:
+        scope_id = organisation_id or LEGACY_ORGANISATION_ID
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM artifacts WHERE owner_id = ? AND idempotency_key = ?",
-                (str(owner_id), key),
+                "SELECT * FROM artifacts WHERE owner_id = ? AND idempotency_key = ? "
+                "AND organisation_id = ?",
+                (str(owner_id), key, str(scope_id)),
             ).fetchone()
         return _artifact_from_row(row) if row is not None else None
 
@@ -74,12 +93,21 @@ class SQLiteGenericArtifactRepository:
         self,
         owner_type: ArtifactOwnerType,
         owner_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
     ) -> list[ArtifactRecord]:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (_enum_value(owner_type), str(owner_id), str(organisation_id))
+            if organisation_id is not None
+            else (_enum_value(owner_type), str(owner_id))
+        )
         with self._database.transaction() as connection:
             rows = connection.execute(
-                "SELECT * FROM artifacts WHERE owner_type = ? AND owner_id = ? "
+                "SELECT * FROM artifacts WHERE owner_type = ? AND owner_id = ?"
+                f"{scope} "  # noqa: S608
                 "ORDER BY created_at, id",
-                (_enum_value(owner_type), str(owner_id)),
+                values,
             ).fetchall()
         return [_artifact_from_row(row) for row in rows]
 
@@ -87,6 +115,7 @@ class SQLiteGenericArtifactRepository:
         self,
         *,
         expires_at_or_before: datetime,
+        organisation_id: UUID | None = None,
         limit: int = 100,
     ) -> list[ArtifactRecord]:
         if limit <= 0:
@@ -94,18 +123,38 @@ class SQLiteGenericArtifactRepository:
         if expires_at_or_before.tzinfo is None or expires_at_or_before.utcoffset() is None:
             raise ValueError("artifact expiry time must be timezone-aware")
         cutoff = expires_at_or_before.astimezone(UTC).isoformat()
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: list[object] = [cutoff]
+        if organisation_id is not None:
+            values.append(str(organisation_id))
+        values.append(limit)
         with self._database.transaction() as connection:
             rows = connection.execute(
                 "SELECT * FROM artifacts "
                 "WHERE expires_at IS NOT NULL AND expires_at <= ? "
+                f"{scope} "  # noqa: S608
                 "ORDER BY expires_at, created_at, id LIMIT ?",
-                (cutoff, limit),
+                values,
             ).fetchall()
         return [_artifact_from_row(row) for row in rows]
 
-    async def delete(self, artifact_id: UUID) -> bool:
+    async def delete(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> bool:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(artifact_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(artifact_id),)
+        )
         with self._database.transaction(immediate=True) as connection:
-            cursor = connection.execute("DELETE FROM artifacts WHERE id = ?", (str(artifact_id),))
+            cursor = connection.execute(
+                f"DELETE FROM artifacts WHERE id = ?{scope}",  # noqa: S608
+                values,
+            )
         return cursor.rowcount == 1
 
 
@@ -117,6 +166,7 @@ SQLiteArtifactRecordRepository = SQLiteGenericArtifactRepository
 def _artifact_values(record: ArtifactRecord) -> tuple[object, ...]:
     return (
         str(record.id),
+        str(record.organisation_id),
         _enum_value(record.owner_type),
         str(record.owner_id),
         record.name,
@@ -134,6 +184,7 @@ def _artifact_values(record: ArtifactRecord) -> tuple[object, ...]:
 def _artifact_from_row(row: sqlite3.Row) -> ArtifactRecord:
     return ArtifactRecord(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         owner_type=ArtifactOwnerType(row["owner_type"]),
         owner_id=UUID(row["owner_id"]),
         name=row["name"],

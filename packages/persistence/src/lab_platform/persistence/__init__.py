@@ -22,6 +22,8 @@ from lab_platform.persistence.database import (
 from lab_platform.persistence.distributed_reservations import (
     SQLiteCentralReservationLeaseRepository,
 )
+from lab_platform.persistence.identity import SQLiteIdentityRepository
+from lab_platform.persistence.migrations import DEFAULT_ORGANISATION_ID
 from lab_platform.persistence.postgresql import (
     PostgreSQLDatabase,
     create_control_plane_database,
@@ -37,6 +39,7 @@ from lab_platform.persistence.workflows import SQLiteWorkflowRepository
 
 __all__ = [
     "BackendRegistration",
+    "DEFAULT_ORGANISATION_ID",
     "PostgreSQLDatabase",
     "SCHEMA_VERSION",
     "SQLiteAgentEnrollmentRepository",
@@ -50,6 +53,7 @@ __all__ = [
     "SQLiteDatabase",
     "SQLiteEventRepository",
     "SQLiteGenericArtifactRepository",
+    "SQLiteIdentityRepository",
     "SQLiteOperationRepository",
     "SQLiteOperationArtifactRepository",
     "SQLiteOperationLockRepository",

@@ -21,7 +21,9 @@ from lab_platform.control_plane_core.errors import (
     ReservationLeaseInvalidError,
     ReservationLeaseVersionMismatchError,
 )
+from lab_platform.core.authorisation import AuthorisationService
 from lab_platform.core.errors import (
+    AuthenticationRequiredError,
     BenchAlreadyReservedError,
     ReservationNotActiveError,
     ReservationNotFoundError,
@@ -30,12 +32,16 @@ from lab_platform.core.errors import (
 from lab_platform.models import (
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
+    AuthorisationResource,
     GlobalBenchRecord,
     GlobalBenchStatus,
     Reservation,
     ReservationLease,
+    ReservationOwner,
     ReservationSource,
     ReservationStatus,
+    ResourceType,
 )
 
 
@@ -147,6 +153,7 @@ class CentralReservationLeaseRepository(Protocol):
         self,
         mutation_key: str,
         *,
+        organisation_id: UUID,
         request_fingerprint: str,
     ) -> LeaseWriteResult | None: ...
 
@@ -237,6 +244,12 @@ class CentralReservationLeaseService:
         self._maximum_lease_ttl = maximum_lease_ttl_seconds
         self._maximum_clock_skew = maximum_clock_skew_seconds
         self._offline_grace = offline_reservation_grace_seconds
+        self._authorisation: AuthorisationService | None = None
+
+    def set_authorisation_service(self, authorisation: AuthorisationService) -> None:
+        """Enable identity enforcement after runtime dependency construction."""
+
+        self._authorisation = authorisation
 
     async def grant(
         self,
@@ -244,23 +257,41 @@ class CentralReservationLeaseService:
         agent_id: UUID,
         bench_id: str,
         owner: str,
+        owner_principal: ReservationOwner | None = None,
         idempotency_key: str,
         reservation_duration_seconds: int | None = None,
         lease_ttl_seconds: int | None = None,
         source: ReservationSource = ReservationSource.API,
         metadata: Mapping[str, str] | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> CoordinatedReservationLease:
         normalized_owner = _require_text(owner, field="owner", maximum_length=200)
         mutation_key = _require_mutation_key(idempotency_key)
         duration = self._reservation_duration(reservation_duration_seconds)
         lease_ttl = self._lease_ttl(lease_ttl_seconds)
         normalized_metadata = dict(metadata or {})
+        agent, bench = await self._trusted_route(agent_id, bench_id)
+        await self._require_bench_authorisation(
+            agent,
+            bench,
+            "benches:reserve",
+            authentication_context=authentication_context,
+            owner=normalized_owner,
+            owner_principal=owner_principal,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         fingerprint = _request_fingerprint(
             "grant",
             {
                 "agent_id": str(agent_id),
                 "bench_id": bench_id,
                 "owner": normalized_owner,
+                "owner_principal": (
+                    owner_principal.model_dump(mode="json") if owner_principal is not None else None
+                ),
                 "reservation_duration_seconds": duration,
                 "lease_ttl_seconds": lease_ttl,
                 "source": source.value,
@@ -269,6 +300,7 @@ class CentralReservationLeaseService:
         )
         replay = await self._repository.get_mutation_result(
             mutation_key,
+            organisation_id=bench.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
@@ -282,8 +314,15 @@ class CentralReservationLeaseService:
         ends_at = now + timedelta(seconds=duration)
         reservation = Reservation(
             id=self._id_factory(),
+            organisation_id=bench.organisation_id,
             bench_id=bench_id,
             owner=normalized_owner,
+            owner_principal_id=(
+                owner_principal.principal_id if owner_principal is not None else None
+            ),
+            owner_principal_type=(
+                owner_principal.principal_type.value if owner_principal is not None else None
+            ),
             created_at=now,
             requested_at=now,
             starts_at=now,
@@ -317,25 +356,55 @@ class CentralReservationLeaseService:
         reservation_id: UUID,
         *,
         owner: str,
+        owner_principal: ReservationOwner | None = None,
         expected_lease_version: int,
         idempotency_key: str,
         lease_ttl_seconds: int | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> CoordinatedReservationLease:
         normalized_owner = _require_text(owner, field="owner", maximum_length=200)
         mutation_key = _require_mutation_key(idempotency_key)
         _require_positive_version(expected_lease_version)
         lease_ttl = self._lease_ttl(lease_ttl_seconds)
+        current = await self._require_record(reservation_id)
+        agent, bench = await self._trusted_route(
+            current.lease.agent_id,
+            current.lease.bench_id,
+        )
+        _validate_record_organisation(current, bench)
+        await self._require_bench_authorisation(
+            agent,
+            bench,
+            "benches:reserve",
+            authentication_context=authentication_context,
+            owner=normalized_owner,
+            owner_principal=owner_principal,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        await self._require_reservation_owner(
+            current,
+            normalized_owner,
+            owner_principal=owner_principal,
+            authentication_context=authentication_context,
+        )
         fingerprint = _request_fingerprint(
             "renew",
             {
                 "reservation_id": str(reservation_id),
                 "owner": normalized_owner,
+                "owner_principal_id": (
+                    str(owner_principal.principal_id) if owner_principal is not None else None
+                ),
                 "expected_lease_version": expected_lease_version,
                 "lease_ttl_seconds": lease_ttl,
             },
         )
         replay = await self._repository.get_mutation_result(
             mutation_key,
+            organisation_id=current.reservation.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
@@ -344,8 +413,6 @@ class CentralReservationLeaseService:
             if effective.state is ReservationLeaseState.RENEWING:
                 return await self._synchronize_pending(effective, operation_key=mutation_key)
             return effective
-        current = await self._require_record(reservation_id)
-        _require_owner(current, normalized_owner)
         _require_version(current, expected_lease_version)
         if current.state is not ReservationLeaseState.ACTIVE:
             raise ReservationNotActiveError(
@@ -394,28 +461,56 @@ class CentralReservationLeaseService:
         reservation_id: UUID,
         *,
         owner: str,
+        owner_principal: ReservationOwner | None = None,
         expected_lease_version: int,
         idempotency_key: str,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> CoordinatedReservationLease:
         normalized_owner = _require_text(owner, field="owner", maximum_length=200)
         mutation_key = _require_mutation_key(idempotency_key)
         _require_positive_version(expected_lease_version)
+        current = await self._require_record(reservation_id)
+        agent, bench = await self._trusted_route(
+            current.lease.agent_id,
+            current.lease.bench_id,
+        )
+        _validate_record_organisation(current, bench)
+        await self._require_bench_authorisation(
+            agent,
+            bench,
+            "benches:reserve",
+            authentication_context=authentication_context,
+            owner=normalized_owner,
+            owner_principal=owner_principal,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        await self._require_reservation_owner(
+            current,
+            normalized_owner,
+            owner_principal=owner_principal,
+            authentication_context=authentication_context,
+        )
         fingerprint = _request_fingerprint(
             "release",
             {
                 "reservation_id": str(reservation_id),
                 "owner": normalized_owner,
+                "owner_principal_id": (
+                    str(owner_principal.principal_id) if owner_principal is not None else None
+                ),
                 "expected_lease_version": expected_lease_version,
             },
         )
         replay = await self._repository.get_mutation_result(
             mutation_key,
+            organisation_id=current.reservation.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
             return replay.record
-        current = await self._require_record(reservation_id)
-        _require_owner(current, normalized_owner)
         _require_version(current, expected_lease_version)
         if current.state is ReservationLeaseState.RELEASED:
             return current
@@ -449,9 +544,28 @@ class CentralReservationLeaseService:
         *,
         expected_lease_version: int,
         idempotency_key: str,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> CoordinatedReservationLease:
         mutation_key = _require_mutation_key(idempotency_key)
         _require_positive_version(expected_lease_version)
+        current = await self._require_record(reservation_id)
+        agent, bench = await self._trusted_route(
+            current.lease.agent_id,
+            current.lease.bench_id,
+        )
+        _validate_record_organisation(current, bench)
+        await self._require_bench_authorisation(
+            agent,
+            bench,
+            "benches:manage",
+            authentication_context=authentication_context,
+            owner=None,
+            owner_principal=None,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         fingerprint = _request_fingerprint(
             "revoke",
             {
@@ -461,11 +575,11 @@ class CentralReservationLeaseService:
         )
         replay = await self._repository.get_mutation_result(
             mutation_key,
+            organisation_id=current.reservation.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
             return replay.record
-        current = await self._require_record(reservation_id)
         _require_version(current, expected_lease_version)
         if current.state is ReservationLeaseState.REVOKED:
             return current
@@ -525,6 +639,7 @@ class CentralReservationLeaseService:
             )
             replay = await self._repository.get_mutation_result(
                 mutation_key,
+                organisation_id=current.reservation.organisation_id,
                 request_fingerprint=fingerprint,
             )
             if replay is not None:
@@ -555,17 +670,18 @@ class CentralReservationLeaseService:
         idempotency_key: str,
     ) -> CoordinatedReservationLease:
         mutation_key = _require_mutation_key(idempotency_key)
+        current = await self._require_record(presented_lease.reservation_id)
         fingerprint = _request_fingerprint(
             "reconcile",
             {"presented_lease": presented_lease.model_dump(mode="json")},
         )
         replay = await self._repository.get_mutation_result(
             mutation_key,
+            organisation_id=current.reservation.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
             return replay.record
-        current = await self._require_record(presented_lease.reservation_id)
         _require_version(current, presented_lease.lease_version)
         if current.state is not ReservationLeaseState.UNKNOWN:
             raise ReservationLeaseInvalidError(
@@ -710,6 +826,7 @@ class CentralReservationLeaseService:
             )
             replay = await self._repository.get_mutation_result(
                 mutation_key,
+                organisation_id=current.reservation.organisation_id,
                 request_fingerprint=fingerprint,
             )
             if replay is not None:
@@ -734,6 +851,111 @@ class CentralReservationLeaseService:
     async def get(self, reservation_id: UUID) -> CoordinatedReservationLease:
         return await self._require_record(reservation_id)
 
+    async def _trusted_route(
+        self,
+        agent_id: UUID,
+        bench_id: str,
+    ) -> tuple[AgentRecord, GlobalBenchRecord]:
+        agent = await self._directory.get_agent(agent_id)
+        if agent is None:
+            raise AgentNotFoundError("Agent does not exist.", agent_id=str(agent_id))
+        bench = await self._directory.get_bench(bench_id)
+        if bench is None or bench.id != bench_id or bench.agent_id != agent_id:
+            raise BenchAgentMismatchError(
+                "Global bench is not owned by the requested Agent.",
+                agent_id=str(agent_id),
+                bench_id=bench_id,
+            )
+        _validate_trusted_route_organisation(agent, bench)
+        return agent, bench
+
+    async def _require_bench_authorisation(
+        self,
+        agent: AgentRecord,
+        bench: GlobalBenchRecord,
+        permission: str,
+        *,
+        authentication_context: AuthenticationContext | None,
+        owner: str | None,
+        owner_principal: ReservationOwner | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> None:
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError(
+                "Legacy and internal reservation authorisation escapes are mutually exclusive"
+            )
+        if allow_legacy_authorisation and (
+            authentication_context is not None or owner_principal is not None
+        ):
+            raise ValueError("Legacy reservation authorisation cannot carry authenticated identity")
+        if authentication_context is not None:
+            principal = authentication_context.principal
+            if principal.organisation_id != bench.organisation_id:
+                raise ValueError(
+                    "Reservation target organisation does not match the authenticated principal"
+                )
+            if owner is not None:
+                if owner_principal is None:
+                    raise ValueError(
+                        "Authenticated reservations require durable principal ownership"
+                    )
+                if (
+                    owner_principal.principal_id != principal.id
+                    or owner_principal.principal_type is not principal.type
+                    or owner_principal.display_name != principal.display_name
+                    or owner != principal.display_name
+                ):
+                    raise ValueError("Reservation owner does not match the authenticated principal")
+        elif (
+            self._authorisation is not None
+            and owner_principal is not None
+            and not allow_internal_authorisation
+        ):
+            raise ValueError(
+                "Reservation principal ownership requires authenticated principal context"
+            )
+
+        authorisation = self._authorisation
+        if authorisation is None or allow_internal_authorisation or allow_legacy_authorisation:
+            return
+        if authentication_context is None:
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to manage reservations."
+            )
+        await authorisation.require(
+            authentication_context.principal,
+            permission,
+            AuthorisationResource(
+                type=ResourceType.BENCH,
+                id=bench.id,
+                organisation_id=bench.organisation_id,
+                parent_agent_id=agent.id,
+            ),
+            credential_restrictions=authentication_context.permission_restrictions,
+        )
+
+    async def _require_reservation_owner(
+        self,
+        record: CoordinatedReservationLease,
+        owner: str,
+        *,
+        owner_principal: ReservationOwner | None,
+        authentication_context: AuthenticationContext | None,
+    ) -> None:
+        try:
+            _require_owner(record, owner, owner_principal=owner_principal)
+        except ReservationOwnerMismatchError:
+            if self._authorisation is not None and authentication_context is not None:
+                await self._authorisation.audit_permission_denied(
+                    authentication_context.principal,
+                    "benches:reserve",
+                    resource_type=ResourceType.BENCH.value,
+                    resource_id=record.reservation.bench_id,
+                    reason="The reservation belongs to another principal.",
+                )
+            raise
+
     async def _synchronize_pending(
         self,
         pending: CoordinatedReservationLease,
@@ -757,6 +979,7 @@ class CentralReservationLeaseService:
         )
         replay = await self._repository.get_mutation_result(
             confirmation_key,
+            organisation_id=pending.reservation.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
@@ -827,6 +1050,7 @@ class CentralReservationLeaseService:
         )
         replay = await self._repository.get_mutation_result(
             mutation_key,
+            organisation_id=pending.reservation.organisation_id,
             request_fingerprint=fingerprint,
         )
         if replay is not None:
@@ -1055,11 +1279,40 @@ def _require_eligible_route(
         )
 
 
-def _require_owner(record: CoordinatedReservationLease, owner: str) -> None:
-    if record.reservation.owner != owner:
+def _validate_trusted_route_organisation(
+    agent: AgentRecord,
+    bench: GlobalBenchRecord,
+) -> None:
+    if agent.organisation_id != bench.organisation_id:
+        raise ValueError("Agent and bench organisations do not match")
+
+
+def _validate_record_organisation(
+    record: CoordinatedReservationLease,
+    bench: GlobalBenchRecord,
+) -> None:
+    if record.reservation.organisation_id != bench.organisation_id:
+        raise ValueError("Reservation organisation does not match its trusted bench")
+
+
+def _require_owner(
+    record: CoordinatedReservationLease,
+    owner: str,
+    *,
+    owner_principal: ReservationOwner | None = None,
+) -> None:
+    reservation = record.reservation
+    if owner_principal is not None and reservation.owner_principal_id is not None:
+        owner_mismatch = (
+            reservation.owner_principal_id != owner_principal.principal_id
+            or reservation.owner_principal_type != owner_principal.principal_type.value
+        )
+    else:
+        owner_mismatch = reservation.owner != owner
+    if owner_mismatch:
         raise ReservationOwnerMismatchError(
             "Reservation owner does not match.",
-            reservation_id=str(record.reservation.id),
+            reservation_id=str(reservation.id),
         )
 
 

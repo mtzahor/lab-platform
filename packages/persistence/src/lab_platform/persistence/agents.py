@@ -40,19 +40,31 @@ class SQLiteAgentEnrollmentRepository:
         with self._database.transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT INTO agent_enrollment_tokens "
-                "(id, name, token_hash, created_at, expires_at, used_at, revoked_at, "
+                "(id, organisation_id, name, token_hash, created_at, expires_at, "
+                "used_at, revoked_at, "
                 "allowed_labels_json, used_by_agent_id, enrollment_request_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 _token_values(token),
             )
             _insert_agent_event(connection, audit_event)
         return token
 
-    async def get_token(self, token_id: UUID) -> AgentEnrollmentToken | None:
+    async def get_token(
+        self,
+        token_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentEnrollmentToken | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(token_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(token_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM agent_enrollment_tokens WHERE id = ?",
-                (str(token_id),),
+                f"SELECT * FROM agent_enrollment_tokens WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _token_from_row(row) if row is not None else None
 
@@ -64,13 +76,23 @@ class SQLiteAgentEnrollmentRepository:
             ).fetchone()
         return _token_from_row(row) if row is not None else None
 
-    async def list_tokens(self, *, limit: int = 500) -> list[AgentEnrollmentToken]:
+    async def list_tokens(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[AgentEnrollmentToken]:
         if limit <= 0:
             raise ValueError("limit must be positive")
         with self._database.transaction() as connection:
+            scope = "WHERE organisation_id = ? " if organisation_id is not None else ""
+            values: tuple[object, ...] = (
+                (str(organisation_id), limit) if organisation_id is not None else (limit,)
+            )
             rows = connection.execute(
-                "SELECT * FROM agent_enrollment_tokens ORDER BY created_at DESC, id LIMIT ?",
-                (limit,),
+                f"SELECT * FROM agent_enrollment_tokens {scope}"  # noqa: S608
+                "ORDER BY created_at DESC, id LIMIT ?",
+                values,
             ).fetchall()
         return [_token_from_row(row) for row in rows]
 
@@ -79,11 +101,19 @@ class SQLiteAgentEnrollmentRepository:
         token_id: UUID,
         revoked_at: datetime,
         audit_event: EventRecord,
+        *,
+        organisation_id: UUID | None = None,
     ) -> AgentEnrollmentToken | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(token_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(token_id),)
+        )
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM agent_enrollment_tokens WHERE id = ?",
-                (str(token_id),),
+                f"SELECT * FROM agent_enrollment_tokens WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
             if row is None:
                 return None
@@ -185,21 +215,42 @@ class SQLiteAgentEnrollmentRepository:
         except _EnrollmentWriteConflict:
             return EnrollmentConsumeResult(status=EnrollmentConsumeStatus.CONFLICT)
 
-    async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
+    async def get_agent(
+        self,
+        agent_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentRecord | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(agent_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(agent_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM agents WHERE id = ?",
-                (str(agent_id),),
+                f"SELECT * FROM agents WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _agent_from_row(row) if row is not None else None
 
-    async def list_agents(self, *, limit: int = 500) -> list[AgentRecord]:
+    async def list_agents(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[AgentRecord]:
         if limit <= 0:
             raise ValueError("limit must be positive")
         with self._database.transaction() as connection:
+            scope = "WHERE organisation_id = ? " if organisation_id is not None else ""
+            values: tuple[object, ...] = (
+                (str(organisation_id), limit) if organisation_id is not None else (limit,)
+            )
             rows = connection.execute(
-                "SELECT * FROM agents ORDER BY name COLLATE NOCASE, slug, id LIMIT ?",
-                (limit,),
+                f"SELECT * FROM agents {scope}"  # noqa: S608
+                "ORDER BY name COLLATE NOCASE, slug, id LIMIT ?",
+                values,
             ).fetchall()
         return [_agent_from_row(row) for row in rows]
 
@@ -266,12 +317,19 @@ class SQLiteAgentEnrollmentRepository:
         replacement: AgentCredential,
         rotated_at: datetime,
         audit_event: EventRecord,
+        organisation_id: UUID | None = None,
     ) -> AgentCredential | None:
         try:
             with self._database.transaction(immediate=True) as connection:
+                scope = " AND organisation_id = ?" if organisation_id is not None else ""
+                agent_values: tuple[object, ...] = (
+                    (str(agent_id), str(organisation_id))
+                    if organisation_id is not None
+                    else (str(agent_id),)
+                )
                 agent_row = connection.execute(
-                    "SELECT * FROM agents WHERE id = ?",
-                    (str(agent_id),),
+                    f"SELECT * FROM agents WHERE id = ?{scope}",  # noqa: S608
+                    agent_values,
                 ).fetchone()
                 current_row = connection.execute(
                     "SELECT * FROM agent_credentials "
@@ -288,6 +346,8 @@ class SQLiteAgentEnrollmentRepository:
                     or current.expires_at is not None
                     and current.expires_at <= rotated_at
                     or replacement.agent_id != agent_id
+                    or replacement.organisation_id != registered_agent.organisation_id
+                    or current.organisation_id != registered_agent.organisation_id
                     or replacement.version != current.version + 1
                     or replacement.created_at != rotated_at
                     or replacement.revoked_at is not None
@@ -314,12 +374,20 @@ class SQLiteAgentEnrollmentRepository:
         agent_id: UUID,
         revoked_at: datetime,
         audit_event: EventRecord,
+        *,
+        organisation_id: UUID | None = None,
     ) -> AgentRecord | None:
         timestamp = revoked_at.isoformat()
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(agent_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(agent_id),)
+        )
         with self._database.transaction(immediate=True) as connection:
             agent_row = connection.execute(
-                "SELECT * FROM agents WHERE id = ?",
-                (str(agent_id),),
+                f"SELECT * FROM agents WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
             if agent_row is None:
                 return None
@@ -435,7 +503,9 @@ def _enrollment_is_bound(
     credential: AgentCredential,
 ) -> bool:
     return (
-        agent.name == token.name
+        agent.organisation_id == token.organisation_id
+        and credential.organisation_id == token.organisation_id
+        and agent.name == token.name
         and agent.labels == token.allowed_labels
         and agent.enrollment_status is EnrollmentStatus.ENROLLED
         and agent.status is not AgentStatus.REVOKED
@@ -450,10 +520,11 @@ def _enrollment_is_bound(
 def _insert_agent(connection: sqlite3.Connection, agent: AgentRecord) -> None:
     connection.execute(
         "INSERT INTO agents "
-        "(id, slug, name, status, version, protocol_version, location, labels_json, "
+        "(id, organisation_id, slug, name, status, version, protocol_version, "
+        "location, labels_json, "
         "registered_at, last_connected_at, last_seen_at, disconnected_at, "
         "certificate_fingerprint, enrollment_status, revoked_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         _agent_values(agent),
     )
 
@@ -464,8 +535,8 @@ def _insert_credential(
 ) -> None:
     connection.execute(
         "INSERT INTO agent_credentials "
-        "(id, agent_id, kind, credential_hash, version, created_at, expires_at, "
-        "revoked_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, organisation_id, agent_id, kind, credential_hash, version, created_at, expires_at, "
+        "revoked_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         _credential_values(credential),
     )
 
@@ -473,6 +544,7 @@ def _insert_credential(
 def _token_values(token: AgentEnrollmentToken) -> tuple[object, ...]:
     return (
         str(token.id),
+        str(token.organisation_id),
         token.name,
         token.token_hash,
         token.created_at.isoformat(),
@@ -488,6 +560,7 @@ def _token_values(token: AgentEnrollmentToken) -> tuple[object, ...]:
 def _agent_values(agent: AgentRecord) -> tuple[object, ...]:
     return (
         str(agent.id),
+        str(agent.organisation_id),
         agent.slug,
         agent.name,
         agent.status.value,
@@ -508,6 +581,7 @@ def _agent_values(agent: AgentRecord) -> tuple[object, ...]:
 def _credential_values(credential: AgentCredential) -> tuple[object, ...]:
     return (
         str(credential.id),
+        str(credential.organisation_id),
         str(credential.agent_id),
         credential.kind.value,
         credential.credential_hash,
@@ -522,6 +596,7 @@ def _credential_values(credential: AgentCredential) -> tuple[object, ...]:
 def _token_from_row(row: sqlite3.Row) -> AgentEnrollmentToken:
     return AgentEnrollmentToken(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         name=row["name"],
         token_hash=row["token_hash"],
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -541,6 +616,7 @@ def _token_from_row(row: sqlite3.Row) -> AgentEnrollmentToken:
 def _agent_from_row(row: sqlite3.Row) -> AgentRecord:
     return AgentRecord(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         slug=row["slug"],
         name=row["name"],
         status=AgentStatus(row["status"]),
@@ -561,6 +637,7 @@ def _agent_from_row(row: sqlite3.Row) -> AgentRecord:
 def _credential_from_row(row: sqlite3.Row) -> AgentCredential:
     return AgentCredential(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         agent_id=UUID(row["agent_id"]),
         kind=AgentCredentialKind(row["kind"]),
         credential_hash=row["credential_hash"],

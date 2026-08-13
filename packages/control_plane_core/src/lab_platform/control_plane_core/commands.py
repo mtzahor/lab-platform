@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
-from uuid import UUID
+from typing import Any, Literal, Protocol
+from uuid import UUID, uuid4
 
 from lab_platform.agent_protocol import (
     CommandAcceptedPayload,
@@ -28,20 +28,30 @@ from lab_platform.control_plane_core.errors import (
     RemoteCommandExpiredError,
     RemoteCommandNotFoundError,
 )
+from lab_platform.core.authorisation import AuthorisationDecision, AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError, PermissionDeniedError
 from lab_platform.models import (
     DISTRIBUTED_OPERATION_TRANSITIONS,
     REMOTE_COMMAND_TRANSITIONS,
+    ActorContext,
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
+    AuthorisationResource,
+    AuthorisationSnapshot,
+    DistributedCiWorkflowBinding,
     DistributedOperation,
     DistributedOperationStatus,
     GlobalBenchRecord,
     GlobalBenchStatus,
+    Principal,
     RemoteCommand,
     RemoteCommandAttempt,
     RemoteCommandStatus,
     RemoteCommandType,
     ReservationLease,
+    ResourceType,
+    WorkflowDefinition,
 )
 
 _MUTATING_COMMANDS = frozenset(
@@ -55,6 +65,15 @@ _MUTATING_COMMANDS = frozenset(
 _TRANSIENT_ARTIFACT_FIELDS = frozenset(
     {"transfer_id", "download_url", "transfer_token", "expires_at"}
 )
+_COMMAND_PERMISSIONS: Mapping[RemoteCommandType, tuple[str, ResourceType]] = {
+    RemoteCommandType.PROBE: ("benches:operate", ResourceType.BENCH),
+    RemoteCommandType.FLASH: ("benches:flash", ResourceType.BENCH),
+    RemoteCommandType.RESET: ("benches:reset", ResourceType.BENCH),
+    RemoteCommandType.READ_SERIAL: ("benches:serial", ResourceType.BENCH),
+    RemoteCommandType.RUN_WORKFLOW: ("benches:operate", ResourceType.BENCH),
+    RemoteCommandType.CANCEL_OPERATION: ("operations:cancel", ResourceType.BENCH),
+    RemoteCommandType.REFRESH_INVENTORY: ("agents:manage", ResourceType.AGENT),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +161,43 @@ class RemoteCommandRepository(Protocol):
         statuses: Iterable[RemoteCommandStatus] | None = None,
         limit: int = 500,
     ) -> list[RemoteCommand]: ...
+
+
+class AuthorisationSnapshotRepository(Protocol):
+    """Durable evidence store used at the remote-work acceptance boundary."""
+
+    async def create_authorisation_snapshot(
+        self,
+        organisation_id: UUID,
+        snapshot: AuthorisationSnapshot,
+    ) -> AuthorisationSnapshot: ...
+
+    async def get_authorisation_snapshot(
+        self,
+        organisation_id: UUID,
+        snapshot_id: UUID,
+    ) -> AuthorisationSnapshot | None: ...
+
+
+class WorkflowDefinitionCatalog(Protocol):
+    async def get_definition(
+        self,
+        name: str,
+        version: int | None = None,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> WorkflowDefinition | None: ...
+
+
+class CiCancellationBindingRepository(Protocol):
+    """Trusted durable projection used only for pre-authorised CI cancellation."""
+
+    async def get_distributed_workflow(
+        self,
+        session_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> DistributedCiWorkflowBinding | None: ...
 
 
 class InMemoryRemoteCommandRepository:
@@ -322,6 +378,36 @@ class RemoteCommandService:
         self._reconciliation_timeout = timedelta(seconds=reconciliation_timeout_seconds)
         self._payload_hydrator = payload_hydrator
         self._clock = clock or _utc_now
+        self._authorisation: AuthorisationService | None = None
+        self._authorisation_snapshots: AuthorisationSnapshotRepository | None = None
+        self._workflow_definitions: WorkflowDefinitionCatalog | None = None
+        self._ci_cancellation_bindings: CiCancellationBindingRepository | None = None
+
+    def set_authorisation_service(self, authorisation: AuthorisationService) -> None:
+        """Enable identity enforcement after runtime dependency construction."""
+
+        self._authorisation = authorisation
+
+    def set_authorisation_snapshot_repository(
+        self,
+        repository: AuthorisationSnapshotRepository,
+    ) -> None:
+        """Attach the durable store used to mint and resolve decision evidence."""
+
+        self._authorisation_snapshots = repository
+
+    def set_workflow_definition_catalog(self, catalog: WorkflowDefinitionCatalog) -> None:
+        """Attach the trusted definition catalog used for authenticated workflow commands."""
+
+        self._workflow_definitions = catalog
+
+    def set_ci_cancellation_binding_repository(
+        self,
+        repository: CiCancellationBindingRepository,
+    ) -> None:
+        """Attach the trusted CI session-to-command binding projection."""
+
+        self._ci_cancellation_bindings = repository
 
     async def create(
         self,
@@ -334,7 +420,13 @@ class RemoteCommandService:
         idempotency_key: str,
         reservation_lease: ReservationLease | None = None,
         operation_type: str | None = None,
+        operation_id: UUID | None = None,
         dispatch: bool = True,
+        actor_context: ActorContext | None = None,
+        authorisation_snapshot_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> tuple[RemoteCommand, DistributedOperation | None]:
         now = _as_utc(self._clock())
         expiry = _as_utc(expires_at)
@@ -347,15 +439,40 @@ class RemoteCommandService:
         agent, bench = await self._require_route(agent_id, bench_id)
         existing = await self._repository.get_by_idempotency_key(agent_id, idempotency_key)
         if existing is not None:
-            self._validate_idempotent_replay(
+            await self._validate_idempotent_replay(
                 existing,
+                agent=agent,
+                bench=bench,
                 bench_id=bench.id,
                 command_type=command_type,
                 payload=payload,
                 lease=reservation_lease,
+                actor_context=actor_context,
+                authentication_context=authentication_context,
+                allow_legacy_authorisation=allow_legacy_authorisation,
+                allow_internal_authorisation=allow_internal_authorisation,
             )
             operation = await self._repository.get_operation_for_command(existing.id)
+            if operation_id is not None and (operation is None or operation.id != operation_id):
+                raise RemoteCommandDuplicateError(
+                    "Remote command idempotency key is bound to another operation.",
+                    command_id=str(existing.id),
+                    expected_operation_id=str(operation_id),
+                    actual_operation_id=(str(operation.id) if operation is not None else None),
+                )
             return existing, operation
+
+        actor_context, authorisation_snapshot_id = await self._require_create_authorisation(
+            agent,
+            bench,
+            command_type,
+            payload=payload,
+            authentication_context=authentication_context,
+            actor_context=actor_context,
+            authorisation_snapshot_id=authorisation_snapshot_id,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
 
         agent_is_offline = agent.status is AgentStatus.OFFLINE
         self._validate_agent_accepts_new_work(
@@ -377,8 +494,11 @@ class RemoteCommandService:
             lease=reservation_lease,
             now=now,
         )
+        if actor_context is not None and actor_context.organisation_id != bench.organisation_id:
+            raise ValueError("Command actor organisation does not match the target bench")
 
         command = RemoteCommand(
+            organisation_id=bench.organisation_id,
             agent_id=agent_id,
             bench_id=bench.id,
             command_type=command_type,
@@ -391,9 +511,20 @@ class RemoteCommandService:
             idempotency_key=idempotency_key,
             reservation_id=(reservation_lease.reservation_id if reservation_lease else None),
             lease_version=(reservation_lease.lease_version if reservation_lease else None),
+            actor_context=actor_context,
+            authorisation_snapshot_id=authorisation_snapshot_id,
         )
+        creates_operation = (
+            operation_type is not None or command_type is not RemoteCommandType.REFRESH_INVENTORY
+        )
+        if operation_id is not None and not creates_operation:
+            raise ValueError(
+                "An operation ID cannot be supplied for a command without an operation"
+            )
         operation = (
             DistributedOperation(
+                id=operation_id or uuid4(),
+                organisation_id=bench.organisation_id,
                 remote_command_id=command.id,
                 agent_id=agent_id,
                 bench_id=bench.id,
@@ -401,7 +532,7 @@ class RemoteCommandService:
                 operation_type=operation_type or command_type.value,
                 created_at=now,
             )
-            if operation_type is not None or command_type is not RemoteCommandType.REFRESH_INVENTORY
+            if creates_operation
             else None
         )
         if operation is not None:
@@ -411,13 +542,30 @@ class RemoteCommandService:
             operation,
         )
         if created_command.id != command.id:
-            self._validate_idempotent_replay(
+            await self._validate_idempotent_replay(
                 created_command,
+                agent=agent,
+                bench=bench,
                 bench_id=bench.id,
                 command_type=command_type,
                 payload=payload,
                 lease=reservation_lease,
+                actor_context=actor_context,
+                authentication_context=authentication_context,
+                allow_legacy_authorisation=allow_legacy_authorisation,
+                allow_internal_authorisation=allow_internal_authorisation,
             )
+            if operation_id is not None and (
+                created_operation is None or created_operation.id != operation_id
+            ):
+                raise RemoteCommandDuplicateError(
+                    "Remote command idempotency key is bound to another operation.",
+                    command_id=str(created_command.id),
+                    expected_operation_id=str(operation_id),
+                    actual_operation_id=(
+                        str(created_operation.id) if created_operation is not None else None
+                    ),
+                )
             return created_command, created_operation
         if not dispatch or agent_is_offline:
             return created_command, created_operation
@@ -541,6 +689,9 @@ class RemoteCommandService:
         command_id: UUID,
         *,
         reason: str | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> RemoteCommand:
         """Request cancellation of the original durable Agent command.
 
@@ -552,6 +703,129 @@ class RemoteCommandService:
         """
 
         command = await self._require_command(command_id)
+        agent, bench = await self._require_route(command.agent_id, command.bench_id)
+        await self._require_resource_authorisation(
+            agent,
+            bench,
+            "operations:cancel",
+            ResourceType.BENCH,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if command.organisation_id != bench.organisation_id:
+            raise ValueError("Command organisation does not match its trusted bench")
+        if command.status in {
+            RemoteCommandStatus.CREATED,
+            RemoteCommandStatus.QUEUED,
+            RemoteCommandStatus.SUCCEEDED,
+            RemoteCommandStatus.FAILED,
+            RemoteCommandStatus.CANCELLED,
+            RemoteCommandStatus.EXPIRED,
+        }:
+            return await self._request_cancel_authorised(
+                command,
+                reason=reason,
+                actor_context=None,
+                authorisation_snapshot_id=None,
+            )
+        cancel_actor: ActorContext | None = None
+        cancel_snapshot_id: UUID | None = None
+        if authentication_context is not None:
+            principal = authentication_context.principal
+            cancel_snapshot_id = authentication_context.authorisation_snapshot_id
+            if cancel_snapshot_id is None:
+                raise AuthenticationRequiredError(
+                    "Authenticated remote cancellation requires durable authorisation evidence."
+                )
+            await self._require_snapshot_evidence(
+                cancel_snapshot_id,
+                authentication_context=authentication_context,
+                permission="operations:cancel",
+                resource_type=ResourceType.BENCH,
+                resource_id=bench.id,
+            )
+            cancel_actor = _actor_context(principal, cancel_snapshot_id)
+        return await self._request_cancel_authorised(
+            command,
+            reason=reason,
+            actor_context=cancel_actor,
+            authorisation_snapshot_id=cancel_snapshot_id,
+        )
+
+    async def request_ci_cancel(
+        self,
+        command_id: UUID,
+        *,
+        ci_session_id: UUID,
+        reason: str | None,
+        authentication_context: AuthenticationContext,
+    ) -> RemoteCommand:
+        """Cancel work using exact evidence from the owning CI session service.
+
+        This entry point deliberately has no legacy/internal flags. It accepts only a
+        persisted CI-session decision and independently proves that the trusted binding
+        names this command, operation, route, and reservation before sending control work.
+        """
+
+        command = await self._require_command(command_id)
+        _agent, bench = await self._require_route(command.agent_id, command.bench_id)
+        principal = authentication_context.principal
+        snapshot_id = authentication_context.authorisation_snapshot_id
+        if snapshot_id is None:
+            raise AuthenticationRequiredError(
+                "Authenticated CI cancellation requires durable authorisation evidence."
+            )
+        if command.organisation_id != principal.organisation_id:
+            raise ValueError("CI cancellation principal does not own the command organisation")
+        if command.organisation_id != bench.organisation_id:
+            raise ValueError("Command organisation does not match its trusted bench")
+        await self._require_snapshot_evidence(
+            snapshot_id,
+            authentication_context=authentication_context,
+            permission="ci:sessions:cancel",
+            resource_type="CI_SESSION",
+            resource_id=str(ci_session_id),
+        )
+        bindings = self._ci_cancellation_bindings
+        if bindings is None:
+            raise AuthenticationRequiredError(
+                "Authenticated CI cancellation requires a trusted session binding store."
+            )
+        binding = await bindings.get_distributed_workflow(
+            ci_session_id,
+            organisation_id=principal.organisation_id,
+        )
+        operation = await self._repository.get_operation_for_command(command.id)
+        if (
+            binding is None
+            or operation is None
+            or binding.remote_command_id != command.id
+            or binding.operation_id != operation.id
+            or binding.agent_id != command.agent_id
+            or binding.bench_id != command.bench_id
+            or binding.reservation_id != command.reservation_id
+            or operation.organisation_id != principal.organisation_id
+            or operation.agent_id != command.agent_id
+            or operation.bench_id != command.bench_id
+            or operation.reservation_id != binding.reservation_id
+        ):
+            raise ValueError("CI cancellation evidence does not match trusted remote work")
+        return await self._request_cancel_authorised(
+            command,
+            reason=reason,
+            actor_context=_actor_context(principal, snapshot_id),
+            authorisation_snapshot_id=snapshot_id,
+        )
+
+    async def _request_cancel_authorised(
+        self,
+        command: RemoteCommand,
+        *,
+        reason: str | None,
+        actor_context: ActorContext | None,
+        authorisation_snapshot_id: UUID | None,
+    ) -> RemoteCommand:
         if command.status in {
             RemoteCommandStatus.SUCCEEDED,
             RemoteCommandStatus.FAILED,
@@ -580,7 +854,12 @@ class RemoteCommandService:
                     RemoteCommandStatus.CANCELLED,
                     RemoteCommandStatus.EXPIRED,
                 }:
-                    return await self.request_cancel(raced.id, reason=reason)
+                    return await self._request_cancel_authorised(
+                        raced,
+                        reason=reason,
+                        actor_context=actor_context,
+                        authorisation_snapshot_id=authorisation_snapshot_id,
+                    )
                 return raced
             command = current
             operation = await self._repository.get_operation_for_command(command.id)
@@ -598,10 +877,242 @@ class RemoteCommandService:
 
         await self._transport.send_cancel(
             command.agent_id,
-            CommandCancelPayload(command_id=command.id, reason=reason),
+            CommandCancelPayload(
+                command_id=command.id,
+                reason=reason,
+                actor_context=actor_context,
+                authorisation_snapshot_id=authorisation_snapshot_id,
+            ),
             correlation_id=command.id,
         )
         return command
+
+    async def _require_create_authorisation(
+        self,
+        agent: AgentRecord,
+        bench: GlobalBenchRecord,
+        command_type: RemoteCommandType,
+        *,
+        payload: Mapping[str, Any],
+        authentication_context: AuthenticationContext | None,
+        actor_context: ActorContext | None,
+        authorisation_snapshot_id: UUID | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> tuple[ActorContext | None, UUID | None]:
+        if authentication_context is not None:
+            principal = authentication_context.principal
+            if actor_context is None:
+                raise ValueError("Authenticated commands require durable actor context")
+            if (
+                actor_context.principal_id != principal.id
+                or actor_context.principal_type is not principal.type
+                or actor_context.display_name != principal.display_name
+                or actor_context.organisation_id != principal.organisation_id
+            ):
+                raise ValueError("Command actor context does not match the authenticated principal")
+            evidence_ids = (
+                actor_context.authorisation_snapshot_id,
+                authentication_context.authorisation_snapshot_id,
+                authorisation_snapshot_id,
+            )
+            if any(item is not None for item in evidence_ids) and len(set(evidence_ids)) != 1:
+                raise ValueError(
+                    "Command authorisation snapshot evidence is incomplete or mismatched"
+                )
+        elif self._authorisation is not None and actor_context is not None:
+            raise ValueError("Command actor context requires authenticated principal context")
+
+        command_permission, command_resource_type = _COMMAND_PERMISSIONS[command_type]
+        command_decision = await self._require_resource_authorisation(
+            agent,
+            bench,
+            command_permission,
+            command_resource_type,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if authentication_context is None:
+            return actor_context, authorisation_snapshot_id
+
+        evidence_permission, evidence_resource = _authorisation_evidence_target(
+            agent,
+            bench,
+            command_type,
+            payload,
+        )
+        if command_type is RemoteCommandType.RUN_WORKFLOW:
+            await self._require_trusted_workflow_definition(
+                payload,
+                organisation_id=authentication_context.principal.organisation_id,
+            )
+        evidence_decision = command_decision
+        if (
+            evidence_permission != command_permission
+            or evidence_resource.type is not command_resource_type
+            or evidence_resource.id
+            != _authorisation_resource_id(agent, bench, command_resource_type)
+        ):
+            evidence_decision = await self._require_identity_authorisation(
+                authentication_context,
+                evidence_permission,
+                evidence_resource,
+            )
+        snapshots = self._authorisation_snapshots
+        if snapshots is None or evidence_decision is None:
+            raise AuthenticationRequiredError(
+                "Authenticated remote work requires a durable authorisation snapshot store."
+            )
+        assert actor_context is not None
+        snapshot_id = authentication_context.authorisation_snapshot_id
+        if snapshot_id is None:
+            snapshot = await snapshots.create_authorisation_snapshot(
+                authentication_context.principal.organisation_id,
+                AuthorisationSnapshot(
+                    principal_id=authentication_context.principal.id,
+                    permission=evidence_permission,
+                    resource_type=evidence_resource.type,
+                    resource_id=evidence_resource.id,
+                    granted_by_assignments=sorted(
+                        evidence_decision.granting_assignment_ids,
+                        key=str,
+                    ),
+                    evaluated_at=_as_utc(self._clock()),
+                ),
+            )
+            snapshot_id = snapshot.id
+            actor_context = actor_context.model_copy(
+                update={"authorisation_snapshot_id": snapshot_id}
+            )
+        else:
+            await self._require_snapshot_evidence(
+                snapshot_id,
+                authentication_context=authentication_context,
+                permission=evidence_permission,
+                resource_type=evidence_resource.type,
+                resource_id=evidence_resource.id,
+            )
+        return actor_context, snapshot_id
+
+    async def _require_trusted_workflow_definition(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        organisation_id: UUID,
+    ) -> WorkflowDefinition:
+        supplied = _workflow_definition_from_payload(payload)
+        catalog = self._workflow_definitions
+        if catalog is None:
+            raise AuthenticationRequiredError(
+                "Authenticated workflow commands require a trusted definition catalog."
+            )
+        trusted = await catalog.get_definition(
+            supplied.name,
+            supplied.version,
+            organisation_id=organisation_id,
+        )
+        if trusted is None or trusted != supplied:
+            raise ValueError("RUN_WORKFLOW command definition is not a trusted catalog entry")
+        return trusted
+
+    async def _require_resource_authorisation(
+        self,
+        agent: AgentRecord,
+        bench: GlobalBenchRecord,
+        permission: str,
+        resource_type: ResourceType,
+        *,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> AuthorisationDecision | None:
+        _validate_trusted_route_organisation(agent, bench)
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError(
+                "Legacy and internal command authorisation escapes are mutually exclusive"
+            )
+        if allow_legacy_authorisation and authentication_context is not None:
+            raise ValueError("Legacy command authorisation cannot carry an authenticated principal")
+        if (
+            authentication_context is not None
+            and authentication_context.principal.organisation_id != bench.organisation_id
+        ):
+            raise ValueError(
+                "Command target organisation does not match the authenticated principal"
+            )
+        authorisation = self._authorisation
+        if authorisation is None or allow_internal_authorisation or allow_legacy_authorisation:
+            return None
+        if authentication_context is None:
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to create or cancel remote commands."
+            )
+        resource = AuthorisationResource(
+            type=resource_type,
+            id=str(agent.id) if resource_type is ResourceType.AGENT else bench.id,
+            organisation_id=bench.organisation_id,
+            parent_agent_id=(agent.id if resource_type is ResourceType.BENCH else None),
+        )
+        return await self._require_identity_authorisation(
+            authentication_context,
+            permission,
+            resource,
+        )
+
+    async def _require_identity_authorisation(
+        self,
+        authentication_context: AuthenticationContext,
+        permission: str,
+        resource: AuthorisationResource,
+    ) -> AuthorisationDecision | None:
+        authorisation = self._authorisation
+        if authorisation is None:
+            return None
+        decision = await authorisation.evaluate(
+            authentication_context.principal,
+            permission,
+            resource,
+            credential_restrictions=authentication_context.permission_restrictions,
+        )
+        if not decision.allowed:
+            await authorisation.require(
+                authentication_context.principal,
+                permission,
+                resource,
+                credential_restrictions=authentication_context.permission_restrictions,
+            )
+            raise AssertionError("AuthorisationService.require must reject a denied decision")
+        return decision
+
+    async def _require_snapshot_evidence(
+        self,
+        snapshot_id: UUID,
+        *,
+        authentication_context: AuthenticationContext,
+        permission: str,
+        resource_type: ResourceType | Literal["CI_SESSION"],
+        resource_id: str,
+    ) -> AuthorisationSnapshot:
+        repository = self._authorisation_snapshots
+        if repository is None:
+            raise AuthenticationRequiredError(
+                "Authenticated remote work requires a durable authorisation snapshot store."
+            )
+        principal = authentication_context.principal
+        snapshot = await repository.get_authorisation_snapshot(
+            principal.organisation_id,
+            snapshot_id,
+        )
+        if (
+            snapshot is None
+            or snapshot.principal_id != principal.id
+            or snapshot.permission != permission
+            or snapshot.resource_type != resource_type
+            or snapshot.resource_id != resource_id
+        ):
+            raise ValueError("Command authorisation snapshot evidence is unresolved or mismatched")
+        return snapshot
 
     async def accepted(
         self,
@@ -979,14 +1490,20 @@ class RemoteCommandService:
         if not lease.is_valid_at(now):
             raise RemoteCommandExpiredError("Reservation lease expired before dispatch.")
 
-    @staticmethod
-    def _validate_idempotent_replay(
+    async def _validate_idempotent_replay(
+        self,
         existing: RemoteCommand,
         *,
+        agent: AgentRecord,
+        bench: GlobalBenchRecord,
         bench_id: str,
         command_type: RemoteCommandType,
         payload: Mapping[str, Any],
         lease: ReservationLease | None,
+        actor_context: ActorContext | None,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
     ) -> None:
         expected_reservation = lease.reservation_id if lease is not None else None
         expected_version = lease.lease_version if lease is not None else None
@@ -1002,6 +1519,96 @@ class RemoteCommandService:
                 command_id=str(existing.id),
                 idempotency_key=existing.idempotency_key,
             )
+        if authentication_context is None:
+            if existing.actor_context is not None or actor_context is not None:
+                raise RemoteCommandDuplicateError(
+                    "Remote command idempotency key belongs to another principal.",
+                    command_id=str(existing.id),
+                    idempotency_key=existing.idempotency_key,
+                )
+            # Preserve the explicit escape chosen when the command was accepted. An
+            # identity-created command can never reach this branch because it has an actor.
+            await self._require_resource_authorisation(
+                agent,
+                bench,
+                *_COMMAND_PERMISSIONS[command_type],
+                authentication_context=None,
+                allow_legacy_authorisation=allow_legacy_authorisation,
+                allow_internal_authorisation=allow_internal_authorisation,
+            )
+            return
+
+        principal = authentication_context.principal
+        existing_actor = existing.actor_context
+        if allow_legacy_authorisation or allow_internal_authorisation:
+            raise ValueError(
+                "Authenticated command replay cannot use legacy or internal authorisation"
+            )
+        if (
+            existing_actor is None
+            or actor_context is None
+            or _stable_actor_identity(existing_actor) != _stable_actor_identity(actor_context)
+            or existing_actor.principal_id != principal.id
+            or existing_actor.principal_type is not principal.type
+            or existing_actor.display_name != principal.display_name
+            or existing_actor.organisation_id != principal.organisation_id
+            or existing.organisation_id != principal.organisation_id
+            or existing.authorisation_snapshot_id is None
+            or existing_actor.authorisation_snapshot_id != existing.authorisation_snapshot_id
+        ):
+            raise RemoteCommandDuplicateError(
+                "Remote command idempotency key belongs to another principal.",
+                command_id=str(existing.id),
+                idempotency_key=existing.idempotency_key,
+            )
+        command_permission, _command_resource_type = _COMMAND_PERMISSIONS[command_type]
+        evidence_permission, evidence_resource = _authorisation_evidence_target(
+            agent,
+            bench,
+            command_type,
+            payload,
+        )
+        restrictions = authentication_context.permission_restrictions
+        required_permissions = {command_permission, evidence_permission}
+        if restrictions is not None and not required_permissions.issubset(restrictions):
+            missing_permission = sorted(required_permissions.difference(restrictions))[0]
+            denied_resource = (
+                evidence_resource
+                if missing_permission == evidence_permission
+                else AuthorisationResource(
+                    type=_COMMAND_PERMISSIONS[command_type][1],
+                    id=_authorisation_resource_id(
+                        agent,
+                        bench,
+                        _COMMAND_PERMISSIONS[command_type][1],
+                    ),
+                    organisation_id=bench.organisation_id,
+                    parent_agent_id=(
+                        agent.id
+                        if _COMMAND_PERMISSIONS[command_type][1] is ResourceType.BENCH
+                        else None
+                    ),
+                )
+            )
+            if self._authorisation is not None:
+                await self._authorisation.audit_permission_denied(
+                    principal,
+                    missing_permission,
+                    resource_type=denied_resource.type.value,
+                    resource_id=denied_resource.id,
+                    reason="Credential restrictions do not allow command replay.",
+                )
+            raise PermissionDeniedError(
+                "The authenticated credential cannot replay this remote command.",
+                required_permissions=sorted(required_permissions),
+            )
+        await self._require_snapshot_evidence(
+            existing.authorisation_snapshot_id,
+            authentication_context=authentication_context,
+            permission=evidence_permission,
+            resource_type=evidence_resource.type,
+            resource_id=evidence_resource.id,
+        )
 
     async def _require_command(self, command_id: UUID) -> RemoteCommand:
         command = await self._repository.get_command(command_id)
@@ -1025,6 +1632,80 @@ class RemoteCommandService:
 
 def _command_copy(command: RemoteCommand, **updates: object) -> RemoteCommand:
     return RemoteCommand.model_validate({**command.model_dump(), **updates})
+
+
+def _stable_actor_identity(actor: ActorContext) -> tuple[object, ...]:
+    """Identity fields that remain stable across fresh decision snapshots."""
+
+    return (
+        actor.principal_id,
+        actor.principal_type,
+        actor.organisation_id,
+    )
+
+
+def _actor_context(principal: Principal, snapshot_id: UUID) -> ActorContext:
+    return ActorContext(
+        principal_id=principal.id,
+        principal_type=principal.type,
+        display_name=principal.display_name,
+        organisation_id=principal.organisation_id,
+        authorisation_snapshot_id=snapshot_id,
+    )
+
+
+def _authorisation_resource_id(
+    agent: AgentRecord,
+    bench: GlobalBenchRecord,
+    resource_type: ResourceType,
+) -> str:
+    return str(agent.id) if resource_type is ResourceType.AGENT else bench.id
+
+
+def _authorisation_evidence_target(
+    agent: AgentRecord,
+    bench: GlobalBenchRecord,
+    command_type: RemoteCommandType,
+    payload: Mapping[str, Any],
+) -> tuple[str, AuthorisationResource]:
+    """Return the durable decision represented by a command's snapshot.
+
+    Workflow routes snapshot the trusted workflow decision, while the command service
+    independently rechecks the selected bench before accepting new work.
+    """
+
+    if command_type is RemoteCommandType.RUN_WORKFLOW:
+        definition = _workflow_definition_from_payload(payload)
+        if definition.organisation_id != bench.organisation_id:
+            raise ValueError("Workflow and command target organisations do not match")
+        return (
+            "workflows:run",
+            AuthorisationResource(
+                type=ResourceType.WORKFLOW,
+                id=definition.name,
+                organisation_id=bench.organisation_id,
+            ),
+        )
+    permission, resource_type = _COMMAND_PERMISSIONS[command_type]
+    return (
+        permission,
+        AuthorisationResource(
+            type=resource_type,
+            id=_authorisation_resource_id(agent, bench, resource_type),
+            organisation_id=bench.organisation_id,
+            parent_agent_id=(agent.id if resource_type is ResourceType.BENCH else None),
+        ),
+    )
+
+
+def _workflow_definition_from_payload(payload: Mapping[str, Any]) -> WorkflowDefinition:
+    raw_definition = payload.get("definition")
+    if not isinstance(raw_definition, Mapping):
+        raise ValueError("RUN_WORKFLOW commands require a workflow definition")
+    try:
+        return WorkflowDefinition.model_validate(raw_definition)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("RUN_WORKFLOW command definition is invalid") from exc
 
 
 def _operation_copy(operation: DistributedOperation, **updates: object) -> DistributedOperation:
@@ -1091,6 +1772,14 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Distributed command timestamps must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _validate_trusted_route_organisation(
+    agent: AgentRecord,
+    bench: GlobalBenchRecord,
+) -> None:
+    if agent.organisation_id != bench.organisation_id:
+        raise ValueError("Agent and bench organisations do not match")
 
 
 def _utc_now() -> datetime:

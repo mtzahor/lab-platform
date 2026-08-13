@@ -1,5 +1,21 @@
 # Lab Platform documentation
 
+## Phase 6 identity and access control
+
+- [Phase 6 status, architecture, and remaining cut line](PHASE_6.md)
+- [Phase 6 team-access and service-account CI demo](PHASE_6_TEAM_DEMO.md)
+- [Identity and principals](IDENTITY.md)
+- [Local authentication and CLI credential storage](LOCAL_AUTH.md)
+- [OIDC login, configuration, user mapping, and limitations](OIDC.md)
+- [Organisations and transitional backfill](ORGANISATIONS.md)
+- [Teams](TEAMS.md)
+- [Roles and permissions](ROLES_AND_PERMISSIONS.md)
+- [Service accounts](SERVICE_ACCOUNTS.md)
+- [Identity-bound API credentials](API_CREDENTIALS.md)
+- [Audit log and secret safety](AUDIT_LOG.md)
+- [Legacy authentication migration](AUTH_MIGRATION.md)
+- [Phase 6 security model and current limitations](SECURITY_MODEL.md)
+
 ## Phase 5 distributed control plane
 
 - [Phase 5 architecture, authority, protocol, recovery, demo, and limitations](PHASE_5.md)

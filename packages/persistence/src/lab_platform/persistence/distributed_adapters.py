@@ -60,6 +60,7 @@ from lab_platform.persistence.distributed import (
     _lease_from_row,
     _operation_from_row,
     _operation_values,
+    _require_command_route,
     _require_same_command_request,
     _upsert_bench,
 )
@@ -82,11 +83,23 @@ class SQLiteAgentPresenceAdapter:
             raise ValueError("Agent identity conflicts with the enrolled record")
         return existing
 
-    async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
-        return await self._agents.get_agent(agent_id)
+    async def get_agent(
+        self,
+        agent_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentRecord | None:
+        return await self._agents.get_agent(agent_id, organisation_id=organisation_id)
 
-    async def list_agents(self) -> list[AgentRecord]:
-        return await self._agents.list_agents(limit=10_000)
+    async def list_agents(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[AgentRecord]:
+        return await self._agents.list_agents(
+            organisation_id=organisation_id,
+            limit=10_000,
+        )
 
     async def get_connection(self, connection_id: UUID) -> ActiveAgentConnection | None:
         with self._database.transaction() as connection:
@@ -261,17 +274,36 @@ class SQLiteInventoryAdapter:
     def __init__(self, database: SQLiteDatabase) -> None:
         self._database = database
 
-    async def get(self, bench_id: str) -> GlobalBenchRecord | None:
+    async def get(
+        self,
+        bench_id: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> GlobalBenchRecord | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (bench_id, str(organisation_id)) if organisation_id is not None else (bench_id,)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM global_benches WHERE id = ?",
-                (bench_id,),
+                f"SELECT * FROM global_benches WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _bench_from_row(row) if row is not None else None
 
-    async def list(self) -> list[GlobalBenchRecord]:
+    async def list(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[GlobalBenchRecord]:
         with self._database.transaction() as connection:
-            rows = connection.execute("SELECT * FROM global_benches ORDER BY id").fetchall()
+            if organisation_id is None:
+                rows = connection.execute("SELECT * FROM global_benches ORDER BY id").fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM global_benches WHERE organisation_id = ? ORDER BY id",
+                    (str(organisation_id),),
+                ).fetchall()
         return [_bench_from_row(row) for row in rows]
 
     async def reconcile_agent_snapshot(
@@ -307,21 +339,23 @@ class SQLiteInventoryAdapter:
         with self._database.transaction(immediate=True) as connection:
             if snapshot is not None:
                 existing_snapshot = connection.execute(
-                    "SELECT agent_id, boot_id, generated_at, snapshot_json "
+                    "SELECT organisation_id, agent_id, boot_id, generated_at, snapshot_json "
                     "FROM bench_snapshots WHERE id = ?",
                     (str(snapshot.id),),
                 ).fetchone()
                 if existing_snapshot is not None:
                     if (
-                        existing_snapshot["agent_id"] != str(snapshot.agent_id)
+                        existing_snapshot["organisation_id"] != str(agent.organisation_id)
+                        or existing_snapshot["agent_id"] != str(snapshot.agent_id)
                         or existing_snapshot["boot_id"] != str(snapshot.boot_id)
                         or existing_snapshot["generated_at"] != snapshot.generated_at.isoformat()
                         or existing_snapshot["snapshot_json"] != snapshot_json
                     ):
                         raise ValueError("Snapshot ID is already bound to different inventory")
                     current_rows = connection.execute(
-                        "SELECT * FROM global_benches WHERE agent_id = ? ORDER BY id",
-                        (str(agent.id),),
+                        "SELECT * FROM global_benches WHERE agent_id = ? "
+                        "AND organisation_id = ? ORDER BY id",
+                        (str(agent.id), str(agent.organisation_id)),
                     ).fetchall()
                     return InventoryReconciliation(
                         benches=tuple(_bench_from_row(row) for row in current_rows),
@@ -331,8 +365,9 @@ class SQLiteInventoryAdapter:
                     )
                 latest_snapshot = connection.execute(
                     "SELECT generated_at FROM bench_snapshots WHERE agent_id = ? "
+                    "AND organisation_id = ? "
                     "ORDER BY generated_at DESC, received_at DESC LIMIT 1",
-                    (str(agent.id),),
+                    (str(agent.id), str(agent.organisation_id)),
                 ).fetchone()
                 if (
                     latest_snapshot is not None
@@ -341,13 +376,18 @@ class SQLiteInventoryAdapter:
                 ):
                     raise ValueError("A stale inventory snapshot cannot replace newer state")
             before_rows = connection.execute(
-                "SELECT * FROM global_benches WHERE agent_id = ? ORDER BY id",
-                (str(agent.id),),
+                "SELECT * FROM global_benches WHERE agent_id = ? "
+                "AND organisation_id = ? ORDER BY id",
+                (str(agent.id), str(agent.organisation_id)),
             ).fetchall()
             before = {row["id"]: _bench_from_row(row) for row in before_rows}
             incoming_ids: set[str] = set()
             for bench in benches:
-                if bench.agent_id != agent.id or bench.agent_slug != agent.slug:
+                if (
+                    bench.agent_id != agent.id
+                    or bench.agent_slug != agent.slug
+                    or bench.organisation_id != agent.organisation_id
+                ):
                     raise ValueError("Bench snapshot identity does not match Agent")
                 _upsert_bench(connection, bench)
                 incoming_ids.add(bench.id)
@@ -356,23 +396,30 @@ class SQLiteInventoryAdapter:
                 placeholders = ",".join("?" for _ in missing)
                 connection.execute(
                     "UPDATE global_benches SET status = 'OFFLINE', updated_at = ? "
-                    f"WHERE agent_id = ? AND id IN ({placeholders}) "  # noqa: S608
+                    f"WHERE agent_id = ? AND organisation_id = ? AND id IN ({placeholders}) "  # noqa: S608
                     "AND status != 'OFFLINE'",
-                    (observed_at.isoformat(), str(agent.id), *sorted(missing)),
+                    (
+                        observed_at.isoformat(),
+                        str(agent.id),
+                        str(agent.organisation_id),
+                        *sorted(missing),
+                    ),
                 )
             after_rows = connection.execute(
-                "SELECT * FROM global_benches WHERE agent_id = ? ORDER BY id",
-                (str(agent.id),),
+                "SELECT * FROM global_benches WHERE agent_id = ? "
+                "AND organisation_id = ? ORDER BY id",
+                (str(agent.id), str(agent.organisation_id)),
             ).fetchall()
             after = {row["id"]: _bench_from_row(row) for row in after_rows}
             if snapshot is not None:
                 assert snapshot_json is not None
                 connection.execute(
                     "INSERT INTO bench_snapshots "
-                    "(id, agent_id, boot_id, generated_at, received_at, bench_count, "
-                    "snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(id, organisation_id, agent_id, boot_id, generated_at, received_at, "
+                    "bench_count, snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         str(snapshot.id),
+                        str(agent.organisation_id),
                         str(snapshot.agent_id),
                         str(snapshot.boot_id),
                         snapshot.generated_at.isoformat(),
@@ -404,16 +451,23 @@ class SQLiteInventoryAdapter:
         agent_id: UUID,
         *,
         observed_at: datetime,
+        organisation_id: UUID | None = None,
     ) -> tuple[GlobalBenchRecord, ...]:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        update_values: list[object] = [observed_at.isoformat(), str(agent_id)]
+        select_values: list[object] = [str(agent_id)]
+        if organisation_id is not None:
+            update_values.append(str(organisation_id))
+            select_values.append(str(organisation_id))
         with self._database.transaction(immediate=True) as connection:
             connection.execute(
                 "UPDATE global_benches SET status = 'OFFLINE', updated_at = ? "
-                "WHERE agent_id = ? AND status != 'OFFLINE'",
-                (observed_at.isoformat(), str(agent_id)),
+                f"WHERE agent_id = ? AND status != 'OFFLINE'{scope}",  # noqa: S608
+                update_values,
             )
             rows = connection.execute(
-                "SELECT * FROM global_benches WHERE agent_id = ? ORDER BY id",
-                (str(agent_id),),
+                f"SELECT * FROM global_benches WHERE agent_id = ?{scope} ORDER BY id",  # noqa: S608
+                select_values,
             ).fetchall()
         return tuple(_bench_from_row(row) for row in rows)
 
@@ -448,6 +502,7 @@ class SQLiteRemoteCommandServiceRepository:
         operation: DistributedOperation | None,
     ) -> tuple[RemoteCommand, DistributedOperation | None]:
         with self._database.transaction(immediate=True) as connection:
+            _require_command_route(connection, command)
             row = connection.execute(
                 "SELECT * FROM remote_commands WHERE id = ? OR "
                 "(agent_id = ? AND idempotency_key = ?) LIMIT 1",
@@ -465,40 +520,56 @@ class SQLiteRemoteCommandServiceRepository:
                     _operation_from_row(operation_row) if operation_row is not None else None,
                 )
             if operation is not None and (
-                operation.remote_command_id != command.id or command.operation_id != operation.id
+                operation.remote_command_id != command.id
+                or command.operation_id != operation.id
+                or operation.organisation_id != command.organisation_id
+                or operation.agent_id != command.agent_id
+                or operation.bench_id != command.bench_id
             ):
                 raise ValueError("Command and distributed operation identities differ")
             connection.execute(
                 "INSERT INTO remote_commands "
-                "(id, agent_id, bench_id, command_type, payload_json, status, created_at, "
+                "(id, organisation_id, agent_id, bench_id, command_type, payload_json, status, "
+                "created_at, "
                 "dispatched_at, acknowledged_at, started_at, completed_at, expires_at, "
                 "idempotency_key, attempt_count, operation_id, reservation_id, lease_version, "
-                "error_code, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?)",
+                "error_code, error_message, actor_context_json, authorisation_snapshot_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 _command_values(command),
             )
             if operation is not None:
                 connection.execute(
                     "INSERT INTO distributed_operations "
-                    "(id, remote_command_id, agent_id, bench_id, reservation_id, "
+                    "(id, organisation_id, remote_command_id, agent_id, bench_id, reservation_id, "
                     "operation_type, status, progress, message, result_json, created_at, "
                     "dispatched_at, started_at, completed_at, last_agent_update_at, "
                     "reconciliation_deadline, "
                     "error_code, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                    "?, ?, ?, ?, ?, ?)",
+                    "?, ?, ?, ?, ?, ?, ?)",
                     _operation_values(operation),
                 )
         return command, operation
 
-    async def get_command(self, command_id: UUID) -> RemoteCommand | None:
-        return await self._commands.get(command_id)
+    async def get_command(
+        self,
+        command_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> RemoteCommand | None:
+        return await self._commands.get(command_id, organisation_id=organisation_id)
 
     async def get_by_idempotency_key(
         self,
         agent_id: UUID,
         idempotency_key: str,
+        *,
+        organisation_id: UUID | None = None,
     ) -> RemoteCommand | None:
-        return await self._commands.get_by_idempotency_key(agent_id, idempotency_key)
+        return await self._commands.get_by_idempotency_key(
+            agent_id,
+            idempotency_key,
+            organisation_id=organisation_id,
+        )
 
     async def update_command(
         self,
@@ -512,11 +583,22 @@ class SQLiteRemoteCommandServiceRepository:
             return None
         return await self._commands.update(command, expected_status=current.status)
 
-    async def get_operation_for_command(self, command_id: UUID) -> DistributedOperation | None:
+    async def get_operation_for_command(
+        self,
+        command_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> DistributedOperation | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(command_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(command_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM distributed_operations WHERE remote_command_id = ?",
-                (str(command_id),),
+                f"SELECT * FROM distributed_operations WHERE remote_command_id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _operation_from_row(row) if row is not None else None
 
@@ -535,6 +617,7 @@ class SQLiteRemoteCommandServiceRepository:
     async def list_operations(
         self,
         *,
+        organisation_id: UUID | None = None,
         agent_id: UUID | None,
         statuses: Iterable[DistributedOperationStatus],
         limit: int,
@@ -543,6 +626,9 @@ class SQLiteRemoteCommandServiceRepository:
         with self._database.transaction() as connection:
             conditions: list[str] = []
             values: list[object] = []
+            if organisation_id is not None:
+                conditions.append("organisation_id = ?")
+                values.append(str(organisation_id))
             if agent_id is not None:
                 conditions.append("agent_id = ?")
                 values.append(str(agent_id))
@@ -588,6 +674,7 @@ class SQLiteRemoteCommandServiceRepository:
     async def list_commands(
         self,
         *,
+        organisation_id: UUID | None = None,
         agent_id: UUID | None = None,
         statuses: Iterable[RemoteCommandStatus] | None = None,
         limit: int = 500,
@@ -596,6 +683,9 @@ class SQLiteRemoteCommandServiceRepository:
         with self._database.transaction() as connection:
             conditions: list[str] = []
             values: list[object] = []
+            if organisation_id is not None:
+                conditions.append("organisation_id = ?")
+                values.append(str(organisation_id))
             if agent_id is not None:
                 conditions.append("agent_id = ?")
                 values.append(str(agent_id))

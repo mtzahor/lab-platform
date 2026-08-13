@@ -456,6 +456,7 @@ def test_postgresql_optional_live_smoke(tmp_path: Path) -> None:
                 name=f"postgresql-smoke-{uuid4().hex}",
                 expires_at=datetime.now(UTC) + timedelta(minutes=5),
                 allowed_labels={"suite": "postgresql"},
+                allow_internal_authorisation=True,
             )
             enrolled = await runtime.enrollment.enroll(
                 plaintext_token=issued.plaintext.get_secret_value(),
@@ -469,9 +470,11 @@ def test_postgresql_optional_live_smoke(tmp_path: Path) -> None:
                 enrolled.plaintext.get_secret_value(),
             )
             assert authenticated.agent.id == enrolled.agent.id
-            assert enrolled.agent in await runtime.enrollment.list_agents()
+            assert enrolled.agent in await runtime.enrollment.list_agents(
+                allow_internal_authorisation=True
+            )
 
-            metrics = await runtime.metrics()
+            metrics = await runtime.metrics(allow_internal_authorisation=True)
             assert {
                 "agents_online",
                 "agents_offline",

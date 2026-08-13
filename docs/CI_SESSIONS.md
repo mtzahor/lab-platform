@@ -84,11 +84,27 @@ plane restart. If an upload is still incomplete after
 ## REST flow
 
 The standalone Agent's session-creation route requires `ci:sessions`, `benches:read`, and
-`reservations:write`. The Phase 5 control-plane route requires `ci:sessions`; its central service
+`reservations:write`. A legacy control-plane token requires `ci:sessions`; its central service
 enforces selection and lease safety. Across the complete one-command flow, a standalone Agent job
-uses all seven local scopes. A distributed `labctl ci run` uses `ci:sessions`, `artifacts:write`,
-`operations:read`, and `artifacts:read` to create/run the session, upload its inputs, read results,
-and download outputs; it does not need Agent-administration scopes.
+uses all seven local scopes. A distributed legacy-token `labctl ci run` uses `ci:sessions`,
+`artifacts:write`, `operations:read`, and `artifacts:read`; it does not need Agent-administration
+scopes.
+
+For a Phase 6 user or service account, the CI service enforces identity as well as lifecycle:
+
+- inert creation requires `ci:sessions:create` from at least one active scoped assignment and binds
+  the stored requester to the authenticated principal;
+- only that stored principal may start the session;
+- start requires `ci:sessions:create` and `workflows:run` on the exact workflow, then the workflow
+  coordinator requires `benches:operate` on each candidate and selected bench before side effects;
+- heartbeat/finalize/read/cancel checks occur again in the service; an owner may use the matching
+  scoped permission, while another same-organisation principal needs an organisation grant; and
+- linked CI artifacts additionally inherit `artifacts:*` on both the workflow and selected bench.
+
+Credential restrictions must retain every permission used by that path, normally
+`ci:sessions:create`, `ci:sessions:read`, `ci:sessions:cancel`, `workflows:run`,
+`benches:operate`, `operations:read`, `artifacts:read`, and `artifacts:write`. See the
+[Phase 6 team-access demo](PHASE_6_TEAM_DEMO.md).
 
 ```http
 POST /api/v1/ci/sessions
@@ -202,6 +218,18 @@ labctl ci session watch SESSION_ID
 labctl ci session finalize SESSION_ID
 ```
 
+For a Phase 6 principal, the cancellation service atomically persists the exact
+`ci:sessions:cancel` decision on the `CI_SESSION` (including granting assignments), the initiating
+actor, and `CANCEL_REQUESTED` before it enqueues the Agent control message. It validates the trusted
+session-to-workflow-command/operation/Agent/bench/reservation relationship instead of requiring an
+unrelated `operations:cancel` grant. If delivery fails and the control plane restarts, maintenance
+reuses that same actor/snapshot evidence for the retry. A system timeout or maintenance cancellation
+with no initiating identity remains unattributed, and an already timeout-originated
+`CANCEL_REQUESTED` session cannot adopt a later caller. This targeted durable retry does not turn
+all Agent-control timeline intents into a transactional replay outbox; arbitrary drain,
+inventory-refresh, and reconciliation redelivery still needs a dedicated state machine and
+acknowledgement protocol.
+
 See [cleanup guarantees](CI_CLEANUP.md) for the exact responsibilities.
 
 ## Timeouts
@@ -221,4 +249,7 @@ finalization. A useful session key is:
 ```
 
 Reuse the same key only when retrying the same logical request. Repeated requests return the
-existing resource instead of creating duplicate reservations or workflow runs.
+existing resource instead of creating duplicate reservations or workflow runs. Schema v10 scopes
+CI create/launch/finalize, artifact upload, reservation, and queue retry keys by organisation (and
+their documented owner/bench component), so equal keys in different tenants cannot replay one
+another's resource.

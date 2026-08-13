@@ -81,8 +81,10 @@ result, cleanup, and `completed`. The separate outcome preserves `succeeded`, `f
 `cancelled`, `timed_out`, or `infrastructure_error` after completion. Cleanup status/result are
 also separate so a passed test with a leaked reservation is never reported as success.
 
-Session, artifact upload, workflow launch, and finalization accept idempotency keys. Token owner
-checks keep one automation owner from operating another owner's sessions or artifacts.
+Session, artifact upload, workflow launch, and finalization accept idempotency keys. Schema v10
+scopes those retry keys by organisation and their documented owner/bench component. Phase 6 binds
+sessions to a principal, applies owner-or-organisation-grant lifecycle rules, and authorises
+artifacts through trusted workflow/bench/CI parents.
 
 ## Selection, ownership, and concurrency
 
@@ -110,14 +112,36 @@ credential rotation/revocation is per Agent. The Agent stores only its non-secre
 reads credential plaintext from a named environment variable. Protocol message IDs/sequences,
 command expiry, strict typed payloads, and bounded queues constrain replay and input handling.
 
-CI/artifact/result routes use bearer-token dependencies with explicit scopes. Tokens are generated
-from cryptographic random bytes and stored as one-way hashes; plaintext is returned only at
-creation. Expiry, revocation, last use, and audit events are persisted.
+The control plane resolves a Phase 6 user session or identity-bound service-account credential to
+an organisation principal before optional legacy-token fallback. Local/OIDC sessions and service
+credentials are generated from cryptographic random bytes and stored as one-way hashes; plaintext
+is returned only at login/creation. Expiry, rotation/revocation, last use, credential narrowing,
+and audit events are persisted. Fixed roles, team/direct assignments, and bench/workflow access
+policies evaluate trusted resources. Protected command, reservation, workflow, CI,
+drain/enrollment/runtime-lifecycle, and artifact services repeat critical checks before side
+effects.
 
-Legacy operational routes stay open only during first-token bootstrap. Once any token record
-exists, those routes also require their mapped scopes and bind owner-bearing requests and resource
-reads to the authenticated token owner. This preserves an upgrade path for a fresh local Agent
-without leaving an owner-string bypass after machine authentication is enabled.
+Identity-backed manual, workflow, and CI-launched remote commands persist the initiating actor and
+exact authorisation snapshot. Principal-initiated cancellation, reconciliation, inventory-refresh,
+and drain/undrain control messages carry the same actor/snapshot identity, and the protocol rejects
+mismatched evidence. Exact idempotent retries remain tied to the stable principal, tenant, request
+content, and still-allowed required permissions and return the already accepted command with its
+original snapshot rather than treating a fresh session/snapshot ID as new work. Workflow replay
+also fingerprints the effective credential restrictions. New work still requires current
+authorisation. Automatic/background paths with no originating Phase 6 decision and legacy paths do
+not manufacture an initiating actor; a CI-cancellation maintenance retry can reuse evidence already
+persisted by the principal request.
+
+Agent-control paths persist an attributed intent before the in-memory WebSocket enqueue, while the
+protocol journal records a successful wire send. These records distinguish an authorised request
+from delivery, but they are not a transactional replay outbox and do not by themselves redeliver an
+arbitrary control message after restart.
+
+The standalone Agent's legacy operational routes stay open only during first-token bootstrap. Once
+any token record exists, those routes require mapped scopes and bind owner-bearing requests and
+resource reads to the authenticated token owner. The control plane may accept those legacy tokens
+only while its explicit compatibility switch is enabled; they have no organisation principal and
+remain outside Phase 6 tenant-isolation guarantees.
 
 The first token creation is allowed without authentication only while the relevant token store is
 empty, and that token must grant every scope supported by that endpoint. The standalone Agent then
@@ -126,8 +150,10 @@ requires all seven local scopes for token administration; the control plane requ
 so operators should retain a separate backup. The distributed control-plane server can terminate
 TLS directly when both certificate/key paths are configured. A reverse proxy is accepted only in
 explicit TLS-termination mode while the server process remains loopback-bound. This boundary is
-still limited machine authentication, not a hardened multi-tenant or public-internet security
-system; mTLS, SSO, organizations, advanced RBAC, HA, and secret-vault integration are not claimed.
+not yet a hardened public-internet service: lower-priority internal storage, remaining global
+Agent/bench identifiers, automatic legacy-token conversion, shared OIDC transaction state,
+issuer/subject binding, broad rate limiting, trusted-proxy address policy, mTLS, HA, and
+secret-vault integration remain unfinished or out of scope.
 
 ## Workflows and results
 

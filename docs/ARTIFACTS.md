@@ -21,8 +21,36 @@ control-plane restart, receives a newly issued capability while retaining the sa
 idempotency identity.
 
 Supported owner types are `ci_session`, `workflow_run`, `workflow_step`, and `operation`. CI input
-uploads are owned by the session that will run them; access is restricted to the same API token
-owner.
+uploads are owned by the session that will run them. The standalone Phase 4 API restricts them to
+the same legacy token owner. The Phase 6 control plane instead resolves and authorises the durable
+parent described below.
+
+## Phase 6 parent-inherited access
+
+Identity-facing control-plane upload/list/get/content/delete, CI artifact-list, and download-transfer
+issuance calls pass through a protected artifact application service:
+
+- operation and remote-command artifacts inherit the exact trusted bench, including its parent
+  Agent relationship;
+- workflow-run artifacts require a tenant-scoped run/definition and its actual bench;
+- a linked CI-session artifact requires session access plus the corresponding `artifacts:*`
+  permission on both the exact workflow and selected bench;
+- an unlinked CI-session artifact requires session access plus the artifact permission from at least
+  one scoped assignment; and
+- a `workflow_step` UUID has no tenant-scoped trusted resolver yet, so Phase 6 named access and
+  mutations fail closed and collection reads filter it.
+
+List routes return `200` with inaccessible records omitted. Named/mutation denials are audited and
+become the ordinary artifact `404` when `hide_unauthorised_resources` is enabled; otherwise they
+remain structured `403` responses. Upload authorisation completes before the request stream is
+consumed, and transfer issuance validates the target Agent in the same tenant before creating a
+capability.
+
+`DELETE /api/v1/artifacts/{artifact_id}` removes a platform-managed artifact after inherited
+`artifacts:delete` authorisation and appends `ARTIFACT_DELETED`. Remote-artifact deletion is not
+supported. Transfer-capability PUT/GET routes remain a separate short-lived Agent/artifact bearer
+boundary. Legacy scope compatibility retains its historical access, including unresolved
+workflow-step records, and is outside Phase 6 tenant guarantees.
 
 ## Upload through the one-command flow
 
@@ -74,12 +102,11 @@ The CLI computes SHA-256 before upload and the Agent verifies content while stre
 idempotency key when a custom integration may retry an upload; the same logical retry returns the
 existing artifact.
 
-## Upload API
+## Control-plane upload API
 
 ```http
 POST /api/v1/artifacts
 Authorization: Bearer <token with artifacts:write>
-Idempotency-Key: github_actions:acme/device:123456789:firmware
 Content-Type: multipart/form-data
 ```
 
@@ -88,10 +115,11 @@ Multipart fields:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `file` | yes | Streamed content |
-| `ci_session_id` | yes | Owning CI session UUID |
-| `name` | no | Logical display name; defaults to upload filename |
-| `artifact_type` | no | Category; defaults to `firmware` |
-| `sha256` | no | Expected lowercase hexadecimal digest |
+| `owner_type` | yes | `ci_session`, `workflow_run`, `workflow_step`, or `operation` |
+| `owner_id` | yes | Owning resource UUID |
+| `artifact_type` | yes | Logical category such as `firmware` |
+| `expected_sha256` | no | Expected lowercase hexadecimal digest |
+| `idempotency_key` | no | Tenant/owner-scoped logical retry key |
 
 Example response:
 
@@ -113,11 +141,13 @@ Example response:
 
 ## List, inspect, and download
 
-| Method | Route | Required scope |
+| Method | Route | Legacy scope / Phase 6 decision |
 | --- | --- | --- |
-| GET | `/api/v1/ci/sessions/{session_id}/artifacts` | `artifacts:read` |
-| GET | `/api/v1/artifacts/{artifact_id}` | `artifacts:read` |
-| GET | `/api/v1/artifacts/{artifact_id}/content` | `artifacts:read` |
+| GET | `/api/v1/ci/sessions/{session_id}/artifacts` | `artifacts:read` / session plus inherited parent read |
+| GET | `/api/v1/artifacts` | `artifacts:read` / per-item inherited parent read |
+| GET | `/api/v1/artifacts/{artifact_id}` | `artifacts:read` / inherited parent read |
+| GET | `/api/v1/artifacts/{artifact_id}/content` | `artifacts:read` / inherited parent read |
+| DELETE | `/api/v1/artifacts/{artifact_id}` | `artifacts:write` / inherited parent delete; platform records only |
 
 Retrieve content without logging the bearer token:
 

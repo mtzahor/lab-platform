@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Collection, Coroutine, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
@@ -23,11 +23,14 @@ from lab_platform.control_plane_core.workflows import (
     DistributedWorkflowDispatch,
     DistributedWorkflowRequest,
 )
-from lab_platform.core.errors import CiSessionConflictError
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import CiSessionConflictError, PermissionDeniedError
 from lab_platform.core.workflows import WorkflowInvalidError
 from lab_platform.models import (
+    ActorContext,
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
     BenchRequest,
     CiOutcome,
     CiProvider,
@@ -39,13 +42,20 @@ from lab_platform.models import (
     GlobalBenchRecord,
     GlobalBenchStatus,
     HealthStatus,
+    Principal,
+    PrincipalType,
     RemoteArtifactMetadata,
     RemoteCommand,
     RemoteCommandType,
     Reservation,
     ReservationLease,
+    ReservationOwner,
     ReservationSource,
     ReservationStatus,
+    ResourceType,
+    RoleAssignment,
+    RoleName,
+    RoleSubjectType,
     WorkflowDefinition,
 )
 from lab_platform.persistence import SQLiteCiSessionRepository, SQLiteDatabase
@@ -81,13 +91,50 @@ class FakeCatalog:
         self,
         name: str,
         version: int | None = None,
+        *,
+        organisation_id: UUID | None = None,
     ) -> WorkflowDefinition | None:
         matches = [
             item
             for (stored_name, _), item in self.definitions.items()
-            if stored_name == name and (version is None or item.version == version)
+            if stored_name == name
+            and (version is None or item.version == version)
+            and (organisation_id is None or item.organisation_id == organisation_id)
         ]
         return max(matches, key=lambda item: item.version) if matches else None
+
+
+class ScopedAuthorisationRepository:
+    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
+        self.assignments = tuple(assignments)
+
+    async def get_organisation_membership(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> None:
+        del organisation_id, user_id
+        return None
+
+    async def list_team_ids_for_user(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> Collection[UUID]:
+        del organisation_id, user_id
+        return ()
+
+    async def list_role_assignments(
+        self,
+        organisation_id: UUID,
+        subjects: Collection[tuple[RoleSubjectType, UUID]],
+    ) -> Sequence[RoleAssignment]:
+        return tuple(
+            assignment
+            for assignment in self.assignments
+            if assignment.organisation_id == organisation_id
+            and (assignment.subject_type, assignment.subject_id) in subjects
+        )
 
 
 class FakeCoordinator:
@@ -465,6 +512,97 @@ async def test_create_is_durable_idempotent_and_rejects_content_reuse(tmp_path: 
 
 
 @_run_async_test
+async def test_identity_ci_service_reauthorises_scoped_principal_and_narrowing(
+    tmp_path: Path,
+) -> None:
+    database, _, service, coordinator, _, _, _ = await _service_fixture(tmp_path / "ci.db")
+    definition = _workflow()
+    principal = Principal(
+        id=UUID(int=901),
+        type=PrincipalType.SERVICE_ACCOUNT,
+        organisation_id=definition.organisation_id,
+        display_name="scoped-ci",
+    )
+    assignment = RoleAssignment(
+        organisation_id=definition.organisation_id,
+        subject_type=RoleSubjectType.SERVICE_ACCOUNT,
+        subject_id=principal.id,
+        role=RoleName.WORKFLOW_RUNNER,
+        resource_type=ResourceType.WORKFLOW,
+        resource_id=definition.name,
+        created_by=principal.id,
+        created_at=NOW - timedelta(minutes=1),
+    )
+    service.set_authorisation_service(
+        AuthorisationService(
+            ScopedAuthorisationRepository((assignment,)),
+            clock=lambda: NOW,
+        )
+    )
+    context = AuthenticationContext(principal=principal)
+    owner = ReservationOwner(
+        principal_id=principal.id,
+        principal_type=principal.type,
+        display_name=principal.display_name,
+    )
+    actor = ActorContext(
+        principal_id=principal.id,
+        principal_type=principal.type,
+        display_name=principal.display_name,
+        organisation_id=principal.organisation_id,
+    )
+    session = await service.create(
+        DistributedCiCreateRequest(
+            provider=CiProvider.GITHUB_ACTIONS,
+            external_run_id="scoped-run",
+            requested_by=principal.display_name,
+            owner_principal=owner,
+            actor_context=actor,
+            authentication_context=context,
+            idempotency_key="scoped-run",
+        )
+    )
+
+    other_context = AuthenticationContext(
+        principal=principal.model_copy(update={"id": UUID(int=902), "display_name": "other-ci"})
+    )
+    with pytest.raises(PermissionDeniedError):
+        await service.start(
+            session.id,
+            DistributedCiStartRequest(workflow_name=definition.name),
+            organisation_id=principal.organisation_id,
+            authentication_context=other_context,
+        )
+
+    started = await service.start(
+        session.id,
+        DistributedCiStartRequest(workflow_name=definition.name),
+        organisation_id=principal.organisation_id,
+        authentication_context=context,
+    )
+    assert started.requested_by_principal_id == principal.id
+    assert coordinator.calls[-1].authentication_context == context
+    assert coordinator.calls[-1].organisation_id == principal.organisation_id
+    assert not coordinator.calls[-1].allow_legacy_authorisation
+
+    with pytest.raises(PermissionDeniedError):
+        await service.create(
+            DistributedCiCreateRequest(
+                provider=CiProvider.GITHUB_ACTIONS,
+                external_run_id="narrowed-run",
+                requested_by=principal.display_name,
+                owner_principal=owner,
+                actor_context=actor,
+                authentication_context=context.model_copy(
+                    update={"permission_restrictions": {"workflows:run"}}
+                ),
+                idempotency_key="narrowed-run",
+            )
+        )
+    database.close()
+
+
+@_run_async_test
 async def test_start_routes_bench_request_and_atomically_persists_remote_binding(
     tmp_path: Path,
 ) -> None:
@@ -504,7 +642,8 @@ async def test_start_routes_bench_request_and_atomically_persists_remote_binding
     assert routed.agent_labels == {"pool": "ci"}
     assert routed.preferred_location == "jerusalem"
     assert routed.manage_reservation_lifecycle is False
-    assert set(routed.definition.requirements.capabilities) == {"reset", "diagnostic"}
+    assert set(routed.definition.requirements.capabilities) == {"reset"}
+    assert set(routed.required_capabilities) == {"diagnostic"}
     binding = await repository.get_distributed_workflow(session.id)
     assert binding is not None
     assert binding.remote_command_id == UUID(int=3)
@@ -517,6 +656,104 @@ async def test_start_routes_bench_request_and_atomically_persists_remote_binding
         await service.start(
             session.id,
             DistributedCiStartRequest(workflow_name="another-workflow"),
+        )
+    database.close()
+
+
+@_run_async_test
+async def test_authenticated_ci_identity_survives_restart_and_reaches_workflow(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock()
+    database, _, service, coordinator, remote, reservations, commands = await _service_fixture(
+        tmp_path / "ci-identity.db",
+        clock=clock,
+    )
+    principal_id = UUID(int=800)
+    organisation_id = UUID(int=801)
+    owner = ReservationOwner(
+        principal_id=principal_id,
+        principal_type=PrincipalType.SERVICE_ACCOUNT,
+        display_name="github-ci",
+    )
+    actor = ActorContext(
+        principal_id=principal_id,
+        principal_type=PrincipalType.SERVICE_ACCOUNT,
+        display_name="github-ci",
+        organisation_id=organisation_id,
+    )
+    session = await service.create(
+        DistributedCiCreateRequest(
+            provider=CiProvider.GITHUB_ACTIONS,
+            external_run_id="authenticated-run",
+            requested_by="github-ci",
+            owner_principal=owner,
+            actor_context=actor,
+            idempotency_key="authenticated-run",
+        )
+    )
+    assert session.organisation_id == organisation_id
+    assert session.requested_by_principal_id == principal_id
+    assert session.requested_by_principal_type is PrincipalType.SERVICE_ACCOUNT
+    database.close()
+
+    reopened = SQLiteDatabase(tmp_path / "ci-identity.db")
+    reopened.initialize()
+    restarted = DistributedCiSessionService(
+        SQLiteCiSessionRepository(reopened),
+        FakeCatalog(_workflow(), _workflow("another-workflow")),
+        coordinator,
+        remote,
+        reservations,
+        commands,
+        SQLiteRemoteArtifactRepository(reopened),
+        commands,
+        clock=clock,
+        heartbeat_timeout_seconds=300,
+    )
+    await restarted.start(
+        session.id,
+        DistributedCiStartRequest(workflow_name="distributed-ci"),
+    )
+    assert len(coordinator.calls) == 1
+    routed = coordinator.calls[0]
+    assert routed.owner == "github-ci"
+    assert routed.owner_principal == owner
+    assert routed.actor_context == actor
+    reopened.close()
+
+
+@_run_async_test
+async def test_ci_rejects_partial_or_mismatched_authenticated_identity(tmp_path: Path) -> None:
+    database, _, service, _, _, _, _ = await _service_fixture(tmp_path / "ci-identity.db")
+    owner = ReservationOwner(
+        principal_id=UUID(int=810),
+        principal_type=PrincipalType.USER,
+        display_name="Alice",
+    )
+    with pytest.raises(CiSessionConflictError, match="supplied together"):
+        await service.create(
+            DistributedCiCreateRequest(
+                provider=CiProvider.LOCAL,
+                external_run_id="partial-identity",
+                requested_by="Alice",
+                owner_principal=owner,
+            )
+        )
+    with pytest.raises(CiSessionConflictError, match="do not match"):
+        await service.create(
+            DistributedCiCreateRequest(
+                provider=CiProvider.LOCAL,
+                external_run_id="mismatched-identity",
+                requested_by="Alice",
+                owner_principal=owner,
+                actor_context=ActorContext(
+                    principal_id=UUID(int=811),
+                    principal_type=PrincipalType.USER,
+                    display_name="Alice",
+                    organisation_id=UUID(int=812),
+                ),
+            )
         )
     database.close()
 
@@ -997,6 +1234,8 @@ async def test_running_timeout_requests_remote_cancel_and_preserves_timeout_outc
     assert first.timed_out == 1
     assert pending.status is CiSessionStatus.CANCEL_REQUESTED
     assert pending.outcome is CiOutcome.TIMED_OUT
+    assert pending.cancel_actor_context is None
+    assert pending.cancel_authorisation_snapshot_id is None
     assert commands.calls[-1] == {
         "command_id": UUID(int=3),
         "reason": "CI session timed out",

@@ -559,8 +559,20 @@ class AgentPresenceService:
                 )
         return tuple(transitions)
 
-    async def get_agent(self, agent_id: UUID) -> AgentRecord:
-        agent = await self._repository.get_agent(agent_id)
+    async def get_agent(
+        self,
+        agent_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentRecord:
+        agent = (
+            await self._repository.get_agent(agent_id)
+            if organisation_id is None
+            else await self._repository.get_agent(  # type: ignore[call-arg]
+                agent_id,
+                organisation_id=organisation_id,
+            )
+        )
         if agent is None:
             raise AgentNotFoundError("The Agent does not exist.", agent_id=str(agent_id))
         return agent
@@ -568,12 +580,19 @@ class AgentPresenceService:
     async def list_agents(
         self,
         *,
+        organisation_id: UUID | None = None,
         status: AgentStatus | None = None,
         location: str | None = None,
         labels: Mapping[str, str] | None = None,
         version: str | None = None,
     ) -> list[AgentRecord]:
-        agents = await self._repository.list_agents()
+        agents = (
+            await self._repository.list_agents()
+            if organisation_id is None
+            else await self._repository.list_agents(  # type: ignore[call-arg]
+                organisation_id=organisation_id
+            )
+        )
         if status is not None:
             agents = [agent for agent in agents if agent.status is status]
         if location is not None:

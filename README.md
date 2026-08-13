@@ -5,14 +5,40 @@ central control plane now gives local shells and CI systems one inventory and AP
 independent lab Agents while each Agent remains the final authority for hardware locks, execution,
 and safety.
 
-The current release is **0.6.0-alpha** and implements the Phase 5 software cut line: authenticated
-Agent enrollment and persistent WebSockets, unified inventory, confirmed reservation leases,
-duplicate-safe remote commands, reconnect reconciliation, remote workflows/artifacts, distributed
-CI, and multi-Agent SimLab scale coverage. GitHub Actions, GitLab CI, Jenkins, and local runs all
-use the same vendor-neutral CLI and REST API.
+The current release is **0.7.0-alpha**. It retains the complete Phase 5 distributed software cut
+line—authenticated Agent enrollment, persistent WebSockets, unified inventory, confirmed leases,
+duplicate-safe commands, reconciliation, remote workflows/artifacts, distributed CI, and scale
+coverage—and adds the Phase 6 identity foundation: organisations, users, service accounts, teams,
+fixed RBAC, sessions/credentials, identity and access-policy administration, audit persistence,
+configuration, OIDC, resource-scoped enforcement, decision snapshots, and CLI auth/admin commands.
+GitHub Actions, GitLab CI, Jenkins, and local runs still use the same vendor-neutral CLI and REST
+API.
 
 See [Phase 5](docs/PHASE_5.md) for the authority model, protocol guarantees, complete distributed
 demo, recovery behavior, and early-release limitations.
+
+Phase 6 is deliberately not presented as a hardened public-SaaS boundary in this alpha. Its models,
+schema-v10 repositories, authentication and authorisation services, first-owner bootstrap, auth
+routes, dual Phase 6/legacy bearer handling, identity/access-policy REST and CLI, principal
+ownership, remote actor context, security headers, bounded audit retention, safe loopback
+auto-login, and refreshable native CLI sessions are present. OIDC authorization-code/PKCE login
+maps a configurable username claim to pre-provisioned users. Principal-facing command,
+reservation, workflow, CI, Agent lifecycle/enrollment, runtime lifecycle, and artifact services
+re-authorise trusted resources before side effects. Artifact access inherits its durable parent,
+and named-resource denials can use indistinguishable `404` responses. The main protected identity
+and operational actions append attributable success or denial events. Major distributed records
+carry organisation scope, and the Agent, bench, workflow, operation, reservation, CI, and artifact
+collections enforce their documented per-resource or ownership filters. Remaining work is focused
+on explicit legacy/internal paths, lower-priority storage and globally named Agent/bench keys,
+public-edge throttling/proxy/browser hardening, and legacy-token migration. Automatic/background
+work with no originating Phase 6 decision and legacy work deliberately has no invented initiating
+actor or snapshot; a maintenance retry may reuse evidence already persisted for a
+principal-requested CI cancellation. The durable control-intent records are not a transactional
+replay outbox. See
+[Phase 6 status](docs/PHASE_6.md), the
+[Phase 6 team-access demo](docs/PHASE_6_TEAM_DEMO.md), [OIDC](docs/OIDC.md), and the
+[security model](docs/SECURITY_MODEL.md); do not treat the new tables or settings as a completed
+multi-tenant boundary.
 
 ## Distributed quick start
 
@@ -29,12 +55,18 @@ deployment, start from
 and TLS files through deployment-secret/configuration management, and run
 `lab-control-plane migrate --config <path>` before starting the service.
 
-For the loopback demo, bootstrap a scoped client token and a one-time Agent enrollment token in a
-second terminal:
+The existing loopback demo below retains its Phase 5 legacy scoped client token and one-time Agent
+enrollment token. For a new Phase 6 identity login, first run `lab-control-plane bootstrap-admin`
+as documented in [local authentication](docs/LOCAL_AUTH.md), then use `labctl auth login`:
 
 ```console
 source .venv/bin/activate
 export LAB_PLATFORM_SERVER=http://127.0.0.1:8443
+lab-control-plane bootstrap-admin \
+  --config config/control-plane.yaml \
+  --username local-admin \
+  --display-name "Local Admin"
+labctl auth login --username local-admin --organisation default
 labctl token create \
   --name local-admin --owner local-admin \
   --scope agents:read --scope agents:admin --scope benches:read \
@@ -180,15 +212,31 @@ identities.
 
 ## Security boundary
 
-Phase 5 provides TLS/WSS configuration, unique hashed Agent credentials, hashed scoped API tokens,
-one-time enrollment, credential rotation/revocation, replay-resistant protocol IDs/sequences,
+The enforced operational boundary combines Phase 5 transport/infrastructure controls with the new
+Phase 6 identity bridge: TLS/WSS configuration, unique hashed Agent
+credentials, hashed legacy and identity-bound client credentials, one-time enrollment, credential
+rotation/revocation, identity-admin permission checks, principal-bound reservation ownership,
+resource-scoped checks on named operational routes, remote actor context and durable decision
+snapshots on identity-backed work and principal-initiated Agent controls, snapshot-safe idempotent
+replay, a conservative HTTP security-header baseline, replay-resistant protocol IDs/sequences,
 short-lived artifact capabilities, upload limits, safe generated paths, and declarative workflows
-without arbitrary shell execution. Plaintext Agent credentials belong in protected environment
-secrets, not YAML.
+without arbitrary shell execution. Plaintext Agent and client credentials belong in protected
+environment/native secret stores, not YAML.
 
 This alpha release is a single-control-plane reference deployment, not a hardened public SaaS.
-PostgreSQL is the production central store; SQLite remains a developer-demo option. mTLS, HA,
-organizations/SSO, advanced RBAC, and a secrets vault remain deployment work or later-phase scope.
+PostgreSQL is the production central store; SQLite remains a developer-demo option. Phase 6 API
+route families pass focused two-tenant isolation tests in both directions, the main operational
+collections apply per-item RBAC, and principal-facing application services recheck command,
+reservation, workflow, CI, drain/enrollment/runtime-lifecycle, and artifact decisions. Artifact
+reads, writes, transfers, and platform-managed deletion inherit trusted parent resources; a
+`WORKFLOW_STEP` artifact cannot yet be resolved safely for a Phase 6 principal, and remote artifact
+deletion is not exposed. Explicit internal/background and legacy compatibility callers,
+lower-priority storage, and some deployment-global human-readable Agent/bench identifiers remain
+transitional. Legacy-token compatibility has no organisation principal and is excluded from tenant
+isolation guarantees. OIDC is implemented for pre-provisioned users, but pending state is
+process-local, mapping is not bound durably to issuer/subject, and JIT provisioning, external group
+mapping, and a cookie-based browser session are absent. mTLS, HA, a secrets vault, broad public-API
+rate limiting, and additional proxy/browser hardening remain incomplete or later deployment work.
 Keep the PostgreSQL DSN in deployment-secret storage, require database TLS, and run
 `lab-control-plane migrate --config <path>` before starting the service. Outside the loopback demo,
 either configure an HTTPS public URL with both direct TLS certificate/key paths, or bind the process

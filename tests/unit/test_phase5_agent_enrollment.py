@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -18,13 +19,23 @@ from lab_platform.control_plane_core import (
     EnrollmentConsumeStatus,
     EnrollmentTokenView,
 )
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError, PermissionDeniedError
 from lab_platform.models import (
     AgentCredential,
     AgentEnrollmentToken,
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
     EnrollmentStatus,
     EventRecord,
+    OrganisationMembership,
+    Principal,
+    PrincipalType,
+    ResourceType,
+    RoleAssignment,
+    RoleName,
+    RoleSubjectType,
 )
 
 NOW = datetime(2026, 7, 26, 12, tzinfo=UTC)
@@ -32,6 +43,75 @@ ENROLLMENT_SECRET = f"lpe_{'e' * 48}"
 AGENT_SECRET = f"lpa_{'a' * 48}"
 REPLACEMENT_SECRET = f"lpa_{'b' * 48}"
 DEFAULT_REQUEST_ID = UUID(int=10_000)
+FIRST_ORGANISATION_ID = UUID(int=20_001)
+SECOND_ORGANISATION_ID = UUID(int=20_002)
+PHASE6_PRINCIPAL_ID = UUID(int=20_003)
+
+
+class ScopedAuthorisationRepository:
+    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
+        self.assignments = tuple(assignments)
+
+    async def get_organisation_membership(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> OrganisationMembership | None:
+        del organisation_id, user_id
+        return None
+
+    async def list_team_ids_for_user(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> Collection[UUID]:
+        del organisation_id, user_id
+        return ()
+
+    async def list_role_assignments(
+        self,
+        organisation_id: UUID,
+        subjects: Collection[tuple[RoleSubjectType, UUID]],
+    ) -> Sequence[RoleAssignment]:
+        return tuple(
+            assignment
+            for assignment in self.assignments
+            if assignment.organisation_id == organisation_id
+            and (assignment.subject_type, assignment.subject_id) in subjects
+        )
+
+
+def _phase6_context(
+    *assignments: tuple[RoleName, ResourceType, str],
+    restrictions: set[str] | None = None,
+) -> tuple[AuthorisationService, AuthenticationContext]:
+    records = tuple(
+        RoleAssignment(
+            organisation_id=FIRST_ORGANISATION_ID,
+            subject_type=RoleSubjectType.USER,
+            subject_id=PHASE6_PRINCIPAL_ID,
+            role=role,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            created_by=PHASE6_PRINCIPAL_ID,
+            created_at=NOW,
+        )
+        for role, resource_type, resource_id in assignments
+    )
+    authorisation = AuthorisationService(
+        ScopedAuthorisationRepository(records),
+        clock=lambda: NOW,
+    )
+    context = AuthenticationContext(
+        principal=Principal(
+            id=PHASE6_PRINCIPAL_ID,
+            type=PrincipalType.USER,
+            organisation_id=FIRST_ORGANISATION_ID,
+            display_name="Phase 6 enrollment administrator",
+        ),
+        permission_restrictions=restrictions,
+    )
+    return authorisation, context
 
 
 class MutableClock:
@@ -86,16 +166,35 @@ class MemoryEnrollmentRepository:
         self.events.append(audit_event)
         return token
 
-    async def get_token(self, token_id: UUID) -> AgentEnrollmentToken | None:
-        return self.tokens.get(token_id)
+    async def get_token(
+        self,
+        token_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentEnrollmentToken | None:
+        token = self.tokens.get(token_id)
+        if token is not None and (
+            organisation_id is None or token.organisation_id == organisation_id
+        ):
+            return token
+        return None
 
     async def get_token_by_hash(self, token_hash: str) -> AgentEnrollmentToken | None:
         token_id = self.token_ids_by_hash.get(token_hash)
         return self.tokens.get(token_id) if token_id is not None else None
 
-    async def list_tokens(self, *, limit: int = 500) -> list[AgentEnrollmentToken]:
+    async def list_tokens(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[AgentEnrollmentToken]:
         return sorted(
-            self.tokens.values(),
+            (
+                token
+                for token in self.tokens.values()
+                if organisation_id is None or token.organisation_id == organisation_id
+            ),
             key=lambda token: (token.created_at, str(token.id)),
             reverse=True,
         )[:limit]
@@ -105,9 +204,13 @@ class MemoryEnrollmentRepository:
         token_id: UUID,
         revoked_at: datetime,
         audit_event: EventRecord,
+        *,
+        organisation_id: UUID | None = None,
     ) -> AgentEnrollmentToken | None:
         token = self.tokens.get(token_id)
-        if token is None:
+        if token is None or (
+            organisation_id is not None and token.organisation_id != organisation_id
+        ):
             return None
         if token.revoked_at is not None:
             return token
@@ -157,12 +260,31 @@ class MemoryEnrollmentRepository:
             credential=credential,
         )
 
-    async def get_agent(self, agent_id: UUID) -> AgentRecord | None:
-        return self.agents.get(agent_id)
+    async def get_agent(
+        self,
+        agent_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AgentRecord | None:
+        agent = self.agents.get(agent_id)
+        if agent is not None and (
+            organisation_id is None or agent.organisation_id == organisation_id
+        ):
+            return agent
+        return None
 
-    async def list_agents(self, *, limit: int = 500) -> list[AgentRecord]:
+    async def list_agents(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[AgentRecord]:
         return sorted(
-            self.agents.values(),
+            (
+                agent
+                for agent in self.agents.values()
+                if organisation_id is None or agent.organisation_id == organisation_id
+            ),
             key=lambda agent: (agent.registered_at, str(agent.id)),
             reverse=True,
         )[:limit]
@@ -230,9 +352,13 @@ class MemoryEnrollmentRepository:
         agent_id: UUID,
         revoked_at: datetime,
         audit_event: EventRecord,
+        *,
+        organisation_id: UUID | None = None,
     ) -> AgentRecord | None:
         agent = self.agents.get(agent_id)
-        if agent is None:
+        if agent is None or (
+            organisation_id is not None and agent.organisation_id != organisation_id
+        ):
             return None
         if agent.status is AgentStatus.REVOKED:
             return agent
@@ -614,5 +740,186 @@ def test_enrollment_audit_events_do_not_contain_secret_material() -> None:
             service.hash_secret(REPLACEMENT_SECRET),
         ):
             assert secret_hash not in serialized_events
+
+    asyncio.run(scenario())
+
+
+def test_phase6_token_administration_requires_exact_org_before_side_effects() -> None:
+    async def scenario() -> None:
+        service, repository, _clock = _service()
+        authorisation, context = _phase6_context(
+            (
+                RoleName.LAB_ADMIN,
+                ResourceType.ORGANISATION,
+                str(FIRST_ORGANISATION_ID),
+            )
+        )
+        service.set_authorisation_service(authorisation)
+        expiry = NOW + timedelta(minutes=30)
+
+        with pytest.raises(AuthenticationRequiredError):
+            await service.issue_token(
+                name="missing-identity",
+                expires_at=expiry,
+                organisation_id=FIRST_ORGANISATION_ID,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await service.issue_token(
+                name="cross-organisation",
+                expires_at=expiry,
+                organisation_id=SECOND_ORGANISATION_ID,
+                authentication_context=context,
+            )
+        narrowed = context.model_copy(
+            update={"permission_restrictions": frozenset({"agents:read"})}
+        )
+        with pytest.raises(PermissionDeniedError):
+            await service.issue_token(
+                name="credential-narrowed",
+                expires_at=expiry,
+                organisation_id=FIRST_ORGANISATION_ID,
+                authentication_context=narrowed,
+            )
+        assert repository.tokens == {}
+        assert repository.events == []
+
+        issued = await service.issue_token(
+            name="phase6-authorised",
+            expires_at=expiry,
+            organisation_id=FIRST_ORGANISATION_ID,
+            authentication_context=context,
+        )
+        assert await service.list_tokens(
+            organisation_id=FIRST_ORGANISATION_ID,
+            authentication_context=context,
+        ) == [issued.token]
+        with pytest.raises(PermissionDeniedError):
+            await service.list_tokens(
+                organisation_id=FIRST_ORGANISATION_ID,
+                authentication_context=narrowed,
+            )
+        event_count = len(repository.events)
+        with pytest.raises(PermissionDeniedError):
+            await service.revoke_token(
+                issued.token.id,
+                organisation_id=FIRST_ORGANISATION_ID,
+                authentication_context=narrowed,
+            )
+        assert repository.tokens[issued.token.id].revoked_at is None
+        assert len(repository.events) == event_count
+
+        revoked = await service.revoke_token(
+            issued.token.id,
+            organisation_id=FIRST_ORGANISATION_ID,
+            authentication_context=context,
+        )
+        assert revoked.revoked_at == NOW
+
+        legacy_service, legacy_repository, _clock = _service(token=f"lpe_{'l' * 48}")
+        legacy_service.set_authorisation_service(authorisation)
+        legacy = await legacy_service.issue_token(
+            name="explicit-phase5-compatibility",
+            expires_at=expiry,
+            allow_legacy_authorisation=True,
+        )
+        assert await legacy_service.list_tokens(allow_internal_authorisation=True) == [legacy.token]
+        assert legacy.token.id in legacy_repository.tokens
+
+    asyncio.run(scenario())
+
+
+def test_phase6_agent_listing_and_revocation_use_exact_persisted_agents() -> None:
+    async def scenario() -> None:
+        service, repository, _clock = _service()
+        first = AgentRecord(
+            id=UUID(int=21_001),
+            organisation_id=FIRST_ORGANISATION_ID,
+            slug="first-visible",
+            name="First visible",
+            status=AgentStatus.OFFLINE,
+            version="0.7.0-alpha",
+            protocol_version="1.0",
+            registered_at=NOW,
+            enrollment_status=EnrollmentStatus.ENROLLED,
+        )
+        same_org_hidden = first.model_copy(
+            update={"id": UUID(int=21_002), "slug": "same-org-hidden", "name": "Hidden"}
+        )
+        foreign = first.model_copy(
+            update={
+                "id": UUID(int=21_003),
+                "organisation_id": SECOND_ORGANISATION_ID,
+                "slug": "foreign-agent",
+                "name": "Foreign",
+            }
+        )
+        repository.agents = {
+            first.id: first,
+            same_org_hidden.id: same_org_hidden,
+            foreign.id: foreign,
+        }
+        authorisation, context = _phase6_context(
+            (RoleName.LAB_ADMIN, ResourceType.AGENT, str(first.id))
+        )
+        service.set_authorisation_service(authorisation)
+
+        with pytest.raises(AuthenticationRequiredError):
+            await service.list_agents(organisation_id=FIRST_ORGANISATION_ID)
+        assert await service.list_agents(
+            organisation_id=FIRST_ORGANISATION_ID,
+            authentication_context=context,
+        ) == [first]
+        read_only = context.model_copy(
+            update={"permission_restrictions": frozenset({"agents:read"})}
+        )
+        manage_only = context.model_copy(
+            update={"permission_restrictions": frozenset({"agents:manage"})}
+        )
+        assert await service.list_agents(
+            organisation_id=FIRST_ORGANISATION_ID,
+            authentication_context=read_only,
+        ) == [first]
+        with pytest.raises(PermissionDeniedError):
+            await service.list_agents(
+                organisation_id=FIRST_ORGANISATION_ID,
+                authentication_context=manage_only,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await service.list_agents(
+                organisation_id=SECOND_ORGANISATION_ID,
+                authentication_context=context,
+            )
+
+        event_count = len(repository.events)
+        with pytest.raises(PermissionDeniedError):
+            await service.revoke_agent(
+                first.id,
+                organisation_id=FIRST_ORGANISATION_ID,
+                authentication_context=read_only,
+            )
+        with pytest.raises(PermissionDeniedError):
+            await service.revoke_agent(
+                foreign.id,
+                organisation_id=SECOND_ORGANISATION_ID,
+                authentication_context=context,
+            )
+        assert repository.agents[first.id].status is AgentStatus.OFFLINE
+        assert repository.agents[foreign.id].status is AgentStatus.OFFLINE
+        assert len(repository.events) == event_count
+
+        revoked = await service.revoke_agent(
+            first.id,
+            organisation_id=FIRST_ORGANISATION_ID,
+            authentication_context=context,
+        )
+        assert revoked.status is AgentStatus.REVOKED
+        assert set(
+            agent.id for agent in await service.list_agents(allow_legacy_authorisation=True)
+        ) == {first.id, same_org_hidden.id, foreign.id}
+        internal = await service.revoke_agent(
+            same_org_hidden.id,
+            allow_internal_authorisation=True,
+        )
+        assert internal.status is AgentStatus.REVOKED
 
     asyncio.run(scenario())

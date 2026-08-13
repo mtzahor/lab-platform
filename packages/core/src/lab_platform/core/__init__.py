@@ -1,6 +1,16 @@
 from lab_platform.core.agent import AgentCore
 from lab_platform.core.artifacts import ArtifactService, normalize_artifact_name
 from lab_platform.core.auth import ApiTokenService, IssuedApiToken
+from lab_platform.core.authorisation import (
+    ALL_PERMISSIONS,
+    ORGANISATION_ROLE_PERMISSIONS,
+    ROLE_PERMISSIONS,
+    AuthorisationAuditRepository,
+    AuthorisationDecision,
+    AuthorisationPolicyRepository,
+    AuthorisationRepository,
+    AuthorisationService,
+)
 from lab_platform.core.backend import LabBackend
 from lab_platform.core.backend_registry import BackendRegistry, RegistryRefreshResult
 from lab_platform.core.bench_catalog import BenchCatalog, BenchMetadata, BenchRecord
@@ -55,6 +65,27 @@ from lab_platform.core.errors import (
 )
 from lab_platform.core.events import EventBus, EventHandler
 from lab_platform.core.health import HealthMonitor
+from lab_platform.core.identity import (
+    IdentityAuthenticationRepository,
+    IdentityAuthenticationService,
+    IssuedApiCredential,
+    IssuedSession,
+    ScryptPasswordHasher,
+    sanitize_audit_metadata,
+)
+from lab_platform.core.identity_admin import (
+    IdentityAdministrationRepository,
+    IdentityAdministrationService,
+)
+from lab_platform.core.oidc import (
+    OidcAuthenticationService,
+    OidcIdentityRepository,
+    OidcLoginStart,
+    OidcProvider,
+    OidcProviderMetadata,
+    OidcSessionIssuer,
+    validate_oidc_id_token,
+)
 from lab_platform.core.operation_locks import OperationLockService
 from lab_platform.core.queueing import FifoQueuePolicy, QueuePolicy
 from lab_platform.core.recovery import RecoveryService
@@ -84,12 +115,20 @@ from lab_platform.core.workflows import (
 )
 
 __all__ = [
+    "ALL_PERMISSIONS",
+    "ORGANISATION_ROLE_PERMISSIONS",
+    "ROLE_PERMISSIONS",
     "AgentCore",
     "ApiTokenService",
     "ArtifactChecksumMismatchError",
     "ArtifactNotFoundError",
     "ArtifactService",
     "ArtifactTooLargeError",
+    "AuthorisationDecision",
+    "AuthorisationPolicyRepository",
+    "AuthorisationAuditRepository",
+    "AuthorisationRepository",
+    "AuthorisationService",
     "AuthenticationRequiredError",
     "BackendFailureError",
     "BackendNotFoundError",
@@ -121,10 +160,22 @@ __all__ = [
     "FifoQueuePolicy",
     "FirmwareFileTooLargeError",
     "HealthMonitor",
+    "IdentityAuthenticationRepository",
+    "IdentityAuthenticationService",
+    "IdentityAdministrationRepository",
+    "IdentityAdministrationService",
+    "OidcAuthenticationService",
+    "OidcIdentityRepository",
+    "OidcLoginStart",
+    "OidcProvider",
+    "OidcProviderMetadata",
+    "OidcSessionIssuer",
     "InvalidFirmwareFileError",
     "InvalidApiTokenError",
     "InvalidArtifactError",
     "IssuedApiToken",
+    "IssuedApiCredential",
+    "IssuedSession",
     "LabBackend",
     "OperationNotCancellableError",
     "OperationArtifactNotFoundError",
@@ -153,6 +204,7 @@ __all__ = [
     "RegistryRefreshResult",
     "Scheduler",
     "SchedulerFailureError",
+    "ScryptPasswordHasher",
     "SchedulingService",
     "SimulationFailureError",
     "StateMachine",
@@ -171,6 +223,8 @@ __all__ = [
     "build_test_results",
     "normalize_artifact_name",
     "render_junit_xml",
+    "sanitize_audit_metadata",
+    "validate_oidc_id_token",
     "recover_interrupted_operations",
     "as_utc",
     "parse_workflow_yaml",

@@ -165,7 +165,7 @@ def test_v4_upgrade_preserves_workflow_rows_and_installs_phase4_schema(
             assert (
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
                 == SCHEMA_VERSION
-                == 8
+                == 10
             )
             tables = {
                 row[0]

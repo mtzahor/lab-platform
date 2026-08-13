@@ -10,6 +10,7 @@ from lab_platform.core.workflows import (
     WorkflowInvalidError,
     WorkflowRunNotFoundError,
 )
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID
 from lab_platform.models.workflows import (
     WorkflowAction,
     WorkflowDefinition,
@@ -20,16 +21,18 @@ from lab_platform.models.workflows import (
 )
 from lab_platform.persistence.database import SQLiteDatabase
 
-WORKFLOW_SCHEMA_SQL = """
+WORKFLOW_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS workflows (
+    organisation_id TEXT NOT NULL DEFAULT '{LEGACY_ORGANISATION_ID}',
     name TEXT NOT NULL,
     version INTEGER NOT NULL CHECK (version >= 1),
     definition_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (name, version)
+    PRIMARY KEY (organisation_id, name, version)
 );
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL DEFAULT '{LEGACY_ORGANISATION_ID}',
     workflow_name TEXT NOT NULL,
     workflow_version INTEGER NOT NULL,
     bench_id TEXT NOT NULL,
@@ -45,16 +48,18 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     completed_at TEXT,
     error_code TEXT,
     error_message TEXT,
-    FOREIGN KEY (workflow_name, workflow_version)
-        REFERENCES workflows(name, version)
+    UNIQUE (organisation_id, id),
+    FOREIGN KEY (organisation_id, workflow_name, workflow_version)
+        REFERENCES workflows(organisation_id, name, version)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS workflow_runs_one_active_per_bench
-    ON workflow_runs(bench_id)
+    ON workflow_runs(organisation_id, bench_id)
     WHERE status IN ('pending', 'running', 'cancel_requested');
 CREATE INDEX IF NOT EXISTS workflow_runs_created
-    ON workflow_runs(created_at DESC);
+    ON workflow_runs(organisation_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS workflow_step_results (
     id TEXT PRIMARY KEY,
+    organisation_id TEXT NOT NULL DEFAULT '{LEGACY_ORGANISATION_ID}',
     workflow_run_id TEXT NOT NULL,
     step_index INTEGER NOT NULL CHECK (step_index >= 0),
     name TEXT NOT NULL DEFAULT '',
@@ -72,11 +77,12 @@ CREATE TABLE IF NOT EXISTS workflow_step_results (
     artifact_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (
         json_valid(artifact_ids_json) AND json_type(artifact_ids_json) = 'array'
     ),
-    UNIQUE (workflow_run_id, step_index),
-    FOREIGN KEY (workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    UNIQUE (organisation_id, workflow_run_id, step_index),
+    FOREIGN KEY (organisation_id, workflow_run_id)
+        REFERENCES workflow_runs(organisation_id, id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS workflow_step_results_run
-    ON workflow_step_results(workflow_run_id, step_index);
+    ON workflow_step_results(organisation_id, workflow_run_id, step_index);
 """
 
 
@@ -172,6 +178,11 @@ def _rebuild_workflow_step_results(connection: sqlite3.Connection) -> None:
     )
 
 
+def _definition_from_row(row: sqlite3.Row) -> WorkflowDefinition:
+    definition = WorkflowDefinition.model_validate_json(row["definition_json"])
+    return definition.model_copy(update={"organisation_id": UUID(row["organisation_id"])})
+
+
 class SQLiteWorkflowRepository:
     def __init__(self, database: SQLiteDatabase, *, initialize_schema: bool = True) -> None:
         self._database = database
@@ -182,11 +193,12 @@ class SQLiteWorkflowRepository:
         serialized = definition.model_dump_json()
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT definition_json FROM workflows WHERE name = ? AND version = ?",
-                (definition.name, definition.version),
+                "SELECT organisation_id, definition_json FROM workflows "
+                "WHERE name = ? AND version = ? AND organisation_id = ?",
+                (definition.name, definition.version, str(definition.organisation_id)),
             ).fetchone()
             if row is not None:
-                existing = WorkflowDefinition.model_validate_json(row["definition_json"])
+                existing = _definition_from_row(row)
                 if existing != definition:
                     raise WorkflowInvalidError(
                         f"Workflow {definition.name!r} version {definition.version} already exists "
@@ -196,45 +208,66 @@ class SQLiteWorkflowRepository:
                     )
                 return existing
             connection.execute(
-                "INSERT INTO workflows(name, version, definition_json) VALUES (?, ?, ?)",
-                (definition.name, definition.version, serialized),
+                "INSERT INTO workflows(name, version, definition_json, organisation_id) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    definition.name,
+                    definition.version,
+                    serialized,
+                    str(definition.organisation_id),
+                ),
             )
         return definition
 
     async def get_definition(
-        self, name: str, version: int | None = None
+        self,
+        name: str,
+        version: int | None = None,
+        *,
+        organisation_id: UUID | None = None,
     ) -> WorkflowDefinition | None:
+        scope_id = organisation_id or LEGACY_ORGANISATION_ID
         with self._database.transaction() as connection:
             if version is None:
                 row = connection.execute(
-                    "SELECT definition_json FROM workflows WHERE name = ? "
+                    "SELECT organisation_id, definition_json FROM workflows "
+                    "WHERE name = ? AND organisation_id = ? "
                     "ORDER BY version DESC LIMIT 1",
-                    (name,),
+                    (name, str(scope_id)),
                 ).fetchone()
             else:
                 row = connection.execute(
-                    "SELECT definition_json FROM workflows WHERE name = ? AND version = ?",
-                    (name, version),
+                    "SELECT organisation_id, definition_json FROM workflows "
+                    "WHERE name = ? AND version = ? AND organisation_id = ?",
+                    (name, version, str(scope_id)),
                 ).fetchone()
         if row is None:
             return None
-        return WorkflowDefinition.model_validate_json(row["definition_json"])
+        return _definition_from_row(row)
 
-    async def list_definitions(self) -> list[WorkflowDefinition]:
+    async def list_definitions(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[WorkflowDefinition]:
+        scope_id = organisation_id or LEGACY_ORGANISATION_ID
         with self._database.transaction() as connection:
             rows = connection.execute(
-                "SELECT definition_json FROM workflows ORDER BY name, version DESC"
+                "SELECT organisation_id, definition_json FROM workflows "
+                "WHERE organisation_id = ? ORDER BY name, version DESC",
+                (str(scope_id),),
             ).fetchall()
-        return [WorkflowDefinition.model_validate_json(row["definition_json"]) for row in rows]
+        return [_definition_from_row(row) for row in rows]
 
     async def create_run(self, run: WorkflowRun) -> WorkflowRun:
         try:
             with self._database.transaction(immediate=True) as connection:
                 connection.execute(
                     "INSERT INTO workflow_runs "
-                    "(id, workflow_name, workflow_version, bench_id, owner, reservation_id, "
+                    "(id, organisation_id, workflow_name, workflow_version, bench_id, owner, "
+                    "reservation_id, "
                     "status, current_step, created_at, started_at, completed_at, error_code, "
-                    "error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _run_values(run),
                 )
         except sqlite3.IntegrityError as exc:
@@ -250,10 +283,20 @@ class SQLiteWorkflowRepository:
             ) from exc
         return run
 
-    async def get_run(self, run_id: UUID) -> WorkflowRun | None:
+    async def get_run(
+        self,
+        run_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> WorkflowRun | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(run_id), str(organisation_id)) if organisation_id is not None else (str(run_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM workflow_runs WHERE id = ?", (str(run_id),)
+                f"SELECT * FROM workflow_runs WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _run_from_row(row) if row is not None else None
 
@@ -262,7 +305,8 @@ class SQLiteWorkflowRepository:
             cursor = connection.execute(
                 "UPDATE workflow_runs SET workflow_name = ?, workflow_version = ?, bench_id = ?, "
                 "owner = ?, reservation_id = ?, status = ?, current_step = ?, created_at = ?, "
-                "started_at = ?, completed_at = ?, error_code = ?, error_message = ? WHERE id = ?",
+                "started_at = ?, completed_at = ?, error_code = ?, error_message = ? "
+                "WHERE id = ? AND organisation_id = ?",
                 (
                     run.workflow_name,
                     run.workflow_version,
@@ -277,6 +321,7 @@ class SQLiteWorkflowRepository:
                     run.error_code,
                     run.error_message,
                     str(run.id),
+                    str(run.organisation_id),
                 ),
             )
             if cursor.rowcount != 1:
@@ -290,9 +335,10 @@ class SQLiteWorkflowRepository:
             with self._database.transaction(immediate=True) as connection:
                 connection.execute(
                     "INSERT INTO workflow_step_results "
-                    "(id, workflow_run_id, step_index, name, action, status, started_at, "
+                    "(id, organisation_id, workflow_run_id, step_index, name, action, status, "
+                    "started_at, "
                     "completed_at, output_json, error_code, error_message, artifact_ids_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _step_result_values(result),
                 )
         except sqlite3.IntegrityError as exc:
@@ -308,7 +354,7 @@ class SQLiteWorkflowRepository:
             cursor = connection.execute(
                 "UPDATE workflow_step_results SET name = ?, action = ?, status = ?, "
                 "started_at = ?, completed_at = ?, output_json = ?, error_code = ?, "
-                "error_message = ?, artifact_ids_json = ? WHERE id = ?",
+                "error_message = ?, artifact_ids_json = ? WHERE id = ? AND organisation_id = ?",
                 (
                     result.name,
                     result.action.value,
@@ -320,6 +366,7 @@ class SQLiteWorkflowRepository:
                     result.error_message,
                     json.dumps([str(item) for item in result.artifact_ids]),
                     str(result.id),
+                    str(result.organisation_id),
                 ),
             )
             if cursor.rowcount != 1:
@@ -329,21 +376,41 @@ class SQLiteWorkflowRepository:
                 )
         return result
 
-    async def list_step_results(self, run_id: UUID) -> list[WorkflowStepResult]:
+    async def list_step_results(
+        self,
+        run_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[WorkflowStepResult]:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(run_id), str(organisation_id)) if organisation_id is not None else (str(run_id),)
+        )
         with self._database.transaction() as connection:
             rows = connection.execute(
-                "SELECT * FROM workflow_step_results WHERE workflow_run_id = ? ORDER BY step_index",
-                (str(run_id),),
+                "SELECT * FROM workflow_step_results WHERE workflow_run_id = ?"
+                f"{scope} ORDER BY step_index",  # noqa: S608
+                values,
             ).fetchall()
         return [_step_result_from_row(row) for row in rows]
 
-    async def recover_interrupted(self, now: datetime) -> list[WorkflowRun]:
+    async def recover_interrupted(
+        self,
+        now: datetime,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> list[WorkflowRun]:
+        # Calls made by pre-Phase-6 Agent runtimes recover the seeded legacy tenant only.
+        # Tenant-aware control-plane recovery supplies its explicit organisation scope.
+        scope_id = organisation_id or LEGACY_ORGANISATION_ID
         timestamp = now.isoformat()
         with self._database.transaction(immediate=True) as connection:
             rows = connection.execute(
                 "SELECT id FROM workflow_runs "
-                "WHERE status IN ('pending', 'running', 'cancel_requested') "
-                "ORDER BY created_at"
+                "WHERE organisation_id = ? "
+                "AND status IN ('pending', 'running', 'cancel_requested') "
+                "ORDER BY created_at",
+                (str(scope_id),),
             ).fetchall()
             run_ids = [row["id"] for row in rows]
             if not run_ids:
@@ -353,19 +420,21 @@ class SQLiteWorkflowRepository:
                 f"UPDATE workflow_step_results SET status = 'failed', completed_at = ?, "
                 f"error_code = 'AGENT_RESTARTED', "
                 f"error_message = 'Agent restarted while the workflow was running' "
-                f"WHERE status = 'running' AND workflow_run_id IN ({placeholders})",
-                (timestamp, *run_ids),
+                f"WHERE organisation_id = ? AND status = 'running' "
+                f"AND workflow_run_id IN ({placeholders})",
+                (timestamp, str(scope_id), *run_ids),
             )
             connection.execute(
                 f"UPDATE workflow_runs SET status = 'failed', completed_at = ?, "
                 f"error_code = 'AGENT_RESTARTED', "
                 f"error_message = 'Agent restarted while the workflow was running' "
-                f"WHERE id IN ({placeholders})",
-                (timestamp, *run_ids),
+                f"WHERE organisation_id = ? AND id IN ({placeholders})",
+                (timestamp, str(scope_id), *run_ids),
             )
             recovered_rows = connection.execute(
-                f"SELECT * FROM workflow_runs WHERE id IN ({placeholders}) ORDER BY created_at",
-                run_ids,
+                f"SELECT * FROM workflow_runs WHERE organisation_id = ? "
+                f"AND id IN ({placeholders}) ORDER BY created_at",
+                (str(scope_id), *run_ids),
             ).fetchall()
         return [_run_from_row(row) for row in recovered_rows]
 
@@ -373,6 +442,7 @@ class SQLiteWorkflowRepository:
 def _run_values(run: WorkflowRun) -> tuple[object, ...]:
     return (
         str(run.id),
+        str(run.organisation_id),
         run.workflow_name,
         run.workflow_version,
         run.bench_id,
@@ -391,6 +461,7 @@ def _run_values(run: WorkflowRun) -> tuple[object, ...]:
 def _step_result_values(result: WorkflowStepResult) -> tuple[object, ...]:
     return (
         str(result.id),
+        str(result.organisation_id),
         str(result.workflow_run_id),
         result.step_index,
         result.name,
@@ -408,6 +479,7 @@ def _step_result_values(result: WorkflowStepResult) -> tuple[object, ...]:
 def _run_from_row(row: sqlite3.Row) -> WorkflowRun:
     return WorkflowRun(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         workflow_name=row["workflow_name"],
         workflow_version=row["workflow_version"],
         bench_id=row["bench_id"],
@@ -426,6 +498,7 @@ def _run_from_row(row: sqlite3.Row) -> WorkflowRun:
 def _step_result_from_row(row: sqlite3.Row) -> WorkflowStepResult:
     return WorkflowStepResult(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         workflow_run_id=UUID(row["workflow_run_id"]),
         step_index=row["step_index"],
         name=row["name"],

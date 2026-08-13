@@ -314,9 +314,13 @@ class AgentConnectionHub(AgentCommandTransport):
             raise RuntimeError("Agent has no active WebSocket session")
         return session
 
-    async def metrics(self) -> dict[str, int]:
+    async def metrics(self, *, agent_ids: set[UUID] | None = None) -> dict[str, int]:
         async with self._lock:
-            sessions = list(self._sessions.values())
+            sessions = [
+                session
+                for session in self._sessions.values()
+                if agent_ids is None or session.agent_id in agent_ids
+            ]
         return {
             "connected_agents": len(sessions),
             "queued_messages": sum(session.outgoing.qsize() for session in sessions),

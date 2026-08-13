@@ -27,6 +27,7 @@ from lab_platform.models import (
     ReservationStatus,
     TimelineCategory,
 )
+from lab_platform.models.domain import LEGACY_ORGANISATION_ID
 from lab_platform.persistence.database import SQLiteDatabase, insert_event
 
 
@@ -43,46 +44,77 @@ class SQLiteTimedReservationRepository:
                     _require_no_maintenance_lock_overlap(connection, reservation)
                 connection.execute(
                     "INSERT INTO reservations "
-                    "(id, bench_id, owner, created_at, released_at, status, requested_at, "
+                    "(id, bench_id, owner, owner_principal_id, owner_principal_type, "
+                    "organisation_id, created_at, released_at, status, requested_at, "
                     "starts_at, ends_at, activated_at, expired_at, source, metadata, "
                     "idempotency_key, release_pending) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _reservation_values(reservation),
                 )
         except sqlite3.IntegrityError as exc:
             if reservation.idempotency_key:
                 existing = await self.get_by_idempotency_key(
-                    reservation.bench_id, reservation.idempotency_key
+                    reservation.bench_id,
+                    reservation.idempotency_key,
+                    organisation_id=reservation.organisation_id,
                 )
                 if existing is not None:
                     return existing
             raise _reservation_integrity_error(reservation, exc) from exc
         return reservation
 
-    async def get(self, reservation_id: UUID) -> Reservation | None:
+    async def get(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> Reservation | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(reservation_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(reservation_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM reservations WHERE id = ?", (str(reservation_id),)
+                f"SELECT * FROM reservations WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _reservation_from_row(row) if row is not None else None
 
-    async def get_active(self, bench_id: str) -> Reservation | None:
+    async def get_active(
+        self,
+        bench_id: str,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> Reservation | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (bench_id, str(organisation_id)) if organisation_id is not None else (bench_id,)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM reservations WHERE bench_id = ? "
                 "AND status IN ('active', 'expired_pending_operation') "
+                f"{scope} "  # noqa: S608
                 "ORDER BY starts_at LIMIT 1",
-                (bench_id,),
+                values,
             ).fetchone()
         return _reservation_from_row(row) if row is not None else None
 
     async def get_by_idempotency_key(
-        self, bench_id: str, idempotency_key: str
+        self,
+        bench_id: str,
+        idempotency_key: str,
+        *,
+        organisation_id: UUID | None = None,
     ) -> Reservation | None:
+        scope_id = organisation_id or LEGACY_ORGANISATION_ID
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM reservations WHERE bench_id = ? AND idempotency_key = ?",
-                (bench_id, idempotency_key),
+                "SELECT * FROM reservations WHERE bench_id = ? AND idempotency_key = ? "
+                "AND organisation_id = ?",
+                (bench_id, idempotency_key, str(scope_id)),
             ).fetchone()
         return _reservation_from_row(row) if row is not None else None
 
@@ -111,9 +143,11 @@ class SQLiteTimedReservationRepository:
                 if expected_ends_at is not None:
                     values = (*values, expected_ends_at.isoformat())
                 cursor = connection.execute(
-                    "UPDATE reservations SET bench_id = ?, owner = ?, created_at = ?, "
-                    "released_at = ?, status = ?, requested_at = ?, starts_at = ?, "
-                    "ends_at = ?, activated_at = ?, expired_at = ?, source = ?, "
+                    "UPDATE reservations SET bench_id = ?, owner = ?, owner_principal_id = ?, "
+                    "owner_principal_type = ?, organisation_id = ?, created_at = ?, "
+                    "released_at = ?, status = ?, "
+                    "requested_at = ?, starts_at = ?, ends_at = ?, activated_at = ?, "
+                    "expired_at = ?, source = ?, "
                     "metadata = ?, idempotency_key = ?, release_pending = ? WHERE id = ?"
                     f"{status_clause}{ends_clause}",  # noqa: S608
                     values,
@@ -136,6 +170,7 @@ class SQLiteTimedReservationRepository:
     async def list(
         self,
         *,
+        organisation_id: UUID | None = None,
         bench_id: str | None = None,
         owner: str | None = None,
         status: ReservationStatus | None = None,
@@ -146,6 +181,10 @@ class SQLiteTimedReservationRepository:
         conditions: list[str] = []
         values: list[object] = []
         for condition, value in (
+            (
+                "organisation_id = ?",
+                str(organisation_id) if organisation_id is not None else None,
+            ),
             ("bench_id = ?", bench_id),
             ("owner = ?", owner),
             ("status = ?", status.value if status else None),
@@ -332,35 +371,58 @@ class SQLiteQueueRepository:
             with self._database.transaction(immediate=True) as connection:
                 connection.execute(
                     "INSERT INTO reservation_queue "
-                    "(id, bench_id, owner, requested_duration_seconds, status, created_at, "
+                    "(id, organisation_id, bench_id, owner, requested_duration_seconds, status, "
+                    "created_at, "
                     "promoted_at, cancelled_at, idempotency_key) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _queue_values(entry),
                 )
         except sqlite3.IntegrityError:
             if entry.idempotency_key:
-                existing = await self.get_by_idempotency_key(entry.bench_id, entry.idempotency_key)
+                existing = await self.get_by_idempotency_key(
+                    entry.bench_id,
+                    entry.idempotency_key,
+                    organisation_id=entry.organisation_id,
+                )
                 if existing is not None:
                     return existing
             raise
         return await self._with_position(entry)
 
-    async def get(self, entry_id: UUID) -> QueueEntry | None:
+    async def get(
+        self,
+        entry_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> QueueEntry | None:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(entry_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(entry_id),)
+        )
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM reservation_queue WHERE id = ?", (str(entry_id),)
+                f"SELECT * FROM reservation_queue WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         if row is None:
             return None
         return await self._with_position(_queue_from_row(row))
 
     async def get_by_idempotency_key(
-        self, bench_id: str, idempotency_key: str
+        self,
+        bench_id: str,
+        idempotency_key: str,
+        *,
+        organisation_id: UUID | None = None,
     ) -> QueueEntry | None:
+        scope_id = organisation_id or LEGACY_ORGANISATION_ID
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM reservation_queue WHERE bench_id = ? AND idempotency_key = ?",
-                (bench_id, idempotency_key),
+                "SELECT * FROM reservation_queue WHERE bench_id = ? AND idempotency_key = ?"
+                " AND organisation_id = ?",
+                (bench_id, idempotency_key, str(scope_id)),
             ).fetchone()
         if row is None:
             return None
@@ -370,10 +432,14 @@ class SQLiteQueueRepository:
         self,
         *,
         bench_id: str,
+        organisation_id: UUID | None = None,
         status: QueueEntryStatus | None = QueueEntryStatus.WAITING,
     ) -> list[QueueEntry]:
         query = "SELECT * FROM reservation_queue WHERE bench_id = ?"
         values: list[object] = [bench_id]
+        if organisation_id is not None:
+            query += " AND organisation_id = ?"
+            values.append(str(organisation_id))
         if status is not None:
             query += " AND status = ?"
             values.append(status.value)
@@ -390,18 +456,40 @@ class SQLiteQueueRepository:
             ]
         return entries
 
-    async def list_waiting_benches(self) -> builtins.list[str]:
+    async def list_waiting_benches(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> builtins.list[str]:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (str(organisation_id),) if organisation_id is not None else ()
         with self._database.transaction() as connection:
             rows = connection.execute(
                 "SELECT bench_id, MIN(created_at) AS first_at FROM reservation_queue "
-                "WHERE status = 'waiting' GROUP BY bench_id ORDER BY first_at, bench_id"
+                f"WHERE status = 'waiting'{scope} "  # noqa: S608
+                "GROUP BY bench_id ORDER BY first_at, bench_id",
+                values,
             ).fetchall()
         return [row["bench_id"] for row in rows]
 
-    async def cancel(self, entry_id: UUID, owner: str, now: datetime) -> QueueEntry:
+    async def cancel(
+        self,
+        entry_id: UUID,
+        owner: str,
+        now: datetime,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> QueueEntry:
+        scope = " AND organisation_id = ?" if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(entry_id), str(organisation_id))
+            if organisation_id is not None
+            else (str(entry_id),)
+        )
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT * FROM reservation_queue WHERE id = ?", (str(entry_id),)
+                f"SELECT * FROM reservation_queue WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
             if row is None:
                 raise QueueEntryNotFoundError(f"Queue entry {entry_id} was not found.")
@@ -413,11 +501,12 @@ class SQLiteQueueRepository:
                 raise QueueEntryNotFoundError(f"Queue entry {entry_id} is no longer waiting.")
             connection.execute(
                 "UPDATE reservation_queue SET status = 'cancelled', cancelled_at = ? "
-                "WHERE id = ? AND status = 'waiting'",
-                (now.isoformat(), str(entry_id)),
+                f"WHERE id = ? AND status = 'waiting'{scope}",  # noqa: S608
+                (now.isoformat(), *values),
             )
             updated = connection.execute(
-                "SELECT * FROM reservation_queue WHERE id = ?", (str(entry_id),)
+                f"SELECT * FROM reservation_queue WHERE id = ?{scope}",  # noqa: S608
+                values,
             ).fetchone()
         return _queue_from_row(updated)
 
@@ -433,27 +522,30 @@ class SQLiteQueueRepository:
         try:
             with self._database.transaction(immediate=True) as connection:
                 row = connection.execute(
-                    "SELECT * FROM reservation_queue WHERE id = ? AND status = 'waiting'",
-                    (str(entry_id),),
+                    "SELECT * FROM reservation_queue WHERE id = ? AND organisation_id = ? "
+                    "AND status = 'waiting'",
+                    (str(entry_id), str(reservation.organisation_id)),
                 ).fetchone()
                 if row is None:
                     return None
                 active = connection.execute(
                     "SELECT 1 FROM reservations WHERE bench_id = ? "
+                    "AND organisation_id = ? "
                     "AND status IN ('active', 'expired_pending_operation') LIMIT 1",
-                    (row["bench_id"],),
+                    (row["bench_id"], row["organisation_id"]),
                 ).fetchone()
                 if active is not None:
                     return None
                 if connection.execute(
-                    "SELECT 1 FROM operation_locks WHERE bench_id = ?", (row["bench_id"],)
+                    "SELECT 1 FROM operation_locks WHERE bench_id = ? AND organisation_id = ?",
+                    (row["bench_id"], row["organisation_id"]),
                 ).fetchone():
                     return None
                 next_scheduled = connection.execute(
                     "SELECT starts_at FROM reservations WHERE bench_id = ? "
-                    "AND status = 'scheduled' AND starts_at >= ? "
+                    "AND organisation_id = ? AND status = 'scheduled' AND starts_at >= ? "
                     "ORDER BY starts_at LIMIT 1",
-                    (row["bench_id"], now.isoformat()),
+                    (row["bench_id"], row["organisation_id"], now.isoformat()),
                 ).fetchone()
                 if (
                     next_scheduled is not None
@@ -464,21 +556,23 @@ class SQLiteQueueRepository:
                     return None
                 connection.execute(
                     "INSERT INTO reservations "
-                    "(id, bench_id, owner, created_at, released_at, status, requested_at, "
+                    "(id, bench_id, owner, owner_principal_id, owner_principal_type, "
+                    "organisation_id, created_at, released_at, status, requested_at, "
                     "starts_at, ends_at, activated_at, expired_at, source, metadata, "
                     "idempotency_key, release_pending) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _reservation_values(reservation),
                 )
                 cursor = connection.execute(
                     "UPDATE reservation_queue SET status = 'promoted', promoted_at = ? "
-                    "WHERE id = ? AND status = 'waiting'",
-                    (now.isoformat(), str(entry_id)),
+                    "WHERE id = ? AND organisation_id = ? AND status = 'waiting'",
+                    (now.isoformat(), str(entry_id), row["organisation_id"]),
                 )
                 if cursor.rowcount != 1:
                     raise sqlite3.IntegrityError("queue_promotion_race")
                 promoted_row = connection.execute(
-                    "SELECT * FROM reservation_queue WHERE id = ?", (str(entry_id),)
+                    "SELECT * FROM reservation_queue WHERE id = ? AND organisation_id = ?",
+                    (str(entry_id), row["organisation_id"]),
                 ).fetchone()
                 promoted_entry = _queue_from_row(promoted_row)
                 if event_factory is not None:
@@ -494,14 +588,18 @@ class SQLiteQueueRepository:
         with self._database.transaction() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS position FROM reservation_queue queued "
-                "WHERE queued.bench_id = ? AND queued.status = 'waiting' "
+                "WHERE queued.bench_id = ? AND queued.organisation_id = ? "
+                "AND queued.status = 'waiting' "
                 "AND (queued.created_at < ? OR (queued.created_at = ? AND queued.rowid <= ("
-                "SELECT current.rowid FROM reservation_queue current WHERE current.id = ?)))",
+                "SELECT current.rowid FROM reservation_queue current WHERE current.id = ? "
+                "AND current.organisation_id = ?)))",
                 (
                     entry.bench_id,
+                    str(entry.organisation_id),
                     entry.created_at.isoformat(),
                     entry.created_at.isoformat(),
                     str(entry.id),
+                    str(entry.organisation_id),
                 ),
             ).fetchone()
         return entry.model_copy(update={"position": row["position"]})
@@ -717,6 +815,9 @@ def _reservation_values(reservation: Reservation) -> tuple[object, ...]:
         str(reservation.id),
         reservation.bench_id,
         reservation.owner,
+        str(reservation.owner_principal_id) if reservation.owner_principal_id else None,
+        reservation.owner_principal_type,
+        str(reservation.organisation_id),
         reservation.created_at.isoformat(),
         _datetime_value(reservation.released_at),
         reservation.status.value,
@@ -735,8 +836,11 @@ def _reservation_values(reservation: Reservation) -> tuple[object, ...]:
 def _reservation_from_row(row: sqlite3.Row) -> Reservation:
     return Reservation(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         bench_id=row["bench_id"],
         owner=row["owner"],
+        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
+        owner_principal_type=row["owner_principal_type"],
         created_at=datetime.fromisoformat(row["created_at"]),
         released_at=_parse_datetime(row["released_at"]),
         status=ReservationStatus(row["status"]),
@@ -755,6 +859,7 @@ def _reservation_from_row(row: sqlite3.Row) -> Reservation:
 def _queue_values(entry: QueueEntry) -> tuple[object, ...]:
     return (
         str(entry.id),
+        str(entry.organisation_id),
         entry.bench_id,
         entry.owner,
         entry.requested_duration_seconds,
@@ -769,6 +874,7 @@ def _queue_values(entry: QueueEntry) -> tuple[object, ...]:
 def _queue_from_row(row: sqlite3.Row) -> QueueEntry:
     return QueueEntry(
         id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
         bench_id=row["bench_id"],
         owner=row["owner"],
         requested_duration_seconds=row["requested_duration_seconds"],

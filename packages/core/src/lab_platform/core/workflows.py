@@ -717,6 +717,7 @@ class WorkflowRunner:
                 run = run.model_copy(update={"current_step": index})
                 await self._repository.update_run(run)
                 active_result = WorkflowStepResult(
+                    organisation_id=run.organisation_id,
                     workflow_run_id=run.id,
                     step_index=index,
                     name=step.name or step.action.replace("_", " ").title(),
@@ -1319,6 +1320,7 @@ class WorkflowService:
             )
         validate_workflow_capabilities(definition, bench)
         run = WorkflowRun(
+            organisation_id=definition.organisation_id,
             workflow_name=definition.name,
             workflow_version=definition.version,
             bench_id=bench_id,

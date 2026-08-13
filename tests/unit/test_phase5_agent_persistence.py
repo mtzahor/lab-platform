@@ -102,8 +102,8 @@ def test_schema_v5_upgrade_preserves_phase4_data_and_repairs_v6_objects(
 
     upgraded = _database(path)
     with upgraded.transaction() as connection:
-        assert SCHEMA_VERSION == 8
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
+        assert SCHEMA_VERSION == 10
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
         legacy = connection.execute(
             "SELECT name, token_hash, owner, scopes_json FROM api_tokens WHERE id = 'legacy-token'"
         ).fetchone()

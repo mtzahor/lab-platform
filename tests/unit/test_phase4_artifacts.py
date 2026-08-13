@@ -49,6 +49,20 @@ class Repository:
             if item.owner_type is owner_type and item.owner_id == owner_id
         ]
 
+    async def delete(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> bool:
+        record = self.records.get(artifact_id)
+        if record is None or (
+            organisation_id is not None and record.organisation_id != organisation_id
+        ):
+            return False
+        del self.records[artifact_id]
+        return True
+
 
 async def _chunks(*values: bytes) -> AsyncIterator[bytes]:
     for value in values:
@@ -192,6 +206,29 @@ def test_artifact_missing_metadata_or_content_is_reported(tmp_path: Path) -> Non
         Path(record.path).unlink()
         with pytest.raises(ArtifactNotFoundError, match="unavailable"):
             await service.content_path(record.id)
+
+    asyncio.run(scenario())
+
+
+def test_artifact_delete_removes_managed_content_and_metadata(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        repository = Repository()
+        service = ArtifactService(repository, tmp_path, maximum_size_bytes=10)
+        record = await service.upload(
+            _chunks(b"data"),
+            owner_type=ArtifactOwnerType.OPERATION,
+            owner_id=uuid4(),
+            name="data.txt",
+            artifact_type="log",
+        )
+        path = Path(record.path)
+        assert path.is_file()
+
+        assert await service.delete(record.id) == record
+        assert not path.exists()
+        assert record.id not in repository.records
+        with pytest.raises(ArtifactNotFoundError):
+            await service.delete(record.id)
 
     asyncio.run(scenario())
 

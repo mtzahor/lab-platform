@@ -13,16 +13,139 @@ distributed use or at a standalone Agent for the local compatibility API.
 server: https://lab-control.internal.example
 ```
 
-Machine commands read the bearer token from `LAB_PLATFORM_TOKEN`. Select another environment
-variable with `--token-env NAME`:
+Bearer credential precedence is:
+
+1. `LAB_PLATFORM_TOKEN`, or the environment variable selected by `--token-env NAME`.
+2. A server-scoped native OS credential saved by `labctl auth login`.
+3. No credential.
+
+For non-interactive machine commands, select another environment variable with `--token-env NAME`:
 
 ```console
 export DEVICE_LAB_TOKEN='lp_...'
 labctl --token-env DEVICE_LAB_TOKEN ci session show SESSION_ID
 ```
 
-There is no plaintext token option. See [API tokens](docs/API_TOKENS.md) and the
-[distributed security boundary](docs/PHASE_5.md#security-posture-and-limits).
+There is no plaintext token or password option. See [API tokens](docs/API_TOKENS.md),
+[local authentication](docs/LOCAL_AUTH.md), and the
+[Phase 6 security model](docs/SECURITY_MODEL.md).
+
+## Phase 6 authentication commands
+
+The Phase 6 client surface is:
+
+```text
+labctl auth login [--server URL] [--username USERNAME] [--organisation SLUG]
+  [--output table|json]
+labctl auth logout [--output table|json]
+labctl auth status [--output table|json]
+labctl auth whoami [--output table|json]
+```
+
+`auth login` prompts for an omitted username and always prompts for the password without echo. It
+expects `POST /api/v1/auth/login` and stores one versioned session bundle under the selected server:
+access/refresh tokens, session ID, access expiry, and maximum session expiry. No secret is printed,
+including in JSON output. On macOS storage uses Keychain through `security`; on Linux it uses
+`secret-tool`/Secret Service. No plaintext file fallback is available.
+
+For a stored login, one `401 SESSION_EXPIRED` or `TOKEN_EXPIRED` response triggers a serialized
+`POST /api/v1/auth/refresh`, safe native-bundle replacement, and one retry of the original request.
+Existing raw-token Keychain/Secret Service entries remain readable and migrate to the bundle on
+their first successful refresh. An environment token always wins, is never rewritten, and is not
+automatically refreshed.
+
+`auth status` and `whoami` validate the selected environment/stored bearer with
+`GET /api/v1/auth/me`. `auth logout` posts an empty body to `/api/v1/auth/logout`; a stored session
+bundle is deleted locally even when the server reports that its session is already invalid. An
+environment token cannot be removed from the parent shell, so logout prints a warning.
+
+The matching control-plane login/logout/refresh/me/session routes are implemented. A fresh
+installation can create its first owner before login:
+
+```console
+lab-control-plane bootstrap-admin \
+  --config config/control-plane.yaml \
+  --username michael \
+  --display-name "Michael Tzahor"
+```
+
+This prompts twice without echo. Use `--password-env NAME` for automation; `--password` does not
+exist. The command refuses once an owner exists unless the privileged `--recovery` path is selected.
+
+## Phase 6 administration commands
+
+These identity-only commands require a Phase 6 session or service-account credential; a legacy
+token cannot administer the identity surface:
+
+```text
+labctl organisation show
+labctl organisation update --name NAME
+
+labctl user create --username USER --display-name NAME [--email EMAIL]
+  [--organisation-role owner|admin|member|viewer]
+  [--authentication-source local|oidc] [--password-env NAME]
+labctl user list
+labctl user show USER_ID_OR_USERNAME
+labctl user disable USER_ID_OR_USERNAME
+labctl user enable USER_ID_OR_USERNAME
+labctl user reset-password USER_ID_OR_USERNAME [--password-env NAME]
+
+labctl team create --slug SLUG --name NAME [--description TEXT]
+labctl team list
+labctl team show TEAM_ID_OR_SLUG_OR_NAME
+labctl team add-member TEAM --user USER [--role manager|member|viewer]
+labctl team remove-member TEAM --user USER
+labctl team delete TEAM
+
+labctl service-account create --name NAME [--description TEXT]
+labctl service-account list
+labctl service-account show ACCOUNT_ID_OR_NAME
+labctl service-account disable ACCOUNT_ID_OR_NAME
+labctl service-account delete ACCOUNT_ID_OR_NAME
+labctl service-account credential create --service-account ACCOUNT --name NAME
+  [--expires-at RFC3339] [--allowed-ip CIDR] [--permission PERMISSION]
+labctl service-account credential list --service-account ACCOUNT
+labctl service-account credential revoke CREDENTIAL_ID
+
+labctl role list
+labctl role permissions ROLE
+labctl role assign --subject TYPE:NAME --role ROLE --resource TYPE:ID
+  [--expires-at RFC3339]
+labctl role revoke ASSIGNMENT_ID
+labctl role effective --subject TYPE:NAME --resource TYPE:ID
+  [--permission PERMISSION] [--parent-agent-id AGENT_UUID]
+
+labctl access-policy bench get BENCH_ID
+labctl access-policy bench set BENCH_ID
+  --visibility private|organisation|restricted
+  [--reservation-role ROLE] [--operation-role ROLE]
+  [--allowed-team TEAM]
+labctl access-policy workflow get WORKFLOW_ID
+labctl access-policy workflow set WORKFLOW_ID
+  --visibility organisation|restricted|admin-only
+
+labctl audit list [--action ACTION] [--outcome succeeded|failed|denied]
+  [--after ISO8601] [--before ISO8601] [--limit N]
+labctl audit show EVENT_ID
+```
+
+`user create` defaults to `local`: it prompts twice for a password unless `--password-env NAME` is
+provided. With `--authentication-source oidc`, the CLI neither prompts nor accepts
+`--password-env`; the user is pre-provisioned for provider login. Password reset is valid only for
+local users.
+
+User passwords are hidden prompts unless a named environment variable is selected. Credential
+creation prints the bearer exactly once; list/show output excludes its stored hash. Name/slug
+references are resolved to organisation-scoped UUIDs before mutation. Audit output is
+organisation-scoped and requires `audit:read`; list defaults to 100 events and supports action,
+outcome, and ISO-8601 time filters.
+
+Access-policy `get` reports whether the result comes from configuration defaults or a persisted
+record. Bench `set` requires `benches:manage` on the exact bench; workflow `set` requires
+`workflows:manage` on the exact workflow. `--allowed-team` accepts a same-organisation UUID, slug,
+or name and may be repeated. Each `set` replaces the complete policy, takes effect immediately,
+and appends an attributable audit event. See
+[roles and permissions](docs/ROLES_AND_PERMISSIONS.md#access-policies).
 
 ## Phase 5 distributed commands
 
@@ -103,6 +226,16 @@ lease. Renewal and release use the observed lease version so a delayed caller ca
 newer ownership decision. A distributed workflow owns its reservation lifecycle and executes as
 one remote command on the selected Agent.
 
+With a Phase 6 session or service credential, workflow/direct-action commands and the
+`agent drain`, `agent undrain`, `agent refresh`, `operation reconcile`, and `operation cancel`
+controls carry the authenticated actor and exact decision snapshot to the Agent. Exact idempotent
+command/workflow retries retain the evidence accepted with the original work even if the refreshed
+HTTP request has a new session or decision-snapshot handle; the stable principal, tenant, request
+content, and required permissions must remain valid under credential restrictions, and workflow
+replay also fingerprints the effective restrictions. Automatic/background work without an
+originating Phase 6 decision and legacy calls do not manufacture actor/snapshot fields; a
+principal-requested CI cancellation persists evidence that restart-time delivery retry can reuse.
+
 ### Direct remote bench actions
 
 The control plane supports the portable ESP32/SimLab action set directly. Use the global bench ID;
@@ -120,9 +253,10 @@ All four actions create durable distributed operations. `probe` and `serial read
 their confirmed result; `reset` and `flash` return the operation ID for `operation watch`.
 `reset` and `flash` require an active, Agent-confirmed central reservation owned by `--owner`.
 The read-only `probe` and `serial read` routes do not require a reservation, but the owning Agent
-still enforces capability, online-state, lock, drain, expiry, and local safety checks. A direct
-flash needs both `workflows:run` and `artifacts:write`; the other direct actions need
-`workflows:run`.
+still enforces capability, online-state, lock, drain, expiry, and local safety checks. For a Phase 6
+principal, probe requires `benches:operate`, reset requires `benches:reset`, serial requires
+`benches:serial`, and flash requires `benches:flash` plus `artifacts:write`, all on the exact bench.
+A legacy token instead uses the compatible `workflows:run` scope, plus `artifacts:write` for flash.
 
 The distributed control plane intentionally does not expose the legacy power action routes. Those
 commands are available only through a standalone Agent's compatibility API; distributed workflows

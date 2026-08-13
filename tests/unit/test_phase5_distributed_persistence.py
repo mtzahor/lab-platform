@@ -154,8 +154,8 @@ def test_v8_migration_exposes_every_distributed_table_and_uniqueness_index(
 ) -> None:
     database = _database(tmp_path / "shape.db")
     with database.transaction() as connection:
-        assert SCHEMA_VERSION == 8
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
+        assert SCHEMA_VERSION == 10
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -219,7 +219,7 @@ def test_v7_upgrade_adds_operation_results_without_losing_existing_work(tmp_path
 
         with closing(sqlite3.connect(path)) as connection:
             connection.execute("ALTER TABLE distributed_operations DROP COLUMN result_json")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+            connection.execute("DELETE FROM schema_migrations WHERE version >= 8")
             assert (
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
             )
@@ -228,7 +228,8 @@ def test_v7_upgrade_adds_operation_results_without_losing_existing_work(tmp_path
         upgraded = _database(path)
         with upgraded.transaction() as connection:
             assert (
-                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+                == SCHEMA_VERSION
             )
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(distributed_operations)")

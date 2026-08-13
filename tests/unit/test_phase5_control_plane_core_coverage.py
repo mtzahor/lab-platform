@@ -63,7 +63,6 @@ from lab_platform.models import (
     ReservationLease,
     ReservationSource,
     ReservationStatus,
-    WorkflowDefinition,
 )
 
 NOW = datetime(2026, 7, 29, 15, tzinfo=UTC)
@@ -845,20 +844,6 @@ def test_distributed_ci_helpers_cover_timeout_and_input_boundaries() -> None:
             maximum_session_timeout_seconds=10,
         )
 
-    definition = WorkflowDefinition.model_validate(
-        {
-            "name": "coverage-workflow",
-            "version": 2,
-            "requirements": {"capabilities": ["reset"]},
-            "inputs": {"firmware": {"type": "artifact", "required": True}},
-            "steps": [{"action": "reset"}],
-        }
-    )
-    with_artifact = ci_module._with_ci_capabilities(
-        definition,
-        BenchRequest(required_capabilities={"diagnostic"}),
-    )
-    assert set(with_artifact.requirements.capabilities) == {"diagnostic", "reset"}
     assert ArtifactReference(artifact_id=uuid4()).artifact_id is not None
 
 

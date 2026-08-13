@@ -12,7 +12,15 @@ from lab_platform.control_plane_core.errors import (
     AgentOfflineError,
     AgentRevokedError,
 )
-from lab_platform.models import AgentRecord, AgentStatus
+from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.errors import AuthenticationRequiredError
+from lab_platform.models import (
+    AgentRecord,
+    AgentStatus,
+    AuthenticationContext,
+    AuthorisationResource,
+    ResourceType,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,14 +98,29 @@ class AgentDrainService:
 
     def __init__(self, repository: AgentDrainRepository) -> None:
         self._repository = repository
+        self._authorisation: AuthorisationService | None = None
+
+    def set_authorisation_service(self, authorisation: AuthorisationService) -> None:
+        """Enable identity enforcement after runtime dependency construction."""
+
+        self._authorisation = authorisation
 
     async def drain(
         self,
         agent_id: UUID,
         *,
         cancel_queued_work: bool = False,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
     ) -> DrainResult:
         snapshot = await self._require_snapshot(agent_id)
+        await self._require_drain_authorisation(
+            snapshot.agent,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         status = snapshot.agent.status
         if status in {AgentStatus.ONLINE, AgentStatus.DEGRADED}:
             transitioned = await self._repository.compare_and_set_status(
@@ -140,8 +163,21 @@ class AgentDrainService:
 
         return await self._finish_if_idle(agent_id, cancelled_queued_work=cancelled)
 
-    async def refresh(self, agent_id: UUID) -> DrainResult:
+    async def refresh(
+        self,
+        agent_id: UUID,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> DrainResult:
         snapshot = await self._require_snapshot(agent_id)
+        await self._require_drain_authorisation(
+            snapshot.agent,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         if snapshot.agent.status is AgentStatus.DRAINED:
             if not snapshot.workload.idle:
                 raise AgentDrainingError(
@@ -157,8 +193,21 @@ class AgentDrainService:
             )
         return await self._finish_if_idle(agent_id)
 
-    async def undrain(self, agent_id: UUID) -> AgentRecord:
+    async def undrain(
+        self,
+        agent_id: UUID,
+        *,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> AgentRecord:
         snapshot = await self._require_snapshot(agent_id)
+        await self._require_drain_authorisation(
+            snapshot.agent,
+            authentication_context=authentication_context,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
         status = snapshot.agent.status
         if status is AgentStatus.ONLINE:
             if not snapshot.has_active_connection:
@@ -238,6 +287,45 @@ class AgentDrainService:
         if snapshot is None:
             raise AgentNotFoundError("Agent does not exist.", agent_id=str(agent_id))
         return snapshot
+
+    async def _require_drain_authorisation(
+        self,
+        agent: AgentRecord,
+        *,
+        authentication_context: AuthenticationContext | None,
+        allow_legacy_authorisation: bool,
+        allow_internal_authorisation: bool,
+    ) -> None:
+        if allow_legacy_authorisation and allow_internal_authorisation:
+            raise ValueError(
+                "Legacy and internal Agent drain authorisation escapes are mutually exclusive"
+            )
+        if allow_legacy_authorisation and authentication_context is not None:
+            raise ValueError(
+                "Legacy Agent drain authorisation cannot carry an authenticated principal"
+            )
+        if (
+            authentication_context is not None
+            and authentication_context.principal.organisation_id != agent.organisation_id
+        ):
+            raise ValueError("Agent organisation does not match the authenticated principal")
+        authorisation = self._authorisation
+        if authorisation is None or allow_legacy_authorisation or allow_internal_authorisation:
+            return
+        if authentication_context is None:
+            raise AuthenticationRequiredError(
+                "An authenticated principal is required to drain or undrain Agents."
+            )
+        await authorisation.require(
+            authentication_context.principal,
+            "agents:drain",
+            AuthorisationResource(
+                type=ResourceType.AGENT,
+                id=str(agent.id),
+                organisation_id=agent.organisation_id,
+            ),
+            credential_restrictions=authentication_context.permission_restrictions,
+        )
 
 
 def _raise_unavailable(agent: AgentRecord) -> NoReturn:

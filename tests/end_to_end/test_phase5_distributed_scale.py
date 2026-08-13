@@ -60,6 +60,7 @@ from lab_platform.control_plane_core.workflows import (
 from lab_platform.models import (
     AgentRecord,
     AgentStatus,
+    AuthenticationContext,
     BenchRequest,
     BufferedEventPriority,
     CiProvider,
@@ -199,6 +200,16 @@ class RecordingCommandTransport:
 
 
 class NoArtifactTransfers:
+    async def require_access(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> None:
+        del artifact_id, organisation_id, authentication_context, allow_legacy_authorisation
+
     async def issue_download(
         self,
         *,
@@ -207,8 +218,20 @@ class NoArtifactTransfers:
         artifact_id: UUID,
         target_path: str,
         idempotency_key: str,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
     ) -> WorkflowArtifactTransferDescriptor:
-        del agent_id, input_name, artifact_id, target_path, idempotency_key
+        del (
+            agent_id,
+            input_name,
+            artifact_id,
+            target_path,
+            idempotency_key,
+            organisation_id,
+            authentication_context,
+            allow_legacy_authorisation,
+        )
         raise AssertionError("The scale workflow has no artifact inputs")
 
 

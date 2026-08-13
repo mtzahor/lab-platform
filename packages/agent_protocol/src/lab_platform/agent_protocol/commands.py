@@ -4,7 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from lab_platform.agent_protocol.messages import ProtocolModel, _as_utc
-from lab_platform.models import RemoteCommand, ReservationLease
+from lab_platform.models import ActorContext, RemoteCommand, ReservationLease
 from pydantic import Field, SecretStr, field_serializer, field_validator, model_validator
 
 
@@ -30,7 +30,37 @@ class CommandRequestPayload(ProtocolModel):
         return self
 
 
-class CommandCancelPayload(ProtocolModel):
+class ActorAttributedControlPayload(ProtocolModel):
+    """Optional Phase 6 attribution shared by principal-initiated control messages.
+
+    Phase 5 and automatic control-plane messages intentionally omit both fields.  When a
+    durable authorisation snapshot is present, carrying its ID both beside and inside the
+    actor context makes accidental context substitution detectable at the protocol boundary.
+    """
+
+    actor_context: ActorContext | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    authorisation_snapshot_id: UUID | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_actor_snapshot(self) -> ActorAttributedControlPayload:
+        if self.actor_context is None:
+            if self.authorisation_snapshot_id is not None:
+                raise ValueError("authorisation snapshot requires actor context")
+            return self
+        if self.authorisation_snapshot_id is None:
+            raise ValueError("actor context requires authorisation snapshot")
+        if self.actor_context.authorisation_snapshot_id != self.authorisation_snapshot_id:
+            raise ValueError("actor context and control-message authorisation snapshot IDs differ")
+        return self
+
+
+class CommandCancelPayload(ActorAttributedControlPayload):
     command_id: UUID
     reason: str | None = Field(default=None, max_length=1000)
 
@@ -40,11 +70,11 @@ class EventAckPayload(ProtocolModel):
     acknowledged_event_sequence: int = Field(ge=1, strict=True)
 
 
-class InventoryRefreshRequestPayload(ProtocolModel):
+class InventoryRefreshRequestPayload(ActorAttributedControlPayload):
     request_id: UUID
 
 
-class ReconciliationRequestPayload(ProtocolModel):
+class ReconciliationRequestPayload(ActorAttributedControlPayload):
     request_id: UUID
     expected_boot_id: UUID | None = None
     last_control_plane_sequence: int = Field(default=0, ge=0, strict=True)
@@ -74,7 +104,7 @@ class ConfigRefreshRequestPayload(ProtocolModel):
     config_version: int = Field(ge=1, strict=True)
 
 
-class DrainAgentPayload(ProtocolModel):
+class DrainAgentPayload(ActorAttributedControlPayload):
     drain: bool = True
     deadline: datetime | None = None
 

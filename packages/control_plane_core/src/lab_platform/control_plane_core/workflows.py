@@ -4,13 +4,14 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
+from lab_platform.control_plane_core.commands import RemoteCommandService
 from lab_platform.control_plane_core.errors import (
     AgentDegradedError,
     AgentDrainingError,
@@ -23,32 +24,45 @@ from lab_platform.control_plane_core.errors import (
     ReservationLeaseVersionMismatchError,
 )
 from lab_platform.control_plane_core.reservations import (
+    CentralReservationLeaseService,
     CoordinatedReservationLease,
     ReservationLeaseState,
 )
 from lab_platform.core.errors import (
+    AuthenticationRequiredError,
     BenchAlreadyReservedError,
     NoCompatibleBenchError,
     ReservationNotActiveError,
     ReservationNotFoundError,
     ReservationOwnerMismatchError,
 )
-from lab_platform.core.workflows import WorkflowInvalidError, resolve_workflow_inputs
+from lab_platform.core.workflows import (
+    WorkflowInvalidError,
+    WorkflowNotFoundError,
+    resolve_workflow_inputs,
+)
 from lab_platform.models import (
+    LEGACY_ORGANISATION_ID,
+    ActorContext,
     AgentRecord,
     AgentStatus,
     ArtifactReference,
     ArtifactWorkflowInput,
+    AuthenticationContext,
+    AuthorisationResource,
     BooleanWorkflowInput,
     DistributedOperation,
     GlobalBenchKind,
     GlobalBenchRecord,
     GlobalBenchStatus,
     IntegerWorkflowInput,
+    Principal,
     RemoteCommand,
     RemoteCommandType,
     ReservationLease,
+    ReservationOwner,
     ReservationSource,
+    ResourceType,
     StringWorkflowInput,
     WorkflowDefinition,
 )
@@ -85,6 +99,11 @@ class DistributedWorkflowRequest:
     definition: WorkflowDefinition
     owner: str
     idempotency_key: str
+    owner_principal: ReservationOwner | None = None
+    actor_context: ActorContext | None = None
+    authentication_context: AuthenticationContext | None = None
+    organisation_id: UUID | None = None
+    allow_legacy_authorisation: bool = False
     inputs: Mapping[str, object] = field(default_factory=dict)
     bench_id: str | None = None
     kind: GlobalBenchKind | None = None
@@ -93,6 +112,7 @@ class DistributedWorkflowRequest:
     bench_labels: Mapping[str, str] = field(default_factory=dict)
     preferred_bench_labels: Mapping[str, str] = field(default_factory=dict)
     agent_labels: Mapping[str, str] = field(default_factory=dict)
+    required_capabilities: Collection[str] = field(default_factory=tuple)
     reservation_duration_seconds: int | None = None
     lease_ttl_seconds: int | None = None
     command_timeout_seconds: int = 3_600
@@ -161,6 +181,48 @@ class WorkflowPresence(Protocol):
     async def list_agents(self) -> list[AgentRecord]: ...
 
 
+class WorkflowDefinitionCatalog(Protocol):
+    async def get_definition(
+        self,
+        name: str,
+        version: int | None = None,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> WorkflowDefinition | None: ...
+
+
+class WorkflowAuthorisationService(Protocol):
+    """The narrow central-authorisation surface required during routing."""
+
+    async def is_allowed(
+        self,
+        principal: Principal,
+        permission: str,
+        resource: AuthorisationResource,
+        *,
+        credential_restrictions: Collection[str] | None = None,
+    ) -> bool: ...
+
+    async def require(
+        self,
+        principal: Principal,
+        permission: str,
+        resource: AuthorisationResource,
+        *,
+        credential_restrictions: Collection[str] | None = None,
+    ) -> None: ...
+
+    async def audit_success(
+        self,
+        principal: Principal,
+        action: str,
+        *,
+        resource_type: str,
+        resource_id: str | None,
+        metadata: dict[str, object] | None = None,
+    ) -> object: ...
+
+
 class WorkflowReservationService(Protocol):
     async def grant(
         self,
@@ -188,6 +250,15 @@ class WorkflowReservationService(Protocol):
 
 
 class WorkflowArtifactTransferPort(Protocol):
+    async def require_access(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+    ) -> None: ...
+
     async def issue_download(
         self,
         *,
@@ -196,6 +267,9 @@ class WorkflowArtifactTransferPort(Protocol):
         artifact_id: UUID,
         target_path: str,
         idempotency_key: str,
+        organisation_id: UUID | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
     ) -> WorkflowArtifactTransferDescriptor: ...
 
 
@@ -287,16 +361,26 @@ class DistributedWorkflowReservationLifecycle:
         ):
             return False
         try:
-            released = await self._reservations.release(
-                reservation.reservation.id,
-                owner=reservation.reservation.owner,
-                expected_lease_version=command.lease_version,
-                idempotency_key=_derived_key(
-                    "workflow-terminal-release",
-                    str(reservation.reservation.id),
-                    str(command.lease_version),
-                ),
+            release_key = _derived_key(
+                "workflow-terminal-release",
+                str(reservation.reservation.id),
+                str(command.lease_version),
             )
+            if isinstance(self._reservations, CentralReservationLeaseService):
+                released = await self._reservations.release(
+                    reservation.reservation.id,
+                    owner=reservation.reservation.owner,
+                    expected_lease_version=command.lease_version,
+                    idempotency_key=release_key,
+                    allow_internal_authorisation=True,
+                )
+            else:
+                released = await self._reservations.release(
+                    reservation.reservation.id,
+                    owner=reservation.reservation.owner,
+                    expected_lease_version=command.lease_version,
+                    idempotency_key=release_key,
+                )
         except _EXPECTED_RELEASE_RACES:
             return False
         return released.state is ReservationLeaseState.RELEASED
@@ -325,6 +409,8 @@ class DistributedWorkflowCoordinator:
         artifacts: WorkflowArtifactTransferPort,
         commands: WorkflowCommandService,
         *,
+        authorisation: WorkflowAuthorisationService | None = None,
+        definition_catalog: WorkflowDefinitionCatalog | None = None,
         clock: Callable[[], datetime] | None = None,
         maximum_idempotency_entries: int = 10_000,
     ) -> None:
@@ -335,12 +421,34 @@ class DistributedWorkflowCoordinator:
         self._reservations = reservations
         self._artifacts = artifacts
         self._commands = commands
+        self._authorisation = authorisation
+        self._definition_catalog = definition_catalog
         self._clock = clock or _utc_now
         self._maximum_idempotency_entries = maximum_idempotency_entries
         self._request_lock = asyncio.Lock()
-        self._requests: dict[str, _IdempotentRequest] = {}
+        self._requests: dict[tuple[UUID, str], _IdempotentRequest] = {}
+
+    def set_authorisation_service(
+        self,
+        authorisation: WorkflowAuthorisationService,
+    ) -> None:
+        """Attach runtime authorisation after the identity graph is constructed."""
+
+        self._authorisation = authorisation
+
+    def set_definition_catalog(self, catalog: WorkflowDefinitionCatalog) -> None:
+        """Attach the trusted tenant-scoped workflow catalog used by identity calls."""
+
+        self._definition_catalog = catalog
 
     async def run(self, request: DistributedWorkflowRequest) -> DistributedWorkflowDispatch:
+        if not isinstance(request.allow_legacy_authorisation, bool):
+            raise ValueError("allow_legacy_authorisation must be a boolean")
+        request = await self._trusted_request(request)
+        request = replace(
+            request,
+            required_capabilities=_normalise_required_capabilities(request.required_capabilities),
+        )
         definition, normalized_inputs, artifact_inputs = _validate_workflow_request(request)
         owner = _require_text(request.owner, field="owner", maximum_length=200)
         idempotency_key = _require_text(
@@ -362,13 +470,22 @@ class DistributedWorkflowCoordinator:
         )
         if not isinstance(request.manage_reservation_lifecycle, bool):
             raise ValueError("manage_reservation_lifecycle must be a boolean")
+        await self._authorise_workflow(request, definition)
+        for _input_name, reference in artifact_inputs:
+            await self._artifacts.require_access(
+                reference.artifact_id,
+                organisation_id=request.organisation_id,
+                authentication_context=request.authentication_context,
+                allow_legacy_authorisation=request.allow_legacy_authorisation,
+            )
         fingerprint = _workflow_fingerprint(
             request,
             definition=definition,
             inputs=normalized_inputs,
             owner=owner,
         )
-        leader, future = await self._claim_request(idempotency_key, fingerprint)
+        request_key = (_effective_request_organisation(request), idempotency_key)
+        leader, future = await self._claim_request(request_key, fingerprint)
         if not leader:
             return await asyncio.shield(future)
 
@@ -383,11 +500,66 @@ class DistributedWorkflowCoordinator:
                 fingerprint=fingerprint,
             )
         except BaseException as exc:
-            await self._fail_request(idempotency_key, future, exc)
+            await self._fail_request(request_key, future, exc)
             raise
         future.set_result(result)
         await self._trim_idempotency_cache()
         return result
+
+    async def _trusted_request(
+        self,
+        request: DistributedWorkflowRequest,
+    ) -> DistributedWorkflowRequest:
+        context = request.authentication_context
+        if context is None:
+            return request
+        if request.allow_legacy_authorisation:
+            raise WorkflowInvalidError(
+                "Legacy workflow authorisation cannot be combined with an authenticated principal."
+            )
+        catalog = self._definition_catalog
+        try:
+            workflow_name = request.definition.name
+            workflow_version = request.definition.version
+        except AttributeError as exc:
+            raise WorkflowInvalidError("Workflow definition is incomplete or invalid.") from exc
+        if (
+            not isinstance(workflow_name, str)
+            or not workflow_name
+            or isinstance(workflow_version, bool)
+            or not isinstance(workflow_version, int)
+            or workflow_version < 1
+        ):
+            raise WorkflowInvalidError("Workflow definition is incomplete or invalid.")
+        if catalog is None:
+            raise WorkflowInvalidError(
+                "Authenticated workflow dispatch requires a trusted definition catalog.",
+                workflow_name=workflow_name,
+                workflow_version=workflow_version,
+            )
+        principal = context.principal
+        trusted = await catalog.get_definition(
+            workflow_name,
+            workflow_version,
+            organisation_id=principal.organisation_id,
+        )
+        if trusted is None:
+            raise WorkflowNotFoundError(
+                "Workflow does not exist.",
+                workflow_name=workflow_name,
+                workflow_version=workflow_version,
+            )
+        try:
+            matches_trusted = trusted == request.definition
+        except (AttributeError, TypeError, ValueError):
+            matches_trusted = False
+        if not matches_trusted:
+            raise WorkflowInvalidError(
+                "Workflow definition does not match the trusted catalog entry.",
+                workflow_name=trusted.name,
+                workflow_version=trusted.version,
+            )
+        return replace(request, definition=trusted)
 
     async def _run_once(
         self,
@@ -408,18 +580,23 @@ class DistributedWorkflowCoordinator:
         selected_agent: AgentRecord | None = None
         selected_bench: GlobalBenchRecord | None = None
         raced_benches: list[str] = []
-        reservation_key = _derived_key("workflow-reservation", idempotency_key)
+        organisation_key = str(_effective_request_organisation(request))
+        reservation_key = _derived_key(
+            "workflow-reservation",
+            organisation_key,
+            idempotency_key,
+        )
         for agent, bench in candidates:
             try:
-                candidate = await self._reservations.grant(
-                    agent_id=agent.id,
-                    bench_id=bench.id,
-                    owner=owner,
-                    idempotency_key=reservation_key,
-                    reservation_duration_seconds=request.reservation_duration_seconds,
-                    lease_ttl_seconds=request.lease_ttl_seconds,
-                    source=ReservationSource.API,
-                    metadata={
+                grant_options: dict[str, Any] = {
+                    "agent_id": agent.id,
+                    "bench_id": bench.id,
+                    "owner": owner,
+                    "idempotency_key": reservation_key,
+                    "reservation_duration_seconds": request.reservation_duration_seconds,
+                    "lease_ttl_seconds": request.lease_ttl_seconds,
+                    "source": ReservationSource.API,
+                    "metadata": {
                         "workload": "workflow",
                         "workflow_name": definition.name,
                         "workflow_version": str(definition.version),
@@ -430,7 +607,13 @@ class DistributedWorkflowCoordinator:
                             else _CALLER_MANAGED_RESERVATION
                         ),
                     },
-                )
+                }
+                if request.owner_principal is not None:
+                    grant_options["owner_principal"] = request.owner_principal
+                if isinstance(self._reservations, CentralReservationLeaseService):
+                    grant_options["authentication_context"] = request.authentication_context
+                    grant_options["allow_internal_authorisation"] = True
+                candidate = await self._reservations.grant(**grant_options)
             except _RETRYABLE_GRANT_ERRORS:
                 raced_benches.append(bench.id)
                 continue
@@ -468,10 +651,14 @@ class DistributedWorkflowCoordinator:
                     target_path=target_path,
                     idempotency_key=_derived_key(
                         "workflow-artifact",
+                        organisation_key,
                         idempotency_key,
                         input_name,
                         str(reference.artifact_id),
                     ),
+                    organisation_id=request.organisation_id,
+                    authentication_context=request.authentication_context,
+                    allow_legacy_authorisation=request.allow_legacy_authorisation,
                 )
                 _validate_transfer_descriptor(
                     descriptor,
@@ -497,23 +684,36 @@ class DistributedWorkflowCoordinator:
                 # The Agent must resolve artifact inputs to its verified local cache path.
                 # Sending the centrally resolved virtual target (``artifacts/<id>``)
                 # would bypass that resolver and leave the remote flash path unreadable.
-                "definition": request.definition.model_dump(mode="json"),
+                "definition": definition.model_dump(mode="json"),
                 "inputs": _json_inputs(inputs),
                 "owner": owner,
                 "artifact_transfers": [transfer.as_payload() for transfer in transfers],
                 "reservation_lease": reservation.lease.model_dump(mode="json"),
             }
-            command, operation = await self._commands.create(
-                agent_id=selected_agent.id,
-                bench_id=selected_bench.id,
-                command_type=RemoteCommandType.RUN_WORKFLOW,
-                payload=payload,
-                expires_at=expires_at,
-                idempotency_key=_derived_key("workflow-command", idempotency_key),
-                reservation_lease=reservation.lease,
-                operation_type="RUN_WORKFLOW",
-                dispatch=False,
-            )
+            command_options: dict[str, Any] = {
+                "agent_id": selected_agent.id,
+                "bench_id": selected_bench.id,
+                "command_type": RemoteCommandType.RUN_WORKFLOW,
+                "payload": payload,
+                "expires_at": expires_at,
+                "idempotency_key": _derived_key(
+                    "workflow-command",
+                    organisation_key,
+                    idempotency_key,
+                ),
+                "reservation_lease": reservation.lease,
+                "operation_type": "RUN_WORKFLOW",
+                "dispatch": False,
+            }
+            if request.actor_context is not None:
+                command_options["actor_context"] = request.actor_context
+                command_options["authorisation_snapshot_id"] = (
+                    request.actor_context.authorisation_snapshot_id
+                )
+            if isinstance(self._commands, RemoteCommandService):
+                command_options["authentication_context"] = request.authentication_context
+                command_options["allow_legacy_authorisation"] = request.allow_legacy_authorisation
+            command, operation = await self._commands.create(**command_options)
             if operation is None:
                 raise RuntimeError("RUN_WORKFLOW command did not create a distributed operation")
         except BaseException:
@@ -526,7 +726,7 @@ class DistributedWorkflowCoordinator:
         )
         if dispatched_operation is not None:
             operation = dispatched_operation
-        return DistributedWorkflowDispatch(
+        dispatch = DistributedWorkflowDispatch(
             agent=selected_agent,
             bench=selected_bench,
             definition=definition,
@@ -536,22 +736,50 @@ class DistributedWorkflowCoordinator:
             command=command,
             operation=operation,
         )
+        context = (
+            _authenticated_request_context(request, definition)
+            if self._authorisation is not None
+            else None
+        )
+        if self._authorisation is not None and context is not None:
+            await self._authorisation.audit_success(
+                context.principal,
+                "WORKFLOW_STARTED",
+                resource_type=ResourceType.WORKFLOW.value,
+                resource_id=definition.name,
+                metadata={
+                    "bench_id": dispatch.bench.id,
+                    "command_id": str(dispatch.command.id),
+                    "operation_id": str(dispatch.operation.id),
+                },
+            )
+        return dispatch
 
     async def _release_pre_dispatch(
         self,
         reservation: CoordinatedReservationLease,
     ) -> None:
         try:
-            await self._reservations.release(
-                reservation.reservation.id,
-                owner=reservation.reservation.owner,
-                expected_lease_version=reservation.lease.lease_version,
-                idempotency_key=_derived_key(
-                    "workflow-pre-dispatch-release",
-                    str(reservation.reservation.id),
-                    str(reservation.lease.lease_version),
-                ),
+            release_key = _derived_key(
+                "workflow-pre-dispatch-release",
+                str(reservation.reservation.id),
+                str(reservation.lease.lease_version),
             )
+            if isinstance(self._reservations, CentralReservationLeaseService):
+                await self._reservations.release(
+                    reservation.reservation.id,
+                    owner=reservation.reservation.owner,
+                    expected_lease_version=reservation.lease.lease_version,
+                    idempotency_key=release_key,
+                    allow_internal_authorisation=True,
+                )
+            else:
+                await self._reservations.release(
+                    reservation.reservation.id,
+                    owner=reservation.reservation.owner,
+                    expected_lease_version=reservation.lease.lease_version,
+                    idempotency_key=release_key,
+                )
         except _EXPECTED_RELEASE_RACES:
             # A concurrent terminal transition or lease renewal already fenced this
             # exact grant. Never broaden cleanup to a newer lease generation.
@@ -562,13 +790,29 @@ class DistributedWorkflowCoordinator:
         request: DistributedWorkflowRequest,
         definition: WorkflowDefinition,
     ) -> list[tuple[AgentRecord, GlobalBenchRecord]]:
-        agents, benches = await asyncio.gather(
-            self._presence.list_agents(),
-            self._inventory.list_benches(),
-        )
+        if request.organisation_id is None:
+            agents, benches = await asyncio.gather(
+                self._presence.list_agents(),
+                self._inventory.list_benches(),
+            )
+        else:
+            if request.organisation_id != definition.organisation_id:
+                raise WorkflowInvalidError(
+                    "Workflow organisation does not match the authenticated request.",
+                    workflow_name=definition.name,
+                )
+            agents, benches = await asyncio.gather(
+                self._presence.list_agents(  # type: ignore[call-arg]
+                    organisation_id=request.organisation_id
+                ),
+                self._inventory.list_benches(  # type: ignore[call-arg]
+                    organisation_id=request.organisation_id
+                ),
+            )
         agents_by_id = {agent.id: agent for agent in agents}
         required_capabilities = {
-            capability.casefold() for capability in definition.requirements.capabilities
+            *(capability.casefold() for capability in definition.requirements.capabilities),
+            *request.required_capabilities,
         }
         required_bench_labels = dict(definition.requirements.labels)
         for key, value in request.bench_labels.items():
@@ -585,6 +829,8 @@ class DistributedWorkflowCoordinator:
         for bench in benches:
             agent = agents_by_id.get(bench.agent_id)
             if request.bench_id is not None and bench.id != request.bench_id:
+                continue
+            if not await self._authorise_bench(request, bench):
                 continue
             if bench.status is not GlobalBenchStatus.ONLINE:
                 continue
@@ -621,36 +867,88 @@ class DistributedWorkflowCoordinator:
             ),
         )
 
+    async def _authorise_workflow(
+        self,
+        request: DistributedWorkflowRequest,
+        definition: WorkflowDefinition,
+    ) -> None:
+        authorisation = self._authorisation
+        if authorisation is None:
+            return
+        context = _authenticated_request_context(request, definition)
+        if context is None:
+            return
+        await authorisation.require(
+            context.principal,
+            "workflows:run",
+            AuthorisationResource(
+                type=ResourceType.WORKFLOW,
+                id=definition.name,
+                organisation_id=definition.organisation_id,
+            ),
+            credential_restrictions=context.permission_restrictions,
+        )
+
+    async def _authorise_bench(
+        self,
+        request: DistributedWorkflowRequest,
+        bench: GlobalBenchRecord,
+    ) -> bool:
+        authorisation = self._authorisation
+        context = request.authentication_context
+        if authorisation is None or context is None:
+            return True
+        resource = AuthorisationResource(
+            type=ResourceType.BENCH,
+            id=bench.id,
+            organisation_id=bench.organisation_id,
+            parent_agent_id=bench.agent_id,
+        )
+        allowed = await authorisation.is_allowed(
+            context.principal,
+            "benches:operate",
+            resource,
+            credential_restrictions=context.permission_restrictions,
+        )
+        if not allowed and request.bench_id is not None:
+            await authorisation.require(
+                context.principal,
+                "benches:operate",
+                resource,
+                credential_restrictions=context.permission_restrictions,
+            )
+        return allowed
+
     async def _claim_request(
         self,
-        idempotency_key: str,
+        request_key: tuple[UUID, str],
         fingerprint: str,
     ) -> tuple[bool, asyncio.Future[DistributedWorkflowDispatch]]:
         async with self._request_lock:
-            existing = self._requests.get(idempotency_key)
+            existing = self._requests.get(request_key)
             if existing is not None:
                 if existing.fingerprint != fingerprint:
                     raise WorkflowInvalidError(
                         "Workflow idempotency key was reused with different request content.",
-                        idempotency_key=idempotency_key,
+                        idempotency_key=request_key[1],
                     )
                 return False, existing.future
             future: asyncio.Future[DistributedWorkflowDispatch] = (
                 asyncio.get_running_loop().create_future()
             )
-            self._requests[idempotency_key] = _IdempotentRequest(fingerprint, future)
+            self._requests[request_key] = _IdempotentRequest(fingerprint, future)
             return True, future
 
     async def _fail_request(
         self,
-        idempotency_key: str,
+        request_key: tuple[UUID, str],
         future: asyncio.Future[DistributedWorkflowDispatch],
         error: BaseException,
     ) -> None:
         async with self._request_lock:
-            current = self._requests.get(idempotency_key)
+            current = self._requests.get(request_key)
             if current is not None and current.future is future:
-                self._requests.pop(idempotency_key, None)
+                self._requests.pop(request_key, None)
             if not future.done():
                 future.set_exception(error)
                 # A leader may have no followers. Reading the exception prevents
@@ -754,6 +1052,67 @@ def _validate_workflow_request(
     return resolved, normalized, tuple(artifact_inputs)
 
 
+def _normalise_required_capabilities(values: Collection[str]) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise WorkflowInvalidError("Required capabilities must be a collection of names.")
+    normalised: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise WorkflowInvalidError("Required capability names must be non-empty strings.")
+        normalised.add(value.strip().casefold())
+    return tuple(sorted(normalised))
+
+
+def _authenticated_request_context(
+    request: DistributedWorkflowRequest,
+    definition: WorkflowDefinition,
+) -> AuthenticationContext | None:
+    context = request.authentication_context
+    if context is None:
+        if request.allow_legacy_authorisation:
+            if request.actor_context is not None:
+                raise WorkflowInvalidError(
+                    "Legacy workflow authorisation cannot carry an authenticated actor."
+                )
+            return None
+        raise AuthenticationRequiredError(
+            "An authenticated principal is required to run workflows."
+        )
+    if request.allow_legacy_authorisation:
+        raise WorkflowInvalidError(
+            "Legacy workflow authorisation cannot be combined with an authenticated principal."
+        )
+
+    principal = context.principal
+    if principal.organisation_id != definition.organisation_id:
+        raise WorkflowInvalidError(
+            "Workflow organisation does not match the authenticated principal.",
+            workflow_name=definition.name,
+        )
+    if request.organisation_id != principal.organisation_id:
+        raise WorkflowInvalidError(
+            "Workflow request organisation does not match the authenticated principal.",
+            workflow_name=definition.name,
+        )
+
+    actor = request.actor_context
+    if actor is None:
+        raise WorkflowInvalidError(
+            "Authenticated workflow requests must carry their durable actor context."
+        )
+    if (
+        actor.principal_id != principal.id
+        or actor.principal_type is not principal.type
+        or actor.display_name != principal.display_name
+        or actor.organisation_id != principal.organisation_id
+        or actor.authorisation_snapshot_id != context.authorisation_snapshot_id
+    ):
+        raise WorkflowInvalidError(
+            "Workflow actor context does not match the authenticated principal."
+        )
+    return context
+
+
 def _workflow_fingerprint(
     request: DistributedWorkflowRequest,
     *,
@@ -765,6 +1124,24 @@ def _workflow_fingerprint(
         "definition": definition.model_dump(mode="json"),
         "inputs": _json_inputs(inputs),
         "owner": owner,
+        "owner_principal": (
+            request.owner_principal.model_dump(mode="json")
+            if request.owner_principal is not None
+            else None
+        ),
+        "actor_context": (
+            request.actor_context.model_dump(
+                mode="json",
+                exclude={"authorisation_snapshot_id"},
+            )
+            if request.actor_context is not None
+            else None
+        ),
+        "authentication_context": _authentication_fingerprint(request.authentication_context),
+        "organisation_id": (
+            str(request.organisation_id) if request.organisation_id is not None else None
+        ),
+        "allow_legacy_authorisation": request.allow_legacy_authorisation,
         "bench_id": request.bench_id,
         "kind": request.kind.value if request.kind is not None else None,
         "location": request.location,
@@ -772,6 +1149,7 @@ def _workflow_fingerprint(
         "bench_labels": dict(request.bench_labels),
         "preferred_bench_labels": dict(request.preferred_bench_labels),
         "agent_labels": dict(request.agent_labels),
+        "required_capabilities": list(request.required_capabilities),
         "reservation_duration_seconds": request.reservation_duration_seconds,
         "lease_ttl_seconds": request.lease_ttl_seconds,
         "command_timeout_seconds": request.command_timeout_seconds,
@@ -779,6 +1157,27 @@ def _workflow_fingerprint(
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _effective_request_organisation(request: DistributedWorkflowRequest) -> UUID:
+    if request.authentication_context is not None:
+        return request.authentication_context.principal.organisation_id
+    return request.organisation_id or LEGACY_ORGANISATION_ID
+
+
+def _authentication_fingerprint(
+    context: AuthenticationContext | None,
+) -> dict[str, object] | None:
+    if context is None:
+        return None
+    return {
+        "principal": context.principal.model_dump(mode="json"),
+        "permission_restrictions": (
+            sorted(context.permission_restrictions)
+            if context.permission_restrictions is not None
+            else None
+        ),
+    }
 
 
 def _json_inputs(inputs: Mapping[str, object]) -> dict[str, object]:
@@ -838,7 +1237,12 @@ def _no_compatible_bench(
         bench_id=request.bench_id,
         kind=request.kind.value if request.kind is not None else None,
         location=request.location,
-        capabilities=definition.requirements.capabilities,
+        capabilities=sorted(
+            {
+                *definition.requirements.capabilities,
+                *request.required_capabilities,
+            }
+        ),
         bench_labels={**definition.requirements.labels, **dict(request.bench_labels)},
         agent_labels=dict(request.agent_labels),
     )
@@ -886,7 +1290,9 @@ __all__ = [
     "DistributedWorkflowReservationLifecycle",
     "WorkflowArtifactTransferDescriptor",
     "WorkflowArtifactTransferPort",
+    "WorkflowAuthorisationService",
     "WorkflowCommandService",
+    "WorkflowDefinitionCatalog",
     "WorkflowInventory",
     "WorkflowPresence",
     "WorkflowRemoteWorkRepository",

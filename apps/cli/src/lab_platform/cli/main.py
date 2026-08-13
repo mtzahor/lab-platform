@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -10,10 +11,11 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import yaml
 from lab_platform.cli.ci_environment import detect_ci_environment
@@ -28,6 +30,13 @@ from lab_platform.cli.ci_summary import (
     append_github_summary,
 )
 from lab_platform.cli.client import AgentApiError, AgentClient, AgentConnectionError
+from lab_platform.cli.credentials import (
+    CredentialStore,
+    CredentialStoreError,
+    CredentialStoreUnavailableError,
+    NativeCredentialStore,
+    StoredCredential,
+)
 from lab_platform.config import validate_config
 from pydantic import ValidationError
 
@@ -71,7 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Hardware CI cancelled.", file=sys.stderr)
         return int(CiExitCode.WORKFLOW_CANCELLED)
-    except (OSError, ValueError, ValidationError) as exc:
+    except (CredentialStoreError, OSError, ValueError, ValidationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         if args.command == "ci":
             return int(CiExitCode.CLIENT_OR_PROTOCOL_ERROR)
@@ -84,7 +93,24 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(f"Configuration valid: {args.config_dir}")
         return 0
 
+    if args.command == "auth":
+        return _auth_command(args)
+
     client = _client(args)
+    if args.command == "service-account":
+        return _service_account_command(client, args)
+    if args.command == "organisation":
+        return _organisation_command(client, args)
+    if args.command == "user":
+        return _user_command(client, args)
+    if args.command == "team":
+        return _team_command(client, args)
+    if args.command == "role":
+        return _role_command(client, args)
+    if args.command == "access-policy":
+        return _access_policy_command(client, args)
+    if args.command == "audit":
+        return _audit_command(client, args)
     if args.command == "version":
         payload = client.get("/api/v1/version")
         if args.output == "json":
@@ -439,6 +465,17 @@ def _reservation_command(client: AgentClient, args: argparse.Namespace) -> int:
         )
         _print_reservation(payload, args.output, action="released")
         return 0
+    if command == "revoke":
+        idempotency_key = args.idempotency_key or f"labctl:reservation-revoke:{uuid4()}"
+        payload = client.post(
+            f"/api/v1/reservations/{args.reservation_id}/revoke",
+            {
+                "expected_lease_version": args.expected_lease_version,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        _print_reservation(payload, args.output, action="revoked")
+        return 0
     if command == "cancel":
         payload = client.post(
             f"/api/v1/reservations/{args.reservation_id}/cancel",
@@ -663,6 +700,817 @@ def _token_command(client: AgentClient, args: argparse.Namespace) -> int:
             print(f"Revoked API token {args.token_id}.")
         return 0
     raise AssertionError("unreachable token command")
+
+
+def _auth_command(args: argparse.Namespace) -> int:
+    command = str(args.auth_command)
+    server = _resolve_server(args)
+    if command == "login":
+        username = args.username
+        if username is None:
+            username = input("Username: ")
+        username = str(username).strip()
+        if not username:
+            raise ValueError("Username must be non-empty")
+        password = getpass.getpass("Password: ")
+        if not password:
+            raise ValueError("Password must be non-empty")
+        request: dict[str, object] = {"username": username, "password": password}
+        if args.organisation is not None:
+            organisation = str(args.organisation).strip()
+            if not organisation:
+                raise ValueError("Organisation slug must be non-empty")
+            request["organisation_slug"] = organisation
+
+        response = AgentClient(server).post("/api/v1/auth/login", request)
+        login = _require_mapping(response, "login response")
+        login_credential = StoredCredential.from_auth_response(login)
+        login_store = _credential_store()
+        try:
+            login_store.save(server, login_credential)
+        except (CredentialStoreError, ValueError):
+            # Do not leave a fresh server-side session active when this machine cannot store
+            # its access token safely. The original storage error remains the user-facing one.
+            with suppress(AgentApiError, AgentConnectionError, ValueError):
+                AgentClient(server, token=login_credential.access_token).post(
+                    "/api/v1/auth/logout", {}
+                )
+            raise
+
+        if args.output == "json":
+            safe_response = {
+                key: value
+                for key, value in login.items()
+                if key not in {"access_token", "refresh_token"}
+            }
+            _print_json(safe_response)
+        else:
+            print(f"Logged in as {_identity_display_name(login, fallback=username)}.")
+            organisation_name = _organisation_display_name(login)
+            if organisation_name is not None:
+                print(f"Organisation: {organisation_name}")
+            expires_at = login.get("expires_at")
+            if isinstance(expires_at, str) and expires_at:
+                print(f"Session expires: {expires_at}")
+        token_env = str(getattr(args, "token_env", "LAB_PLATFORM_TOKEN"))
+        if os.environ.get(token_env) is not None:
+            print(
+                f"Warning: {token_env} is set and takes precedence over this stored login.",
+                file=sys.stderr,
+            )
+        return 0
+
+    credential, source, store = _resolve_credential(args, server, require_store=True)
+    if command == "logout":
+        if credential is None:
+            _print_logged_out(args.output, server, remote_session_revoked=False)
+            return 0
+        client = _authenticated_client(server, credential, source, store)
+        if source == "stored":
+            if store is None:  # pragma: no cover - resolver invariant
+                raise AssertionError("stored credentials require a credential store")
+            try:
+                client.post("/api/v1/auth/logout", {})
+            finally:
+                store.delete(server)
+        else:
+            client.post("/api/v1/auth/logout", {})
+        _print_logged_out(args.output, server, remote_session_revoked=True)
+        if source == "environment" and args.output != "json":
+            token_env = str(getattr(args, "token_env", "LAB_PLATFORM_TOKEN"))
+            print(
+                f"Warning: {token_env} remains set; remove it to stop using that credential.",
+                file=sys.stderr,
+            )
+        return 0
+
+    if command in {"status", "whoami"}:
+        if credential is None:
+            if args.output == "json":
+                _print_json({"authenticated": False, "server": server})
+            else:
+                print(f"Not logged in to {server}.")
+            return 1
+        identity = _require_mapping(
+            _authenticated_client(server, credential, source, store).get("/api/v1/auth/me"),
+            "authenticated identity",
+        )
+        if args.output == "json":
+            result = dict(identity)
+            if command == "status":
+                result.update(
+                    {
+                        "authenticated": True,
+                        "credential_source": source,
+                        "server": server,
+                    }
+                )
+            _print_json(result)
+        else:
+            if command == "status":
+                print(f"Authenticated to {server}.")
+                print(f"Credential source: {_credential_source_label(args, source)}")
+            print(f"User: {_identity_display_name(identity)}")
+            organisation_name = _organisation_display_name(identity)
+            if organisation_name is not None:
+                print(f"Organisation: {organisation_name}")
+        return 0
+
+    raise AssertionError("unreachable auth command")
+
+
+def _credential_source_label(args: argparse.Namespace, source: str | None) -> str:
+    if source == "environment":
+        return f"environment variable {getattr(args, 'token_env', 'LAB_PLATFORM_TOKEN')}"
+    return "OS credential store"
+
+
+def _identity_display_name(payload: dict[str, object], *, fallback: str = "unknown") -> str:
+    principal = payload.get("principal")
+    if not isinstance(principal, dict):
+        return fallback
+    for field in ("username", "display_name", "name", "id"):
+        value = principal.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return fallback
+
+
+def _organisation_display_name(payload: dict[str, object]) -> str | None:
+    organisation = payload.get("organisation")
+    if not isinstance(organisation, dict):
+        return None
+    for field in ("slug", "name", "id"):
+        value = organisation.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _print_logged_out(output: str, server: str, *, remote_session_revoked: bool) -> None:
+    if output == "json":
+        _print_json(
+            {
+                "logged_out": True,
+                "remote_session_revoked": remote_session_revoked,
+                "server": server,
+            }
+        )
+    elif remote_session_revoked:
+        print(f"Logged out of {server}.")
+    else:
+        print(f"No stored login exists for {server}.")
+
+
+def _service_account_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = str(args.service_account_command)
+    if command == "create":
+        payload = client.post(
+            "/api/v1/service-accounts",
+            {"name": args.name, "description": args.description},
+        )
+        _print_identity_mutation(payload, args.output, "Service account created", "name")
+        return 0
+    if command == "list":
+        _print_collection(
+            client.get("/api/v1/service-accounts"),
+            args.output,
+            _service_account_table,
+        )
+        return 0
+    if command == "credential":
+        return _service_account_credential_command(client, args)
+
+    account_id = _resolve_entity_id(
+        client,
+        "/api/v1/service-accounts",
+        str(args.service_account),
+        ("name",),
+        "service account",
+    )
+    path = f"/api/v1/service-accounts/{account_id}"
+    if command == "show":
+        _print_read_payload(client.get(path), args.output, _service_account_show_table)
+    elif command == "disable":
+        payload = client.patch(path, {"status": "DISABLED"})
+        _print_identity_mutation(payload, args.output, "Service account disabled", "name")
+    elif command == "delete":
+        client.delete(path, {})
+        _print_deleted(args.output, "service_account_id", account_id, "Service account deleted")
+    else:
+        raise AssertionError("unreachable service-account command")
+    return 0
+
+
+def _service_account_credential_command(
+    client: AgentClient,
+    args: argparse.Namespace,
+) -> int:
+    command = str(args.credential_command)
+    if command == "revoke":
+        credential_id = str(args.credential_id)
+        client.delete(f"/api/v1/credentials/{credential_id}", {})
+        _print_deleted(
+            args.output,
+            "credential_id",
+            credential_id,
+            "Credential revoked",
+            result_field="revoked",
+        )
+        return 0
+
+    account_id = _resolve_entity_id(
+        client,
+        "/api/v1/service-accounts",
+        str(args.service_account),
+        ("name",),
+        "service account",
+    )
+    path = f"/api/v1/service-accounts/{account_id}/credentials"
+    if command == "list":
+        _print_collection(client.get(path), args.output, _api_credential_table)
+        return 0
+    if command == "create":
+        payload = client.post(
+            path,
+            {
+                "name": args.name,
+                "expires_at": args.expires_at,
+                "allowed_ip_ranges": args.allowed_ip,
+                "permission_restrictions": (None if args.permission is None else args.permission),
+            },
+        )
+        issued = _require_mapping(payload, "issued credential")
+        if args.output == "json":
+            _print_json(issued)
+        else:
+            credential = _require_mapping(issued.get("credential"), "credential")
+            token = issued.get("token")
+            if not isinstance(token, str) or not token:
+                raise ValueError("Control plane returned a credential without its one-time token")
+            print("Credential created.")
+            print(f"Credential ID: {credential.get('id', '')}")
+            print("Token:")
+            print(token)
+            print("This token will not be shown again.")
+        return 0
+    raise AssertionError("unreachable service-account credential command")
+
+
+def _organisation_command(client: AgentClient, args: argparse.Namespace) -> int:
+    if args.organisation_command == "show":
+        _print_read_payload(
+            client.get("/api/v1/organisation"),
+            args.output,
+            _organisation_show_table,
+        )
+        return 0
+    if args.organisation_command == "update":
+        payload = client.patch("/api/v1/organisation", {"name": args.name})
+        _print_identity_mutation(payload, args.output, "Organisation updated", "name")
+        return 0
+    raise AssertionError("unreachable organisation command")
+
+
+def _user_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = str(args.user_command)
+    if command == "create":
+        authentication_source = _enum_value(args.authentication_source)
+        request: dict[str, object] = {
+            "username": args.username,
+            "display_name": args.display_name,
+            "email": args.email,
+            "organisation_role": _enum_value(args.organisation_role),
+            "authentication_source": authentication_source,
+        }
+        if authentication_source == "LOCAL":
+            request["password"] = _new_password(args.password_env, "User")
+        elif args.password_env is not None:
+            raise ValueError("--password-env cannot be used for an OIDC user")
+        payload = client.post("/api/v1/users", request)
+        _print_identity_mutation(payload, args.output, "User created", "username")
+        return 0
+    if command == "list":
+        _print_collection(client.get("/api/v1/users"), args.output, _user_table)
+        return 0
+
+    user_id = _resolve_entity_id(
+        client,
+        "/api/v1/users",
+        str(args.user),
+        ("username",),
+        "user",
+    )
+    path = f"/api/v1/users/{user_id}"
+    if command == "show":
+        _print_read_payload(client.get(path), args.output, _user_show_table)
+    elif command in {"disable", "enable"}:
+        payload = client.post(f"{path}/{command}", {})
+        _print_identity_mutation(payload, args.output, f"User {command}d", "username")
+    elif command == "reset-password":
+        password = _new_password(args.password_env, "User")
+        client.post(f"{path}/reset-password", {"password": password})
+        if args.output == "json":
+            _print_json({"user_id": user_id, "password_reset": True})
+        else:
+            print(f"Password reset for user {args.user}.")
+    else:
+        raise AssertionError("unreachable user command")
+    return 0
+
+
+def _team_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = str(args.team_command)
+    if command == "create":
+        payload = client.post(
+            "/api/v1/teams",
+            {"slug": args.slug, "name": args.name, "description": args.description},
+        )
+        _print_identity_mutation(payload, args.output, "Team created", "slug")
+        return 0
+    if command == "list":
+        _print_collection(client.get("/api/v1/teams"), args.output, _team_table)
+        return 0
+
+    team_id = _resolve_entity_id(
+        client,
+        "/api/v1/teams",
+        str(args.team),
+        ("slug", "name"),
+        "team",
+    )
+    path = f"/api/v1/teams/{team_id}"
+    if command == "show":
+        _print_read_payload(client.get(path), args.output, _team_show_table)
+    elif command == "delete":
+        client.delete(path, {})
+        _print_deleted(args.output, "team_id", team_id, "Team deleted")
+    elif command in {"add-member", "remove-member"}:
+        user_id = _resolve_entity_id(
+            client,
+            "/api/v1/users",
+            str(args.user),
+            ("username",),
+            "user",
+        )
+        if command == "add-member":
+            payload = client.post(
+                f"{path}/members",
+                {"user_id": user_id, "role": _enum_value(args.team_role)},
+            )
+            _print_identity_mutation(payload, args.output, "Team member added", "user_id")
+        else:
+            client.delete(f"{path}/members/{user_id}", {})
+            if args.output == "json":
+                _print_json({"team_id": team_id, "user_id": user_id, "removed": True})
+            else:
+                print(f"Removed user {args.user} from team {args.team}.")
+    else:
+        raise AssertionError("unreachable team command")
+    return 0
+
+
+def _role_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = str(args.role_command)
+    if command == "list":
+        payload = _require_mapping(client.get("/api/v1/roles"), "roles")
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            roles = _require_list(payload.get("items"), "roles")
+            _print_table(("ROLE",), [(str(role),) for role in roles])
+        return 0
+    if command == "permissions":
+        role = _enum_value(args.role)
+        payload = _require_mapping(
+            client.get(f"/api/v1/roles/{role}/permissions"),
+            "role permissions",
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            permissions = _require_list(payload.get("permissions"), "role permissions")
+            _print_table(("PERMISSION",), [(str(permission),) for permission in permissions])
+        return 0
+    if command == "revoke":
+        assignment_id = str(args.assignment_id)
+        client.delete(f"/api/v1/role-assignments/{assignment_id}", {})
+        _print_deleted(
+            args.output,
+            "assignment_id",
+            assignment_id,
+            "Role assignment revoked",
+            result_field="revoked",
+        )
+        return 0
+
+    subject_type, subject_reference = _qualified_reference(str(args.subject), "subject")
+    subject_path, subject_fields, subject_label = _subject_collection(subject_type)
+    subject_id = _resolve_entity_id(
+        client,
+        subject_path,
+        subject_reference,
+        subject_fields,
+        subject_label,
+    )
+    resource_type, resource_id = _resource_reference(str(args.resource))
+    if command == "assign":
+        response = client.post(
+            "/api/v1/role-assignments",
+            {
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "role": _enum_value(args.role),
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "expires_at": args.expires_at,
+            },
+        )
+        _print_identity_mutation(response, args.output, "Role assigned", "id")
+        return 0
+    if command == "effective":
+        if subject_type == "TEAM":
+            raise ValueError("Effective permissions can be inspected for users or service accounts")
+        response = client.get(
+            "/api/v1/permissions/effective",
+            {
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "permission": args.permission,
+                "parent_agent_id": args.parent_agent_id,
+            },
+        )
+        if args.output == "json":
+            _print_json(response)
+        else:
+            _effective_permissions_table(_require_mapping(response, "effective permissions"))
+        return 0
+    raise AssertionError("unreachable role command")
+
+
+def _access_policy_command(client: AgentClient, args: argparse.Namespace) -> int:
+    resource_kind = str(args.access_policy_resource)
+    command = str(args.access_policy_command)
+    resource_id = str(args.resource_id)
+    collection = "benches" if resource_kind == "bench" else "workflows"
+    path = f"/api/v1/access-policies/{collection}/{resource_id}"
+    if command == "get":
+        _print_read_payload(client.get(path), args.output, _access_policy_table)
+        return 0
+
+    if resource_kind == "bench":
+        allowed_team_ids = sorted(
+            {
+                _resolve_entity_id(
+                    client,
+                    "/api/v1/teams",
+                    str(team),
+                    ("slug", "name"),
+                    "team",
+                )
+                for team in args.allowed_team
+            }
+        )
+        payload: dict[str, object] = {
+            "visibility": _enum_value(args.visibility),
+            "reservation_role": (
+                _enum_value(args.reservation_role) if args.reservation_role is not None else None
+            ),
+            "operation_role": (
+                _enum_value(args.operation_role) if args.operation_role is not None else None
+            ),
+            "allowed_team_ids": allowed_team_ids,
+        }
+    else:
+        payload = {"visibility": _enum_value(args.visibility)}
+    _print_read_payload(client.put(path, payload), args.output, _access_policy_table)
+    return 0
+
+
+def _audit_command(client: AgentClient, args: argparse.Namespace) -> int:
+    if args.audit_command == "list":
+        payload = client.get(
+            "/api/v1/audit-events",
+            {
+                "action": args.action,
+                "outcome": args.outcome.upper() if args.outcome is not None else None,
+                "after": args.after,
+                "before": args.before,
+                "limit": args.limit,
+            },
+        )
+        _print_collection(payload, args.output, _audit_event_table)
+        return 0
+    if args.audit_command == "show":
+        _print_read_payload(
+            client.get(f"/api/v1/audit-events/{args.event_id}"),
+            args.output,
+            _audit_event_show_table,
+        )
+        return 0
+    raise AssertionError("unreachable audit command")
+
+
+def _new_password(environment_name: str | None, label: str) -> str:
+    if environment_name is not None:
+        password = os.environ.get(environment_name)
+        if password is None:
+            raise ValueError(f"Password environment variable is not set: {environment_name}")
+        if not password:
+            raise ValueError(f"{label} password environment variable must not be empty")
+        return password
+    password = getpass.getpass("Password: ")
+    confirmation = getpass.getpass("Confirm password: ")
+    if password != confirmation:
+        raise ValueError(f"{label} passwords do not match")
+    if not password:
+        raise ValueError(f"{label} password must not be empty")
+    return password
+
+
+def _resolve_entity_id(
+    client: AgentClient,
+    collection_path: str,
+    reference: str,
+    name_fields: tuple[str, ...],
+    label: str,
+) -> str:
+    value = reference.strip()
+    if not value:
+        raise ValueError(f"{label.title()} reference must not be empty")
+    try:
+        return str(UUID(value))
+    except ValueError:
+        pass
+    collection = _require_mapping(client.get(collection_path), f"{label} collection")
+    items = _require_list(collection.get("items"), f"{label} collection")
+    matches: list[dict[str, object]] = []
+    for item in items:
+        entity = _require_mapping(item, label)
+        if any(
+            isinstance(entity.get(field), str) and str(entity[field]).casefold() == value.casefold()
+            for field in name_fields
+        ):
+            matches.append(entity)
+    if not matches:
+        raise ValueError(f"Unknown {label}: {reference}")
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous {label} reference: {reference}; use its UUID")
+    entity_id = matches[0].get("id")
+    if not isinstance(entity_id, str) or not entity_id:
+        raise ValueError(f"Control plane returned a {label} without an ID")
+    return entity_id
+
+
+def _qualified_reference(reference: str, label: str) -> tuple[str, str]:
+    kind, separator, value = reference.partition(":")
+    if not separator or not kind.strip() or not value.strip():
+        raise ValueError(f"{label.title()} must use type:name syntax")
+    normalized = _enum_value(kind)
+    if normalized not in {"USER", "SERVICE_ACCOUNT", "TEAM"}:
+        raise ValueError(f"Unsupported {label} type: {kind}")
+    return normalized, value.strip()
+
+
+def _subject_collection(subject_type: str) -> tuple[str, tuple[str, ...], str]:
+    if subject_type == "USER":
+        return "/api/v1/users", ("username",), "user"
+    if subject_type == "SERVICE_ACCOUNT":
+        return "/api/v1/service-accounts", ("name",), "service account"
+    return "/api/v1/teams", ("slug", "name"), "team"
+
+
+def _resource_reference(reference: str) -> tuple[str, str]:
+    kind, separator, value = reference.partition(":")
+    if not separator or not kind.strip() or not value.strip():
+        raise ValueError("Resource must use type:id syntax")
+    resource_type = _enum_value(kind)
+    if resource_type == "ORGANIZATION":
+        resource_type = "ORGANISATION"
+    if resource_type not in {"ORGANISATION", "AGENT", "BENCH", "WORKFLOW"}:
+        raise ValueError(f"Unsupported resource type: {kind}")
+    return resource_type, value.strip()
+
+
+def _enum_value(value: str) -> str:
+    return value.strip().replace("-", "_").upper()
+
+
+def _print_identity_mutation(
+    payload: object,
+    output: str,
+    message: str,
+    identity_field: str,
+) -> None:
+    entity = _require_mapping(payload, "identity response")
+    if output == "json":
+        _print_json(entity)
+    else:
+        suffix = entity.get(identity_field)
+        print(f"{message}: {suffix}." if suffix else f"{message}.")
+
+
+def _print_deleted(
+    output: str,
+    identity_field: str,
+    identity: str,
+    message: str,
+    *,
+    result_field: str = "deleted",
+) -> None:
+    if output == "json":
+        _print_json({identity_field: identity, result_field: True})
+    else:
+        print(f"{message}: {identity}.")
+
+
+def _organisation_show_table(organisation: dict[str, object]) -> None:
+    _identity_detail_table(organisation, ("id", "slug", "name", "status", "created_at"))
+
+
+def _user_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        user = _require_mapping(item, "user")
+        rows.append(
+            (
+                str(user.get("id", "")),
+                str(user.get("username", "")),
+                str(user.get("display_name", "")),
+                str(user.get("status", "")).title(),
+                str(user.get("email") or "—"),
+            )
+        )
+    _print_table(("ID", "USERNAME", "DISPLAY NAME", "STATUS", "EMAIL"), rows)
+
+
+def _user_show_table(user: dict[str, object]) -> None:
+    _identity_detail_table(
+        user,
+        (
+            "id",
+            "username",
+            "display_name",
+            "email",
+            "status",
+            "authentication_source",
+            "last_login_at",
+            "created_at",
+        ),
+    )
+
+
+def _team_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        team = _require_mapping(item, "team")
+        rows.append(
+            (
+                str(team.get("id", "")),
+                str(team.get("slug", "")),
+                str(team.get("name", "")),
+                str(team.get("description") or "—"),
+            )
+        )
+    _print_table(("ID", "SLUG", "NAME", "DESCRIPTION"), rows)
+
+
+def _team_show_table(team: dict[str, object]) -> None:
+    _identity_detail_table(team, ("id", "slug", "name", "description", "created_at"))
+
+
+def _service_account_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        account = _require_mapping(item, "service account")
+        rows.append(
+            (
+                str(account.get("id", "")),
+                str(account.get("name", "")),
+                str(account.get("status", "")).title(),
+                str(account.get("last_used_at") or "—"),
+            )
+        )
+    _print_table(("ID", "NAME", "STATUS", "LAST USED"), rows)
+
+
+def _service_account_show_table(account: dict[str, object]) -> None:
+    _identity_detail_table(
+        account,
+        ("id", "name", "description", "status", "last_used_at", "created_at"),
+    )
+
+
+def _api_credential_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        credential = _require_mapping(item, "credential")
+        status = "Revoked" if credential.get("revoked_at") else "Active"
+        rows.append(
+            (
+                str(credential.get("id", "")),
+                str(credential.get("name", "")),
+                status,
+                str(credential.get("expires_at") or "Never"),
+                str(credential.get("last_used_at") or "—"),
+            )
+        )
+    _print_table(("ID", "NAME", "STATUS", "EXPIRES", "LAST USED"), rows)
+
+
+def _effective_permissions_table(payload: dict[str, object]) -> None:
+    roles = _require_list(payload.get("roles"), "effective roles")
+    permissions = _require_list(payload.get("permissions"), "effective permissions")
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Allowed", "Yes" if payload.get("allowed") else "No"),
+            ("Roles", ", ".join(str(role) for role in roles) or "—"),
+            (
+                "Permissions",
+                ", ".join(str(permission) for permission in permissions) or "—",
+            ),
+        ],
+    )
+
+
+def _access_policy_table(payload: dict[str, object]) -> None:
+    policy = _require_mapping(payload.get("policy"), "access policy")
+    allowed_team_ids = policy.get("allowed_team_ids")
+    if allowed_team_ids is None:
+        allowed_teams = "—"
+    else:
+        allowed_teams = (
+            ", ".join(
+                str(team_id) for team_id in _require_list(allowed_team_ids, "allowed team IDs")
+            )
+            or "—"
+        )
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Resource Type", str(payload.get("resource_type", ""))),
+            ("Resource ID", str(payload.get("resource_id", ""))),
+            ("Source", str(payload.get("source", ""))),
+            ("Configured", "Yes" if payload.get("configured") else "No"),
+            ("Visibility", str(policy.get("visibility", ""))),
+            ("Reservation Role", str(policy.get("reservation_role") or "—")),
+            ("Operation Role", str(policy.get("operation_role") or "—")),
+            ("Allowed Teams", allowed_teams),
+        ],
+    )
+
+
+def _audit_event_table(items: list[object]) -> None:
+    rows = []
+    for item in items:
+        event = _require_mapping(item, "audit event")
+        rows.append(
+            (
+                str(event.get("timestamp", "")),
+                str(event.get("actor_display_name") or "system"),
+                str(event.get("action", "")),
+                str(event.get("resource_id") or "—"),
+                str(event.get("outcome", "")).title(),
+            )
+        )
+    _print_table(("TIME", "ACTOR", "ACTION", "RESOURCE", "OUTCOME"), rows)
+
+
+def _audit_event_show_table(event: dict[str, object]) -> None:
+    _identity_detail_table(
+        event,
+        (
+            "id",
+            "timestamp",
+            "actor_display_name",
+            "actor_type",
+            "actor_id",
+            "action",
+            "resource_type",
+            "resource_id",
+            "outcome",
+            "reason",
+            "request_id",
+            "source_ip",
+            "metadata",
+        ),
+    )
+
+
+def _identity_detail_table(entity: dict[str, object], fields: tuple[str, ...]) -> None:
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            (
+                field.replace("_", " ").title(),
+                str(entity.get(field) if entity.get(field) is not None else "—"),
+            )
+            for field in fields
+        ],
+    )
 
 
 def _ci_command(client: AgentClient, args: argparse.Namespace) -> int:
@@ -1979,7 +2827,7 @@ def _bench_list(client: AgentClient, args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="labctl")
+    parser = argparse.ArgumentParser(prog="labctl", allow_abbrev=False)
     parser.add_argument("--server", "--url", dest="server", default=None)
     parser.add_argument("--config", type=Path, default=Path("~/.config/lab-platform/cli.yaml"))
     parser.add_argument(
@@ -1993,6 +2841,208 @@ def _build_parser() -> argparse.ArgumentParser:
     _read_parser(commands.add_parser("health"))
     _read_parser(commands.add_parser("benches", help=argparse.SUPPRESS))
     _read_parser(commands.add_parser("plugins", help=argparse.SUPPRESS))
+
+    auth = commands.add_parser("auth", help="Authenticate a human user with the control plane.")
+    auth_commands = auth.add_subparsers(dest="auth_command", required=True)
+    auth_login = _read_parser(auth_commands.add_parser("login"))
+    auth_login.add_argument(
+        "--server",
+        dest="auth_server",
+        default=None,
+        help="Control-plane URL (also accepted as the global --server option).",
+    )
+    auth_login.add_argument("--username")
+    auth_login.add_argument("--organisation", help="Organisation slug for local login.")
+    _read_parser(auth_commands.add_parser("logout"))
+    _read_parser(auth_commands.add_parser("status"))
+    _read_parser(auth_commands.add_parser("whoami"))
+
+    service_account = commands.add_parser(
+        "service-account",
+        help="Manage non-human identities and their credentials.",
+    )
+    service_accounts = service_account.add_subparsers(
+        dest="service_account_command",
+        required=True,
+    )
+    service_account_create = _read_parser(service_accounts.add_parser("create"))
+    service_account_create.add_argument("--name", required=True)
+    service_account_create.add_argument("--description")
+    _read_parser(service_accounts.add_parser("list"))
+    for name in ("show", "disable", "delete"):
+        mutation = _read_parser(service_accounts.add_parser(name))
+        mutation.add_argument("service_account", help="Service-account UUID or name.")
+    credential = service_accounts.add_parser("credential")
+    credentials = credential.add_subparsers(dest="credential_command", required=True)
+    credential_create = _read_parser(credentials.add_parser("create"))
+    credential_create.add_argument("--service-account", required=True)
+    credential_create.add_argument("--name", required=True)
+    credential_create.add_argument("--expires-at")
+    credential_create.add_argument("--allowed-ip", action="append", default=[])
+    credential_create.add_argument("--permission", action="append", default=None)
+    credential_list = _read_parser(credentials.add_parser("list"))
+    credential_list.add_argument("--service-account", required=True)
+    credential_revoke = _read_parser(credentials.add_parser("revoke"))
+    credential_revoke.add_argument("credential_id")
+
+    organisation = commands.add_parser("organisation", help="Inspect this organisation.")
+    organisations = organisation.add_subparsers(dest="organisation_command", required=True)
+    _read_parser(organisations.add_parser("show"))
+    organisation_update = _read_parser(organisations.add_parser("update"))
+    organisation_update.add_argument("--name", required=True)
+
+    user = commands.add_parser("user", help="Manage human users.")
+    users = user.add_subparsers(dest="user_command", required=True)
+    user_create = _read_parser(users.add_parser("create", allow_abbrev=False))
+    user_create.add_argument("--username", required=True)
+    user_create.add_argument("--display-name", required=True)
+    user_create.add_argument("--email")
+    user_create.add_argument(
+        "--authentication-source",
+        choices=("local", "oidc"),
+        default="local",
+        help="Authentication source; OIDC users are created without a local password.",
+    )
+    user_create.add_argument(
+        "--organisation-role",
+        choices=("owner", "admin", "member", "viewer"),
+        default="member",
+    )
+    user_create.add_argument(
+        "--password-env",
+        help="Read the new password from this environment variable instead of prompting.",
+    )
+    _read_parser(users.add_parser("list"))
+    for name in ("show", "disable", "enable"):
+        mutation = _read_parser(users.add_parser(name))
+        mutation.add_argument("user", help="User UUID or username.")
+    user_reset_password = _read_parser(users.add_parser("reset-password", allow_abbrev=False))
+    user_reset_password.add_argument("user", help="User UUID or username.")
+    user_reset_password.add_argument(
+        "--password-env",
+        help="Read the new password from this environment variable instead of prompting.",
+    )
+
+    team = commands.add_parser("team", help="Manage groups of users.")
+    teams = team.add_subparsers(dest="team_command", required=True)
+    team_create = _read_parser(teams.add_parser("create"))
+    team_create.add_argument("--slug", required=True)
+    team_create.add_argument("--name", required=True)
+    team_create.add_argument("--description")
+    _read_parser(teams.add_parser("list"))
+    for name in ("show", "delete"):
+        mutation = _read_parser(teams.add_parser(name))
+        mutation.add_argument("team", help="Team UUID, slug, or name.")
+    team_add_member = _read_parser(teams.add_parser("add-member"))
+    team_add_member.add_argument("team", help="Team UUID, slug, or name.")
+    team_add_member.add_argument("--user", required=True, help="User UUID or username.")
+    team_add_member.add_argument(
+        "--role",
+        dest="team_role",
+        choices=("manager", "member", "viewer"),
+        default="member",
+    )
+    team_remove_member = _read_parser(teams.add_parser("remove-member"))
+    team_remove_member.add_argument("team", help="Team UUID, slug, or name.")
+    team_remove_member.add_argument("--user", required=True, help="User UUID or username.")
+
+    role = commands.add_parser("role", help="Inspect and assign access roles.")
+    roles = role.add_subparsers(dest="role_command", required=True)
+    _read_parser(roles.add_parser("list"))
+    role_permissions = _read_parser(roles.add_parser("permissions"))
+    role_permissions.add_argument("role")
+    role_assign = _read_parser(roles.add_parser("assign"))
+    role_assign.add_argument("--subject", required=True, help="For example user:alice.")
+    role_assign.add_argument("--role", required=True)
+    role_assign.add_argument(
+        "--resource",
+        required=True,
+        help="For example bench:home-lab/esp32-devkit-01.",
+    )
+    role_assign.add_argument("--expires-at")
+    role_revoke = _read_parser(roles.add_parser("revoke"))
+    role_revoke.add_argument("assignment_id")
+    role_effective = _read_parser(roles.add_parser("effective"))
+    role_effective.add_argument("--subject", required=True, help="For example user:alice.")
+    role_effective.add_argument("--resource", required=True, help="For example bench:lab/esp32.")
+    role_effective.add_argument(
+        "--permission",
+        help="Permission to test; the response always includes all effective permissions.",
+    )
+    role_effective.add_argument(
+        "--parent-agent-id",
+        help="Trusted parent Agent UUID when evaluating a bench resource.",
+    )
+
+    access_policy = commands.add_parser(
+        "access-policy",
+        help="Inspect and configure bench and workflow access policies.",
+    )
+    policy_resources = access_policy.add_subparsers(
+        dest="access_policy_resource",
+        required=True,
+    )
+    policy_roles = (
+        "organisation-owner",
+        "organisation-admin",
+        "lab-admin",
+        "operator",
+        "workflow-runner",
+        "reserver",
+        "viewer",
+        "auditor",
+    )
+    bench_policy = policy_resources.add_parser("bench")
+    bench_policy_commands = bench_policy.add_subparsers(
+        dest="access_policy_command",
+        required=True,
+    )
+    bench_policy_get = _read_parser(bench_policy_commands.add_parser("get"))
+    bench_policy_get.add_argument("resource_id", metavar="bench_id")
+    bench_policy_set = _read_parser(bench_policy_commands.add_parser("set"))
+    bench_policy_set.add_argument("resource_id", metavar="bench_id")
+    bench_policy_set.add_argument(
+        "--visibility",
+        choices=("private", "organisation", "restricted"),
+        required=True,
+    )
+    bench_policy_set.add_argument("--reservation-role", choices=policy_roles)
+    bench_policy_set.add_argument("--operation-role", choices=policy_roles)
+    bench_policy_set.add_argument(
+        "--allowed-team",
+        action="append",
+        default=[],
+        help="Allowed team UUID, slug, or name; repeat for multiple teams.",
+    )
+
+    workflow_policy = policy_resources.add_parser("workflow")
+    workflow_policy_commands = workflow_policy.add_subparsers(
+        dest="access_policy_command",
+        required=True,
+    )
+    workflow_policy_get = _read_parser(workflow_policy_commands.add_parser("get"))
+    workflow_policy_get.add_argument("resource_id", metavar="workflow_id")
+    workflow_policy_set = _read_parser(workflow_policy_commands.add_parser("set"))
+    workflow_policy_set.add_argument("resource_id", metavar="workflow_id")
+    workflow_policy_set.add_argument(
+        "--visibility",
+        choices=("organisation", "restricted", "admin-only"),
+        required=True,
+    )
+
+    audit = commands.add_parser("audit", help="Review organisation audit events.")
+    audits = audit.add_subparsers(dest="audit_command", required=True)
+    audit_list = _read_parser(audits.add_parser("list"))
+    audit_list.add_argument("--action")
+    audit_list.add_argument(
+        "--outcome",
+        choices=("succeeded", "failed", "denied"),
+    )
+    audit_list.add_argument("--after", help="Only events after this ISO-8601 timestamp.")
+    audit_list.add_argument("--before", help="Only events before this ISO-8601 timestamp.")
+    audit_list.add_argument("--limit", type=int, default=100)
+    audit_show = _read_parser(audits.add_parser("show"))
+    audit_show.add_argument("event_id")
 
     agent = commands.add_parser("agent", help="Administer distributed lab Agents.")
     agents = agent.add_subparsers(dest="agent_command", required=True)
@@ -2108,6 +3158,10 @@ def _build_parser() -> argparse.ArgumentParser:
         if name == "release":
             reservation_mutation.add_argument("--expected-lease-version", type=int)
             reservation_mutation.add_argument("--idempotency-key")
+    reservation_revoke = _read_parser(reservations.add_parser("revoke"))
+    reservation_revoke.add_argument("reservation_id")
+    reservation_revoke.add_argument("--expected-lease-version", type=int, required=True)
+    reservation_revoke.add_argument("--idempotency-key")
     reservation_queue = _read_parser(reservations.add_parser("queue"))
     reservation_queue.add_argument("bench_id")
     reservation_queue.add_argument("--owner", required=True)
@@ -2268,11 +3322,82 @@ def _read_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def _client(args: argparse.Namespace) -> AgentClient:
+    server = _resolve_server(args)
+    credential, source, store = _resolve_credential(args, server, require_store=False)
+    if credential is None:
+        return AgentClient(server)
+    return _authenticated_client(server, credential, source, store)
+
+
+def _credential_store() -> CredentialStore:
+    """Construct the native store behind a patchable boundary for CLI tests."""
+
+    return NativeCredentialStore()
+
+
+def _resolve_credential(
+    args: argparse.Namespace,
+    server: str,
+    *,
+    require_store: bool,
+) -> tuple[StoredCredential | None, str | None, CredentialStore | None]:
     token_env = str(getattr(args, "token_env", "LAB_PLATFORM_TOKEN"))
-    return AgentClient(_resolve_server(args), token=os.environ.get(token_env))
+    environment_token = os.environ.get(token_env)
+    if environment_token is not None:
+        return StoredCredential(access_token=environment_token), "environment", None
+
+    store = _credential_store()
+    try:
+        stored_credential = store.load(server)
+    except CredentialStoreUnavailableError:
+        if require_store:
+            raise
+        # Preserve the unauthenticated Phase 1-5 bootstrap and health/version paths on
+        # headless systems that do not provide Secret Service.
+        return None, None, None
+    if stored_credential is None:
+        return None, None, store
+    return stored_credential, "stored", store
+
+
+def _authenticated_client(
+    server: str,
+    credential: StoredCredential,
+    source: str | None,
+    store: CredentialStore | None,
+) -> AgentClient:
+    if source != "stored":
+        return AgentClient(server, token=credential.access_token)
+    if store is None:  # pragma: no cover - resolver invariant
+        raise AssertionError("stored credentials require a credential store")
+
+    current = credential
+
+    def persist_refresh(payload: dict[str, object]) -> None:
+        nonlocal current
+        refreshed = StoredCredential.from_auth_response(payload, previous=current)
+        try:
+            store.save(server, refreshed)
+        except (CredentialStoreError, OSError, ValueError):
+            # Rotation invalidated the old native entry. Removing it prevents repeated use of
+            # a stale secret; AgentClient also makes a best-effort revocation of the new token.
+            with suppress(CredentialStoreError, OSError, ValueError):
+                store.delete(server)
+            raise
+        current = refreshed
+
+    return AgentClient(
+        server,
+        token=credential.access_token,
+        refresh_token=credential.refresh_token,
+        on_session_refresh=persist_refresh,
+    )
 
 
 def _resolve_server(args: argparse.Namespace) -> str:
+    auth_server = getattr(args, "auth_server", None)
+    if auth_server:
+        return str(auth_server)
     if args.server:
         return str(args.server)
     environment = os.environ.get("LAB_PLATFORM_SERVER")
