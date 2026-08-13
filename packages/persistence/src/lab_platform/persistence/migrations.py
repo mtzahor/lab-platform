@@ -1406,6 +1406,9 @@ def _upgrade_phase10_postgresql_workflow_constraints(
         DO $phase10$
         DECLARE constraint_row record;
         BEGIN
+            -- Foreign keys must be removed before the unique constraints whose
+            -- backing indexes they reference. PostgreSQL otherwise rejects the
+            -- parent-constraint drop with DependentObjectsStillExist.
             FOR constraint_row IN
                 SELECT conrelid::regclass AS table_name, conname
                 FROM pg_constraint
@@ -1413,7 +1416,22 @@ def _upgrade_phase10_postgresql_workflow_constraints(
                     'workflow_runs'::regclass,
                     'workflow_step_results'::regclass
                 )
-                AND contype IN ('f', 'u')
+                AND contype = 'f'
+            LOOP
+                EXECUTE format(
+                    'ALTER TABLE %%I DROP CONSTRAINT %%I',
+                    constraint_row.table_name,
+                    constraint_row.conname
+                );
+            END LOOP;
+            FOR constraint_row IN
+                SELECT conrelid::regclass AS table_name, conname
+                FROM pg_constraint
+                WHERE conrelid IN (
+                    'workflow_runs'::regclass,
+                    'workflow_step_results'::regclass
+                )
+                AND contype = 'u'
             LOOP
                 EXECUTE format(
                     'ALTER TABLE %%I DROP CONSTRAINT %%I',

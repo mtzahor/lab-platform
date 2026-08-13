@@ -245,6 +245,18 @@ def test_initialize_connects_with_the_url_and_applies_postgresql_migrations() ->
     assert raw.close_count == 1
 
 
+def test_phase10_migration_drops_foreign_keys_before_parent_unique_constraints() -> None:
+    database, raw, _factory = initialized_database()
+
+    phase10 = next(statement.sql for statement in raw.statements if "DO $phase10$" in statement.sql)
+    foreign_keys = phase10.index("AND contype = 'f'")
+    unique_constraints = phase10.index("AND contype = 'u'")
+
+    assert foreign_keys < unique_constraints
+    assert "CASCADE" not in phase10
+    database.close()
+
+
 def test_transaction_translates_placeholders_and_preserves_literals_and_parameters() -> None:
     database, raw, _factory = initialized_database()
     raw.clear_observations()
