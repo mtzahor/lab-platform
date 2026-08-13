@@ -378,7 +378,9 @@ def test_metrics_sql_uses_postgresql_scalar_and_datetime_compatibility() -> None
 
     with database.transaction() as connection:
         connection.execute(
-            "SELECT MAX(0, COUNT(*) - COUNT(DISTINCT agent_id)) FROM agent_connections"
+            "SELECT MAX(0, COUNT(*) - COUNT(DISTINCT connection.agent_id)) "
+            "FROM agent_connections AS connection JOIN agents AS agent "
+            "ON agent.id = connection.agent_id"
         )
         connection.execute(
             "SELECT COALESCE(MAX((julianday('now') - julianday(last_heartbeat_at)) "
@@ -386,7 +388,7 @@ def test_metrics_sql_uses_postgresql_scalar_and_datetime_compatibility() -> None
         )
 
     sql = executed_sql(raw)
-    assert "GREATEST(0, COUNT(*) - COUNT(DISTINCT agent_id))" in sql
+    assert "GREATEST(0, COUNT(*) - COUNT(DISTINCT connection.agent_id))" in sql
     assert "MAX(0, COUNT(*)" not in sql
     assert "lab_platform_julianday('now')" in sql
     assert "lab_platform_julianday(last_heartbeat_at)" in sql
