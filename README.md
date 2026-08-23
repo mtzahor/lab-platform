@@ -5,20 +5,24 @@ central control plane now gives local shells and CI systems one inventory and AP
 independent lab Agents while each Agent remains the final authority for hardware locks, execution,
 and safety.
 
-The current release is **0.7.0-alpha**. It retains the complete Phase 5 distributed software cut
+The current release is **0.8.0-alpha**. It retains the complete Phase 5 distributed software cut
 line—authenticated Agent enrollment, persistent WebSockets, unified inventory, confirmed leases,
 duplicate-safe commands, reconciliation, remote workflows/artifacts, distributed CI, and scale
 coverage—and adds the Phase 6 identity foundation: organisations, users, service accounts, teams,
 fixed RBAC, sessions/credentials, identity and access-policy administration, audit persistence,
 configuration, OIDC, resource-scoped enforcement, decision snapshots, and CLI auth/admin commands.
-GitHub Actions, GitLab CI, Jenkins, and local runs still use the same vendor-neutral CLI and REST
-API.
+Phase 7 adds an integrated React/TypeScript operations dashboard, browser cookie/CSRF and OIDC
+flows, permission-aware inventory and administration, immediate/scheduled reservations and queues,
+workflow/operation progress, bounded serial logs, artifacts, Agent/CI views, live updates with
+polling fallback, and a generated OpenAPI client. GitHub Actions, GitLab CI, Jenkins, and local runs
+still use the same vendor-neutral CLI and REST API.
 
 See [Phase 5](docs/PHASE_5.md) for the authority model, protocol guarantees, complete distributed
 demo, recovery behavior, and early-release limitations.
 
 Phase 6 is deliberately not presented as a hardened public-SaaS boundary in this alpha. Its models,
-schema-v10 repositories, authentication and authorisation services, first-owner bootstrap, auth
+schema-v10 identity foundation (with the current schema-v11 durable reservation queue),
+authentication and authorisation services, first-owner bootstrap, auth
 routes, dual Phase 6/legacy bearer handling, identity/access-policy REST and CLI, principal
 ownership, remote actor context, security headers, bounded audit retention, safe loopback
 auto-login, and refreshable native CLI sessions are present. OIDC authorization-code/PKCE login
@@ -36,7 +40,8 @@ actor or snapshot; a maintenance retry may reuse evidence already persisted for 
 principal-requested CI cancellation. The durable control-intent records are not a transactional
 replay outbox. See
 [Phase 6 status](docs/PHASE_6.md), the
-[Phase 6 team-access demo](docs/PHASE_6_TEAM_DEMO.md), [OIDC](docs/OIDC.md), and the
+[Phase 6 team-access demo](docs/PHASE_6_TEAM_DEMO.md), [Phase 7](docs/PHASE_7.md), the
+[browser demonstration](docs/PHASE_7_BROWSER_DEMO.md), [OIDC](docs/OIDC.md), and the
 [security model](docs/SECURITY_MODEL.md); do not treat the new tables or settings as a completed
 multi-tenant boundary.
 
@@ -48,6 +53,10 @@ Requirements: Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
 uv sync --all-extras
 uv run lab-control-plane --config config/control-plane.yaml
 ```
+
+The 0.8.0-alpha wheel includes the production dashboard bundle, and the checked-in control-plane
+config enables it at `http://127.0.0.1:8443/`. For frontend development or deployment layouts, see
+[web deployment](docs/WEB_DEPLOYMENT.md).
 
 The checked-in configuration is a loopback-only development deployment. For a non-loopback
 deployment, start from
@@ -234,9 +243,11 @@ deletion is not exposed. Explicit internal/background and legacy compatibility c
 lower-priority storage, and some deployment-global human-readable Agent/bench identifiers remain
 transitional. Legacy-token compatibility has no organisation principal and is excluded from tenant
 isolation guarantees. OIDC is implemented for pre-provisioned users, but pending state is
-process-local, mapping is not bound durably to issuer/subject, and JIT provisioning, external group
-mapping, and a cookie-based browser session are absent. mTLS, HA, a secrets vault, broad public-API
-rate limiting, and additional proxy/browser hardening remain incomplete or later deployment work.
+process-local, mapping is not bound durably to issuer/subject, and JIT provisioning and external
+group mapping are absent. Phase 7 browser sessions use same-origin `HttpOnly` cookies and CSRF;
+arbitrary distinct-origin cookie hosting is intentionally unsupported. mTLS, HA, a secrets vault,
+broad public-API rate limiting, and additional proxy/browser hardening remain incomplete or later
+deployment work.
 Keep the PostgreSQL DSN in deployment-secret storage, require database TLS, and run
 `lab-control-plane migrate --config <path>` before starting the service. Outside the loopback demo,
 either configure an HTTPS public URL with both direct TLS certificate/key paths, or bind the process
@@ -255,7 +266,9 @@ uv run pytest -m "not hardware"
 uv run python scripts/export_openapi.py --service agent --check docs/openapi.json
 uv run python scripts/export_openapi.py --service control-plane --check \
   docs/control-plane-openapi.json
+cd apps/web && npm ci && npm run check && cd ../..
 uv build
+uv run python scripts/verify_web_wheel.py dist/*.whl
 ```
 
 Documentation starts at [docs/index.md](docs/index.md). Core references are

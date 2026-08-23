@@ -1,0 +1,2 @@
+# Generated frontend bundles can contain significant whitespace inside JavaScript template strings.
+apps/control_plane/src/lab_platform/control_plane/web_dist/assets/*.js -whitespace

@@ -225,6 +225,21 @@ def test_owner_user_team_and_role_crud_with_team_inheritance(tmp_path: Path) -> 
         assert membership.status_code == 201, membership.text
         assert membership.json()["team_id"] == team_id
         assert membership.json()["user_id"] == user_id
+        user_teams = client.get(
+            f"/api/v1/users/{user_id}/teams",
+            headers=owner_headers,
+        )
+        assert user_teams.status_code == 200, user_teams.text
+        assert user_teams.json()["items"] == [
+            {"team": updated_team.json(), "membership": membership.json()}
+        ]
+        team_members = client.get(
+            f"/api/v1/teams/{team_id}/members",
+            headers=owner_headers,
+        )
+        assert team_members.status_code == 200, team_members.text
+        assert team_members.json()["items"][0]["membership"] == membership.json()
+        assert team_members.json()["items"][0]["user"]["id"] == user_id
 
         assigned = client.post(
             "/api/v1/role-assignments",
@@ -257,9 +272,28 @@ def test_owner_user_team_and_role_crud_with_team_inheritance(tmp_path: Path) -> 
         role_listing = client.get("/api/v1/role-assignments", headers=owner_headers)
         assert role_listing.status_code == 200
         assert [item["id"] for item in role_listing.json()["items"]] == [assignment["id"]]
+        filtered_roles = client.get(
+            "/api/v1/role-assignments",
+            headers=owner_headers,
+            params={
+                "subject_type": "TEAM",
+                "subject_id": team_id,
+                "resource_type": "ORGANISATION",
+                "resource_id": organisation_id,
+            },
+        )
+        assert filtered_roles.status_code == 200, filtered_roles.text
+        assert filtered_roles.json()["items"] == [assignment]
 
         member_login = _login(client, "member", REPLACEMENT_PASSWORD)
         member_headers = _bearer(member_login["access_token"])
+        sessions = client.get(
+            f"/api/v1/users/{user_id}/sessions",
+            headers=owner_headers,
+        )
+        assert sessions.status_code == 200, sessions.text
+        assert sessions.json()["items"][0]["active"] is True
+        assert "secret_hash" not in sessions.text
         effective = client.get(
             "/api/v1/permissions/effective",
             headers=member_headers,
@@ -593,6 +627,35 @@ def test_viewer_administration_denial_and_audit_api(tmp_path: Path) -> None:
         assert team_denial["action"] == "PERMISSION_DENIED"
         assert team_denial["outcome"] == "DENIED"
         assert team_denial["resource_type"] == "ORGANISATION"
+
+        correlated = client.get(
+            "/api/v1/audit-events",
+            headers=owner_headers,
+            params={
+                "actor": "read only",
+                "actor_id": viewer["id"],
+                "resource_type": "ORGANISATION",
+                "resource_id": team_denial["resource_id"],
+            },
+        )
+        assert correlated.status_code == 200, correlated.text
+        assert any(item["id"] == team_denial["id"] for item in correlated.json()["items"])
+
+        first_page = client.get(
+            "/api/v1/audit-events",
+            headers=owner_headers,
+            params={"limit": 1},
+        )
+        assert first_page.status_code == 200, first_page.text
+        assert first_page.json()["has_more"] is True
+        assert first_page.json()["next_cursor"] == first_page.json()["items"][0]["id"]
+        second_page = client.get(
+            "/api/v1/audit-events",
+            headers=owner_headers,
+            params={"limit": 1, "cursor": first_page.json()["next_cursor"]},
+        )
+        assert second_page.status_code == 200, second_page.text
+        assert second_page.json()["items"][0]["id"] != first_page.json()["items"][0]["id"]
 
         fetched = client.get(
             f"/api/v1/audit-events/{team_denial['id']}",

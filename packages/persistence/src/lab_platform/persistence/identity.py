@@ -693,28 +693,90 @@ class SQLiteIdentityRepository:
             ).fetchall()
         return [_session_from_row(row) for row in rows]
 
-    async def update_session(self, session: UserSession) -> UserSession:
+    async def touch_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_secret_hash: str,
+        last_seen_at: datetime,
+    ) -> bool:
+        """Advance last-seen without ever writing a stale session snapshot."""
+
+        last_seen_value = _datetime_value(last_seen_at)
         with self._database.transaction(immediate=True) as connection:
             cursor = connection.execute(
-                "UPDATE user_sessions SET user_id = ?, secret_hash = ?, created_at = ?, "
-                "expires_at = ?, maximum_expires_at = ?, last_seen_at = ?, revoked_at = ?, "
-                "user_agent = ?, ip_address = ? WHERE organisation_id = ? AND id = ?",
+                "UPDATE user_sessions SET last_seen_at = ? WHERE id = ? "
+                "AND secret_hash = ? AND revoked_at IS NULL AND last_seen_at < ?",
                 (
-                    str(session.user_id),
-                    session.secret_hash,
-                    _datetime_value(session.created_at),
-                    _datetime_value(session.expires_at),
-                    _datetime_value(session.maximum_expires_at),
-                    _datetime_value(session.last_seen_at),
-                    _optional_datetime_value(session.revoked_at),
-                    session.user_agent,
-                    session.ip_address,
-                    str(session.organisation_id),
-                    str(session.id),
+                    last_seen_value,
+                    str(session_id),
+                    expected_secret_hash,
+                    last_seen_value,
                 ),
             )
-        _require_updated(cursor.rowcount, "Session", session.id)
-        return session
+        return cursor.rowcount == 1
+
+    async def rotate_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_secret_hash: str,
+        secret_hash: str,
+        expires_at: datetime,
+        last_seen_at: datetime,
+    ) -> UserSession | None:
+        """Rotate a session secret exactly once for the currently presented secret."""
+
+        with self._database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                "UPDATE user_sessions SET secret_hash = ?, expires_at = ?, last_seen_at = ? "
+                "WHERE id = ? AND secret_hash = ? AND revoked_at IS NULL",
+                (
+                    secret_hash,
+                    _datetime_value(expires_at),
+                    _datetime_value(last_seen_at),
+                    str(session_id),
+                    expected_secret_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM user_sessions WHERE id = ?",
+                (str(session_id),),
+            ).fetchone()
+        return _session_from_row(row) if row is not None else None
+
+    async def revoke_session(
+        self,
+        session_id: UUID,
+        *,
+        revoked_at: datetime,
+        expected_secret_hash: str | None = None,
+    ) -> UserSession | None:
+        """Revoke only the target row, optionally fencing on its current secret."""
+
+        with self._database.transaction(immediate=True) as connection:
+            if expected_secret_hash is None:
+                connection.execute(
+                    "UPDATE user_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                    (_datetime_value(revoked_at), str(session_id)),
+                )
+                row = connection.execute(
+                    "SELECT * FROM user_sessions WHERE id = ?",
+                    (str(session_id),),
+                ).fetchone()
+            else:
+                connection.execute(
+                    "UPDATE user_sessions SET revoked_at = ? "
+                    "WHERE id = ? AND secret_hash = ? AND revoked_at IS NULL",
+                    (_datetime_value(revoked_at), str(session_id), expected_secret_hash),
+                )
+                row = connection.execute(
+                    "SELECT * FROM user_sessions WHERE id = ? AND secret_hash = ?",
+                    (str(session_id), expected_secret_hash),
+                ).fetchone()
+        return _session_from_row(row) if row is not None else None
 
     async def create_api_credential(self, credential: ApiCredential) -> ApiCredential:
         with self._database.transaction(immediate=True) as connection:
@@ -997,21 +1059,54 @@ class SQLiteIdentityRepository:
         self,
         organisation_id: UUID,
         *,
+        actor: str | None = None,
+        actor_id: UUID | None = None,
         action: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
         outcome: AuditOutcome | None = None,
+        request_id: UUID | None = None,
+        command_id: UUID | None = None,
+        operation_id: UUID | None = None,
         after: datetime | None = None,
         before: datetime | None = None,
+        cursor: UUID | None = None,
         limit: int = 500,
     ) -> list[AuditEvent]:
         _require_limit(limit)
         conditions = ["organisation_id = ?"]
         parameters: list[object] = [str(organisation_id)]
         filters: tuple[tuple[str, object | None], ...] = (
+            ("actor_id = ?", str(actor_id) if actor_id is not None else None),
             ("action = ?", action),
+            ("resource_type = ?", resource_type),
+            ("resource_id = ?", resource_id),
             ("outcome = ?", outcome.value if outcome is not None else None),
+            ("request_id = ?", str(request_id) if request_id is not None else None),
+            (
+                "json_extract(metadata_json, '$.command_id') = ?",
+                str(command_id) if command_id is not None else None,
+            ),
+            (
+                "json_extract(metadata_json, '$.operation_id') = ?",
+                str(operation_id) if operation_id is not None else None,
+            ),
             ("timestamp > ?", _optional_datetime_value(after)),
             ("timestamp < ?", _optional_datetime_value(before)),
         )
+        if actor is not None:
+            conditions.append("instr(lower(coalesce(actor_display_name, '')), lower(?)) > 0")
+            parameters.append(actor)
+        if cursor is not None:
+            with self._database.transaction() as connection:
+                cursor_row = connection.execute(
+                    "SELECT timestamp, id FROM audit_events WHERE organisation_id = ? AND id = ?",
+                    (str(organisation_id), str(cursor)),
+                ).fetchone()
+            if cursor_row is None:
+                return []
+            conditions.append("(timestamp < ? OR (timestamp = ? AND id > ?))")
+            parameters.extend((cursor_row["timestamp"], cursor_row["timestamp"], cursor_row["id"]))
         for condition, value in filters:
             if value is not None:
                 conditions.append(condition)

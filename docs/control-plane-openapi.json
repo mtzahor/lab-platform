@@ -1,6 +1,50 @@
 {
   "components": {
     "schemas": {
+      "ActorContext": {
+        "additionalProperties": false,
+        "properties": {
+          "authorisation_snapshot_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authorisation Snapshot Id"
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "organisation_id": {
+            "format": "uuid",
+            "title": "Organisation Id",
+            "type": "string"
+          },
+          "principal_id": {
+            "format": "uuid",
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "principal_type": {
+            "$ref": "#/components/schemas/PrincipalType"
+          }
+        },
+        "required": [
+          "principal_id",
+          "principal_type",
+          "display_name",
+          "organisation_id"
+        ],
+        "title": "ActorContext",
+        "type": "object"
+      },
       "AgentCredentialRotationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -63,6 +107,149 @@
           "agent_version"
         ],
         "title": "AgentEnrollmentRequest",
+        "type": "object"
+      },
+      "AgentRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "certificate_fingerprint": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Certificate Fingerprint"
+          },
+          "disconnected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disconnected At"
+          },
+          "enrollment_status": {
+            "$ref": "#/components/schemas/EnrollmentStatus",
+            "default": "PENDING"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 128,
+            "title": "Labels",
+            "type": "object"
+          },
+          "last_connected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Connected At"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "organisation_id": {
+            "default": "00000000-0000-0000-0000-000000000001",
+            "format": "uuid",
+            "title": "Organisation Id",
+            "type": "string"
+          },
+          "protocol_version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "registered_at": {
+            "format": "date-time",
+            "title": "Registered At",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "slug": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentStatus",
+            "default": "PENDING"
+          },
+          "version": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "version",
+          "protocol_version"
+        ],
+        "title": "AgentRecord",
         "type": "object"
       },
       "AgentStatus": {
@@ -261,6 +448,56 @@
         "title": "AuditOutcome",
         "type": "string"
       },
+      "AuthenticationConfigResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "browser_session_enabled": {
+            "title": "Browser Session Enabled",
+            "type": "boolean"
+          },
+          "default_organisation_slug": {
+            "title": "Default Organisation Slug",
+            "type": "string"
+          },
+          "local_auth_enabled": {
+            "title": "Local Auth Enabled",
+            "type": "boolean"
+          },
+          "local_enabled": {
+            "title": "Local Enabled",
+            "type": "boolean"
+          },
+          "oidc_enabled": {
+            "title": "Oidc Enabled",
+            "type": "boolean"
+          },
+          "oidc_login_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Login Url"
+          },
+          "web": {
+            "$ref": "#/components/schemas/WebClientConfig"
+          }
+        },
+        "required": [
+          "local_enabled",
+          "local_auth_enabled",
+          "oidc_enabled",
+          "browser_session_enabled",
+          "oidc_login_url",
+          "default_organisation_slug",
+          "web"
+        ],
+        "title": "AuthenticationConfigResponse",
+        "type": "object"
+      },
       "AuthenticationSource": {
         "enum": [
           "LOCAL",
@@ -418,6 +655,34 @@
         "title": "BenchRequest",
         "type": "object"
       },
+      "BenchTimelineResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bench_id",
+          "generated_at",
+          "items"
+        ],
+        "title": "BenchTimelineResponse",
+        "type": "object"
+      },
       "BenchVisibility": {
         "enum": [
           "PRIVATE",
@@ -552,6 +817,18 @@
         "title": "BooleanWorkflowInput",
         "type": "object"
       },
+      "CiOutcome": {
+        "enum": [
+          "pending",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "timed_out",
+          "infrastructure_error"
+        ],
+        "title": "CiOutcome",
+        "type": "string"
+      },
       "CiProvider": {
         "enum": [
           "github_actions",
@@ -562,6 +839,226 @@
         ],
         "title": "CiProvider",
         "type": "string"
+      },
+      "CiSession": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "bench_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bench Id"
+          },
+          "bench_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BenchRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cleanup_status": {
+            "$ref": "#/components/schemas/CleanupStatus",
+            "default": "not_started"
+          },
+          "commit_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Sha"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "external_run_id": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "External Run Id",
+            "type": "string"
+          },
+          "heartbeat_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heartbeat At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organisation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organisation Id"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CiOutcome",
+            "default": "pending"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/CiProvider"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repository"
+          },
+          "requested_by": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Requested By",
+            "type": "string"
+          },
+          "requested_by_principal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested By Principal Id"
+          },
+          "requested_by_principal_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrincipalType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reservation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservation Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CiSessionStatus",
+            "default": "created"
+          },
+          "timeout_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout At"
+          },
+          "workflow_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Run Id"
+          }
+        },
+        "required": [
+          "provider",
+          "external_run_id",
+          "requested_by"
+        ],
+        "title": "CiSession",
+        "type": "object"
       },
       "CiSessionCreateRequest": {
         "additionalProperties": false,
@@ -774,6 +1271,17 @@
         "title": "CiSessionStatus",
         "type": "string"
       },
+      "CleanupStatus": {
+        "enum": [
+          "not_started",
+          "pending",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "title": "CleanupStatus",
+        "type": "string"
+      },
       "CredentialCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -827,6 +1335,76 @@
         "title": "CredentialCreateRequest",
         "type": "object"
       },
+      "CurrentIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "credential_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Id"
+          },
+          "membership_role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrganisationRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "organisation": {
+            "$ref": "#/components/schemas/Organisation"
+          },
+          "permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Permissions",
+            "type": "array"
+          },
+          "principal": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "roles": {
+            "items": {
+              "$ref": "#/components/schemas/RoleName"
+            },
+            "title": "Roles",
+            "type": "array"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "principal",
+          "organisation",
+          "session_id",
+          "credential_id",
+          "permissions",
+          "roles",
+          "membership_role"
+        ],
+        "title": "CurrentIdentityResponse",
+        "type": "object"
+      },
       "DistributedOperationStatus": {
         "enum": [
           "CREATED",
@@ -853,6 +1431,15 @@
         },
         "title": "DrainRequest",
         "type": "object"
+      },
+      "EnrollmentStatus": {
+        "enum": [
+          "PENDING",
+          "ENROLLED",
+          "REVOKED"
+        ],
+        "title": "EnrollmentStatus",
+        "type": "string"
       },
       "EnrollmentTokenRequest": {
         "additionalProperties": false,
@@ -957,6 +1544,137 @@
         "title": "GlobalBenchKind",
         "type": "string"
       },
+      "GlobalBenchRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "agent_slug": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Agent Slug",
+            "type": "string"
+          },
+          "backend_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Backend Id",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "title": "Capabilities",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "firmware_version": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Firmware Version"
+          },
+          "health": {
+            "$ref": "#/components/schemas/HealthStatus"
+          },
+          "id": {
+            "maxLength": 600,
+            "minLength": 3,
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/GlobalBenchKind"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 128,
+            "title": "Labels",
+            "type": "object"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "local_bench_id": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Local Bench Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "organisation_id": {
+            "default": "00000000-0000-0000-0000-000000000001",
+            "format": "uuid",
+            "title": "Organisation Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/GlobalBenchStatus"
+          },
+          "target_type": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Type"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "agent_slug",
+          "local_bench_id",
+          "name",
+          "backend_id",
+          "kind",
+          "status",
+          "health"
+        ],
+        "title": "GlobalBenchRecord",
+        "type": "object"
+      },
       "GlobalBenchStatus": {
         "enum": [
           "ONLINE",
@@ -1022,6 +1740,11 @@
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
+          "browser": {
+            "default": false,
+            "title": "Browser",
+            "type": "boolean"
+          },
           "organisation_slug": {
             "anyOf": [
               {
@@ -1088,6 +1811,206 @@
         "title": "OperationCancelRequest",
         "type": "object"
       },
+      "OperationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "dispatched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched At"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_agent_update_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Agent Update At"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "operation_type": {
+            "title": "Operation Type",
+            "type": "string"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "reconciliation_deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Deadline"
+          },
+          "reservation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservation Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DistributedOperationStatus"
+          }
+        },
+        "required": [
+          "id",
+          "operation_type",
+          "agent_id",
+          "bench_id",
+          "status",
+          "created_at"
+        ],
+        "title": "OperationSummary",
+        "type": "object"
+      },
+      "Organisation": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OrganisationStatus",
+            "default": "ACTIVE"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name"
+        ],
+        "title": "Organisation",
+        "type": "object"
+      },
       "OrganisationRole": {
         "enum": [
           "OWNER",
@@ -1096,6 +2019,15 @@
           "VIEWER"
         ],
         "title": "OrganisationRole",
+        "type": "string"
+      },
+      "OrganisationStatus": {
+        "enum": [
+          "ACTIVE",
+          "SUSPENDED",
+          "ARCHIVED"
+        ],
+        "title": "OrganisationStatus",
         "type": "string"
       },
       "OrganisationUpdateRequest": {
@@ -1114,6 +2046,133 @@
         "title": "OrganisationUpdateRequest",
         "type": "object"
       },
+      "OverviewCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "active_ci_sessions": {
+            "default": 0,
+            "title": "Active Ci Sessions",
+            "type": "integer"
+          },
+          "active_operations": {
+            "default": 0,
+            "title": "Active Operations",
+            "type": "integer"
+          },
+          "agents_online": {
+            "default": 0,
+            "title": "Agents Online",
+            "type": "integer"
+          },
+          "benches_available": {
+            "default": 0,
+            "title": "Benches Available",
+            "type": "integer"
+          },
+          "benches_offline": {
+            "default": 0,
+            "title": "Benches Offline",
+            "type": "integer"
+          },
+          "benches_reserved": {
+            "default": 0,
+            "title": "Benches Reserved",
+            "type": "integer"
+          },
+          "benches_total": {
+            "default": 0,
+            "title": "Benches Total",
+            "type": "integer"
+          },
+          "failed_workflows_24h": {
+            "default": 0,
+            "title": "Failed Workflows 24H",
+            "type": "integer"
+          },
+          "queued_reservations": {
+            "default": 0,
+            "title": "Queued Reservations",
+            "type": "integer"
+          }
+        },
+        "title": "OverviewCounts",
+        "type": "object"
+      },
+      "OverviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active_ci_sessions": {
+            "items": {
+              "$ref": "#/components/schemas/CiSession"
+            },
+            "title": "Active Ci Sessions",
+            "type": "array"
+          },
+          "active_operations": {
+            "items": {
+              "$ref": "#/components/schemas/OperationSummary"
+            },
+            "title": "Active Operations",
+            "type": "array"
+          },
+          "active_reservations": {
+            "items": {
+              "$ref": "#/components/schemas/ReservationSummary"
+            },
+            "title": "Active Reservations",
+            "type": "array"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/OverviewCounts"
+          },
+          "degraded_benches": {
+            "items": {
+              "$ref": "#/components/schemas/GlobalBenchRecord"
+            },
+            "title": "Degraded Benches",
+            "type": "array"
+          },
+          "failed_workflow_runs": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunSummary"
+            },
+            "title": "Failed Workflow Runs",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "recent_agent_disconnects": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRecord"
+            },
+            "title": "Recent Agent Disconnects",
+            "type": "array"
+          },
+          "upcoming_reservations": {
+            "items": {
+              "$ref": "#/components/schemas/UpcomingReservationSummary"
+            },
+            "title": "Upcoming Reservations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "counts",
+          "active_operations",
+          "failed_workflow_runs",
+          "degraded_benches",
+          "active_reservations",
+          "upcoming_reservations",
+          "recent_agent_disconnects",
+          "active_ci_sessions"
+        ],
+        "title": "OverviewResponse",
+        "type": "object"
+      },
       "PasswordResetRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1128,6 +2187,38 @@
           "password"
         ],
         "title": "PasswordResetRequest",
+        "type": "object"
+      },
+      "Principal": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organisation_id": {
+            "format": "uuid",
+            "title": "Organisation Id",
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/PrincipalType"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "organisation_id",
+          "display_name"
+        ],
+        "title": "Principal",
         "type": "object"
       },
       "PrincipalType": {
@@ -1164,6 +2255,165 @@
           "action"
         ],
         "title": "ProbeWorkflowStep",
+        "type": "object"
+      },
+      "QueueCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "duration_seconds": {
+            "default": 1800,
+            "exclusiveMinimum": 0.0,
+            "maximum": 86400.0,
+            "title": "Duration Seconds",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "QueueCreateRequest",
+        "type": "object"
+      },
+      "QueueEntryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "cancellable": {
+            "default": false,
+            "title": "Cancellable",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "expected_available_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Available At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "requested_duration_seconds": {
+            "title": "Requested Duration Seconds",
+            "type": "integer"
+          },
+          "requester": {
+            "title": "Requester",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/QueueEntryStatus"
+          }
+        },
+        "required": [
+          "id",
+          "bench_id",
+          "requester",
+          "requested_duration_seconds",
+          "status",
+          "created_at"
+        ],
+        "title": "QueueEntryResponse",
+        "type": "object"
+      },
+      "QueueEntryStatus": {
+        "enum": [
+          "waiting",
+          "promoted",
+          "cancelled",
+          "expired"
+        ],
+        "title": "QueueEntryStatus",
+        "type": "string"
+      },
+      "QueuePage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/QueueEntryResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "QueuePage",
         "type": "object"
       },
       "ReadSerialWorkflowStep": {
@@ -1232,6 +2482,38 @@
         "title": "ReadSerialWorkflowStep",
         "type": "object"
       },
+      "ReservationActionPermissions": {
+        "additionalProperties": false,
+        "properties": {
+          "administrator": {
+            "default": false,
+            "title": "Administrator",
+            "type": "boolean"
+          },
+          "cancel": {
+            "default": false,
+            "title": "Cancel",
+            "type": "boolean"
+          },
+          "extend": {
+            "default": false,
+            "title": "Extend",
+            "type": "boolean"
+          },
+          "owned_by_caller": {
+            "default": false,
+            "title": "Owned By Caller",
+            "type": "boolean"
+          },
+          "release": {
+            "default": false,
+            "title": "Release",
+            "type": "boolean"
+          }
+        },
+        "title": "ReservationActionPermissions",
+        "type": "object"
+      },
       "ReservationCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1240,6 +2522,19 @@
             "minLength": 1,
             "title": "Bench Id",
             "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
           },
           "idempotency_key": {
             "maxLength": 500,
@@ -1293,6 +2588,18 @@
               }
             ],
             "title": "Reservation Duration Seconds"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
           }
         },
         "required": [
@@ -1319,9 +2626,16 @@
         "additionalProperties": false,
         "properties": {
           "expected_lease_version": {
-            "minimum": 1.0,
-            "title": "Expected Lease Version",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Lease Version"
           },
           "idempotency_key": {
             "maxLength": 500,
@@ -1344,7 +2658,6 @@
           }
         },
         "required": [
-          "expected_lease_version",
           "idempotency_key"
         ],
         "title": "ReservationReleaseRequest",
@@ -1402,9 +2715,16 @@
         "additionalProperties": false,
         "properties": {
           "expected_lease_version": {
-            "minimum": 1.0,
-            "title": "Expected Lease Version",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Lease Version"
           },
           "idempotency_key": {
             "maxLength": 500,
@@ -1414,10 +2734,82 @@
           }
         },
         "required": [
-          "expected_lease_version",
           "idempotency_key"
         ],
         "title": "ReservationRevokeRequest",
+        "type": "object"
+      },
+      "ReservationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "ends_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ends At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "lease_valid_until": {
+            "format": "date-time",
+            "title": "Lease Valid Until",
+            "type": "string"
+          },
+          "lease_version": {
+            "title": "Lease Version",
+            "type": "integer"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ReservationActionPermissions"
+          },
+          "release_pending": {
+            "default": false,
+            "title": "Release Pending",
+            "type": "boolean"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ReservationLeaseState"
+          }
+        },
+        "required": [
+          "id",
+          "bench_id",
+          "owner",
+          "state",
+          "lease_valid_until",
+          "lease_version",
+          "permissions"
+        ],
+        "title": "ReservationSummary",
         "type": "object"
       },
       "ResetWorkflowStep": {
@@ -1527,6 +2919,101 @@
         "title": "RoleSubjectType",
         "type": "string"
       },
+      "SerialArtifactReference": {
+        "additionalProperties": false,
+        "properties": {
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "local_artifact_id": {
+            "format": "uuid",
+            "title": "Local Artifact Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 0.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "local_artifact_id",
+          "name",
+          "size_bytes",
+          "sha256",
+          "ready",
+          "download_url"
+        ],
+        "title": "SerialArtifactReference",
+        "type": "object"
+      },
+      "SerialLine": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "minimum": 0.0,
+            "title": "Cursor",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "cursor",
+          "text"
+        ],
+        "title": "SerialLine",
+        "type": "object"
+      },
       "SerialReadActionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1578,6 +3065,94 @@
           }
         },
         "title": "SerialReadActionRequest",
+        "type": "object"
+      },
+      "SerialWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SerialArtifactReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artifact_truncated": {
+            "default": false,
+            "title": "Artifact Truncated",
+            "type": "boolean"
+          },
+          "connection_state": {
+            "enum": [
+              "LIVE",
+              "RECONNECTING",
+              "STALE",
+              "COMPLETE"
+            ],
+            "title": "Connection State",
+            "type": "string"
+          },
+          "cursor": {
+            "title": "Cursor",
+            "type": "integer"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SerialLine"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "next_cursor": {
+            "title": "Next Cursor",
+            "type": "integer"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "operation_status": {
+            "$ref": "#/components/schemas/DistributedOperationStatus"
+          },
+          "retained_from": {
+            "title": "Retained From",
+            "type": "integer"
+          },
+          "tail_truncated": {
+            "default": false,
+            "title": "Tail Truncated",
+            "type": "boolean"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation_id",
+          "operation_status",
+          "connection_state",
+          "lines",
+          "cursor",
+          "next_cursor",
+          "total",
+          "retained_from",
+          "has_more"
+        ],
+        "title": "SerialWindow",
         "type": "object"
       },
       "ServiceAccountCreateRequest": {
@@ -1787,6 +3362,103 @@
         "title": "TeamUpdateRequest",
         "type": "object"
       },
+      "TimelineEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "severity": {
+            "default": "INFO",
+            "enum": [
+              "INFO",
+              "WARNING",
+              "ERROR"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "timestamp",
+          "event_type",
+          "title"
+        ],
+        "title": "TimelineEvent",
+        "type": "object"
+      },
+      "UpcomingReservationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "ends_at": {
+            "format": "date-time",
+            "title": "Ends At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ReservationActionPermissions"
+          },
+          "starts_at": {
+            "format": "date-time",
+            "title": "Starts At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "bench_id",
+          "owner",
+          "starts_at",
+          "ends_at",
+          "permissions"
+        ],
+        "title": "UpcomingReservationSummary",
+        "type": "object"
+      },
       "UserCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1954,6 +3626,49 @@
           "seconds"
         ],
         "title": "WaitWorkflowStep",
+        "type": "object"
+      },
+      "WebClientConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "api_base_url": {
+            "title": "Api Base Url",
+            "type": "string"
+          },
+          "branding": {
+            "additionalProperties": true,
+            "title": "Branding",
+            "type": "object"
+          },
+          "features": {
+            "additionalProperties": true,
+            "title": "Features",
+            "type": "object"
+          },
+          "live_updates": {
+            "additionalProperties": true,
+            "title": "Live Updates",
+            "type": "object"
+          },
+          "public_url": {
+            "title": "Public Url",
+            "type": "string"
+          },
+          "uploads": {
+            "additionalProperties": true,
+            "title": "Uploads",
+            "type": "object"
+          }
+        },
+        "required": [
+          "public_url",
+          "api_base_url",
+          "live_updates",
+          "uploads",
+          "features",
+          "branding"
+        ],
+        "title": "WebClientConfig",
         "type": "object"
       },
       "WorkflowAccessPolicyUpdateRequest": {
@@ -2199,6 +3914,17 @@
             ],
             "title": "Owner"
           },
+          "release_reservation_after": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Reservation After"
+          },
           "reservation_duration_seconds": {
             "anyOf": [
               {
@@ -2211,6 +3937,18 @@
               }
             ],
             "title": "Reservation Duration Seconds"
+          },
+          "reservation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservation Id"
           },
           "version": {
             "anyOf": [
@@ -2229,6 +3967,154 @@
           "idempotency_key"
         ],
         "title": "WorkflowRunRequest",
+        "type": "object"
+      },
+      "WorkflowRunSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "operation_status": {
+            "$ref": "#/components/schemas/DistributedOperationStatus"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "reservation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservation Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "workflow_name": {
+            "title": "Workflow Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_name",
+          "agent_id",
+          "bench_id",
+          "status",
+          "operation_status",
+          "created_at"
+        ],
+        "title": "WorkflowRunSummary",
+        "type": "object"
+      },
+      "WorkflowRunsPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "WorkflowRunsPage",
         "type": "object"
       },
       "WorkflowVisibility": {
@@ -2255,7 +4141,7 @@
   "info": {
     "description": "Central API and authenticated Agent gateway for distributed lab benches.",
     "title": "Lab Platform Control Plane API",
-    "version": "0.7.0-alpha"
+    "version": "0.8.0-alpha"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3554,6 +5440,41 @@
         "parameters": [
           {
             "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "action",
             "required": false,
             "schema": {
@@ -3572,6 +5493,42 @@
           },
           {
             "in": "query",
+            "name": "resource_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Resource Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Resource Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "outcome",
             "required": false,
             "schema": {
@@ -3584,6 +5541,57 @@
                 }
               ],
               "title": "Outcome"
+            }
+          },
+          {
+            "in": "query",
+            "name": "request_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Request Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "command_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Command Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "operation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Operation Id"
             }
           },
           {
@@ -3618,6 +5626,23 @@
                 }
               ],
               "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
             }
           },
           {
@@ -3718,6 +5743,27 @@
         ]
       }
     },
+    "/api/v1/auth/config": {
+      "get": {
+        "operationId": "authentication_config_api_v1_auth_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthenticationConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Authentication Config",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "operationId": "login_api_v1_auth_login_post",
@@ -3788,9 +5834,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Me Api V1 Auth Me Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CurrentIdentityResponse"
                 }
               }
             },
@@ -3864,11 +5908,7 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Oidc Callback Api V1 Auth Oidc Callback Get",
-                  "type": "object"
-                }
+                "schema": {}
               }
             },
             "description": "Successful Response"
@@ -3910,6 +5950,34 @@
                 }
               ],
               "title": "Organisation Slug"
+            }
+          },
+          {
+            "in": "query",
+            "name": "browser",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Browser",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "return_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Return To"
             }
           }
         ],
@@ -4564,6 +6632,167 @@
         "summary": "Reset Bench"
       }
     },
+    "/api/v1/benches/{bench_id}/queue": {
+      "get": {
+        "operationId": "list_queue_api_v1_benches__bench_id__queue_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueuePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "List Queue",
+        "tags": [
+          "dashboard"
+        ]
+      },
+      "post": {
+        "operationId": "join_queue_api_v1_benches__bench_id__queue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueueCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueEntryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Join Queue",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/v1/benches/{bench_id}/timeline": {
+      "get": {
+        "operationId": "bench_timeline_api_v1_benches__bench_id__timeline_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 2000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BenchTimelineResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Bench Timeline",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
     "/api/v1/ci/sessions": {
       "get": {
         "operationId": "list_ci_sessions_api_v1_ci_sessions_get",
@@ -5041,6 +7270,68 @@
         ]
       }
     },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "events_api_v1_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "once",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Once",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Events",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "health_api_v1_health_get",
@@ -5359,6 +7650,77 @@
         "summary": "Reconcile Operation"
       }
     },
+    "/api/v1/operations/{operation_id}/serial": {
+      "get": {
+        "operationId": "operation_serial_api_v1_operations__operation_id__serial_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Cursor",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 2000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SerialWindow"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Operation Serial",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
     "/api/v1/organisation": {
       "get": {
         "operationId": "get_organisation_api_v1_organisation_get",
@@ -5430,6 +7792,32 @@
         "summary": "Update Organisation",
         "tags": [
           "identity administration"
+        ]
+      }
+    },
+    "/api/v1/overview": {
+      "get": {
+        "operationId": "overview_api_v1_overview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Overview",
+        "tags": [
+          "dashboard"
         ]
       }
     },
@@ -5551,6 +7939,47 @@
         "summary": "Effective Permissions",
         "tags": [
           "identity administration"
+        ]
+      }
+    },
+    "/api/v1/queue/{queue_entry_id}": {
+      "delete": {
+        "operationId": "leave_queue_api_v1_queue__queue_entry_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "queue_entry_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Queue Entry Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Leave Queue",
+        "tags": [
+          "dashboard"
         ]
       }
     },
@@ -5935,6 +8364,75 @@
     "/api/v1/role-assignments": {
       "get": {
         "operationId": "list_role_assignments_api_v1_role_assignments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "subject_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/RoleSubjectType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resource_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ResourceType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Resource Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Resource Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5947,6 +8445,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
@@ -6674,6 +9182,54 @@
       }
     },
     "/api/v1/teams/{team_id}/members": {
+      "get": {
+        "operationId": "list_team_members_api_v1_teams__team_id__members_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Team Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Team Members Api V1 Teams  Team Id  Members Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "IdentityBearerAuth": []
+          }
+        ],
+        "summary": "List Team Members",
+        "tags": [
+          "identity administration"
+        ]
+      },
       "post": {
         "operationId": "add_team_member_api_v1_teams__team_id__members_post",
         "parameters": [
@@ -7232,6 +9788,106 @@
         ]
       }
     },
+    "/api/v1/users/{user_id}/sessions": {
+      "get": {
+        "operationId": "list_user_sessions_api_v1_users__user_id__sessions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List User Sessions Api V1 Users  User Id  Sessions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "IdentityBearerAuth": []
+          }
+        ],
+        "summary": "List User Sessions",
+        "tags": [
+          "identity administration"
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/teams": {
+      "get": {
+        "operationId": "list_user_teams_api_v1_users__user_id__teams_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List User Teams Api V1 Users  User Id  Teams Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "IdentityBearerAuth": []
+          }
+        ],
+        "summary": "List User Teams",
+        "tags": [
+          "identity administration"
+        ]
+      }
+    },
     "/api/v1/version": {
       "get": {
         "operationId": "version_api_v1_version_get",
@@ -7252,6 +9908,88 @@
           }
         },
         "summary": "Version"
+      }
+    },
+    "/api/v1/workflow-runs": {
+      "get": {
+        "operationId": "list_workflow_runs_api_v1_workflow_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DistributedOperationStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bench_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bench Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRunsPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "List Workflow Runs",
+        "tags": [
+          "dashboard"
+        ]
       }
     },
     "/api/v1/workflow-runs/{operation_id}": {

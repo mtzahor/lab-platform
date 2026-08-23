@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import http.client
+import json
 import os
+import re
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections import deque
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +59,7 @@ from lab_platform.core.errors import (
 )
 from lab_platform.core.workflows import WorkflowRunner, WorkflowService
 from lab_platform.models import (
+    ArtifactOwnerType,
     BenchOperationLock,
     BufferedEventPriority,
     CommandJournalEntry,
@@ -69,6 +73,7 @@ from lab_platform.models import (
     RemoteCommandStatus,
     RemoteCommandType,
     ReservationLease,
+    SerialLine,
     SerialReadRequest,
     WorkflowDefinition,
     WorkflowRunStatus,
@@ -544,6 +549,108 @@ class _RemoteWorkflowLockAdapter:
         return await self._locks.release(bench_id, operation_id)
 
 
+_SERIAL_PROGRESS_INTERVAL_LINES = 25
+# Buffered Agent events have a 256 KiB envelope limit; reserve ample space for
+# command identifiers, timestamps, progress fields, and JSON list overhead.
+_SERIAL_RESULT_MAX_BYTES = 192 * 1024
+_SERIAL_RESULT_TEXT_MAX_CHARACTERS = 2_000
+
+
+class _DistributedSerialCapture:
+    """Stream a complete bounded artifact while retaining a small live result tail."""
+
+    def __init__(
+        self,
+        *,
+        maximum_tail_lines: int,
+        maximum_artifact_bytes: int,
+        redact_patterns: Sequence[re.Pattern[str]],
+    ) -> None:
+        if maximum_tail_lines <= 0:
+            raise ValueError("serial result tail must retain at least one line")
+        if maximum_artifact_bytes <= 0:
+            raise ValueError("serial artifact size bound must be positive")
+        self._maximum_tail_lines = maximum_tail_lines
+        self._maximum_artifact_bytes = maximum_artifact_bytes
+        self._redact_patterns = tuple(redact_patterns)
+        self._tail: deque[tuple[dict[str, Any], int]] = deque()
+        self._tail_size_bytes = 0
+        self.line_count = 0
+        self.artifact_size_bytes = 0
+        self.artifact_truncated = False
+        self._last_reported_line_count = 0
+
+    @property
+    def line_offset(self) -> int:
+        return self.line_count - len(self._tail)
+
+    async def stream(
+        self,
+        lines: AsyncIterator[SerialLine],
+        *,
+        report_progress: CommandProgressReporter,
+    ) -> AsyncIterator[bytes]:
+        async for line in lines:
+            safe_text = self._redact(line.text)
+            self.line_count += 1
+            self._append_tail(line, safe_text=safe_text)
+
+            encoded = (safe_text + "\n").encode("utf-8", errors="replace")
+            chunk: bytes | None = None
+            if not self.artifact_truncated:
+                if self.artifact_size_bytes + len(encoded) <= self._maximum_artifact_bytes:
+                    chunk = encoded
+                else:
+                    self.artifact_truncated = True
+                    if self.artifact_size_bytes == 0:
+                        chunk = b"[SERIAL CAPTURE TRUNCATED]\n"[: self._maximum_artifact_bytes]
+            if chunk:
+                self.artifact_size_bytes += len(chunk)
+                yield chunk
+
+            if self.line_count == 1 or (self.line_count % _SERIAL_PROGRESS_INTERVAL_LINES == 0):
+                await self._report(report_progress)
+
+        if self.line_count > self._last_reported_line_count:
+            await self._report(report_progress)
+
+    def result(self, *, artifact_id: UUID | None = None) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "lines": [item for item, _size in self._tail],
+            "line_offset": self.line_offset,
+            "line_count": self.line_count,
+            "truncated": self.artifact_truncated,
+        }
+        if artifact_id is not None:
+            result["artifact_id"] = str(artifact_id)
+        return result
+
+    async def _report(self, report_progress: CommandProgressReporter) -> None:
+        await report_progress(
+            message=f"Captured {self.line_count} serial lines",
+            result=self.result(),
+        )
+        self._last_reported_line_count = self.line_count
+
+    def _append_tail(self, line: SerialLine, *, safe_text: str) -> None:
+        payload = line.model_dump(mode="json")
+        payload["text"] = safe_text[:_SERIAL_RESULT_TEXT_MAX_CHARACTERS]
+        size = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        while self._tail and (
+            len(self._tail) >= self._maximum_tail_lines
+            or self._tail_size_bytes + size > _SERIAL_RESULT_MAX_BYTES
+        ):
+            _removed, removed_size = self._tail.popleft()
+            self._tail_size_bytes -= removed_size
+        self._tail.append((payload, size))
+        self._tail_size_bytes += size
+
+    def _redact(self, text: str) -> str:
+        for pattern in self._redact_patterns:
+            text = pattern.sub("[REDACTED]", text)
+        return text
+
+
 class LocalAgentCommandExecutor(AgentCommandExecutor):
     def __init__(
         self,
@@ -554,13 +661,28 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
         workflow_runner: WorkflowRunner,
         artifacts: AgentArtifactCache,
         events: SQLiteAgentEventBuffer,
+        serial_buffer_lines: int = 500,
+        serial_artifact_max_bytes: int = 50 * 1024 * 1024,
+        serial_redact_patterns: Sequence[str] = (),
     ) -> None:
+        if serial_buffer_lines <= 0:
+            raise ValueError("serial result tail must retain at least one line")
+        if serial_artifact_max_bytes <= 0:
+            raise ValueError("serial artifact size bound must be positive")
         self._agent = agent
         self._locks = locks
         self._workflows = workflows
         self._workflow_runner = workflow_runner
         self._artifacts = artifacts
         self._events = events
+        self._serial_buffer_lines = serial_buffer_lines
+        self._serial_artifact_max_bytes = serial_artifact_max_bytes
+        try:
+            self._serial_redact_patterns = tuple(
+                re.compile(pattern) for pattern in serial_redact_patterns
+            )
+        except re.error as exc:
+            raise ValueError(f"invalid serial redaction pattern: {exc}") from exc
         self._active_commands: set[UUID] = set()
         self._workflow_runs: dict[UUID, UUID] = {}
 
@@ -670,19 +792,85 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
                     self._artifacts.release(descriptor.sha256)
             if command.command_type is RemoteCommandType.READ_SERIAL:
                 request = SerialReadRequest.model_validate(command.payload.get("request", {}))
-                lines: list[dict[str, Any]] = []
-                async for line in backend.read_serial(bench_id, request):
-                    if len(lines) < 500:
-                        payload = line.model_dump(mode="json")
-                        payload["text"] = str(payload["text"])[:2000]
-                        lines.append(payload)
-                return {"lines": lines, "line_count": len(lines)}
+                return await self._read_serial(
+                    command,
+                    local_operation_id=local_operation_id,
+                    lines=backend.read_serial(bench_id, request),
+                    report_progress=report_progress,
+                )
             raise RemoteCommandRejectedError(
                 "Agent executor does not support this command type.",
                 command_type=command.command_type.value,
             )
         finally:
             await self._locks.release(bench_id, local_operation_id)
+
+    async def _read_serial(
+        self,
+        command: RemoteCommand,
+        *,
+        local_operation_id: UUID,
+        lines: AsyncIterator[SerialLine],
+        report_progress: CommandProgressReporter,
+    ) -> Mapping[str, Any]:
+        capture = _DistributedSerialCapture(
+            maximum_tail_lines=self._serial_buffer_lines,
+            maximum_artifact_bytes=self._serial_artifact_max_bytes,
+            redact_patterns=self._serial_redact_patterns,
+        )
+        owner_id = command.operation_id or local_operation_id
+        artifact_metadata = {
+            "command_id": str(command.id),
+            "operation_id": str(owner_id),
+        }
+
+        async def artifact_chunks() -> AsyncIterator[bytes]:
+            async for chunk in capture.stream(lines, report_progress=report_progress):
+                yield chunk
+            artifact_metadata.update(
+                {
+                    "line_count": str(capture.line_count),
+                    "truncated": str(capture.artifact_truncated).lower(),
+                    "redacted": str(bool(self._serial_redact_patterns)).lower(),
+                }
+            )
+
+        try:
+            artifact = await self._agent.artifact_service.upload(
+                artifact_chunks(),
+                owner_type=ArtifactOwnerType.OPERATION,
+                owner_id=owner_id,
+                name=f"serial-{command.id}.log",
+                artifact_type="serial_log",
+                content_type="text/plain; charset=utf-8",
+                metadata=artifact_metadata,
+                idempotency_key=f"distributed-command:{command.id}:serial-log",
+            )
+        except InvalidArtifactError:
+            if capture.line_count != 0:
+                raise
+            return capture.result()
+
+        metadata = RemoteArtifactMetadata(
+            id=artifact.id,
+            agent_id=command.agent_id,
+            local_artifact_id=artifact.id,
+            command_id=command.id,
+            operation_id=command.operation_id,
+            name=artifact.name,
+            artifact_type=artifact.artifact_type,
+            content_type=artifact.content_type,
+            size_bytes=artifact.size_bytes,
+            sha256=artifact.sha256,
+            created_at=artifact.created_at,
+        )
+        await self._events.append(
+            MessageType.ARTIFACT_CREATED.value,
+            ArtifactCreatedPayload(artifact=metadata).model_dump(mode="json"),
+            priority=BufferedEventPriority.TERMINAL,
+            event_id=metadata.id,
+        )
+        return capture.result(artifact_id=artifact.id)
 
     async def _run_workflow(
         self,
@@ -705,6 +893,7 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
         if not isinstance(raw_artifacts, list):
             raise InvalidArtifactError("Workflow artifact descriptors must be a list.")
         pinned_digests: list[str] = []
+        run_id: UUID | None = None
         try:
             for raw_descriptor in raw_artifacts:
                 descriptor = ArtifactTransferDescriptor.model_validate(raw_descriptor)
@@ -730,7 +919,15 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
                 artifact_resolver=resolve,
             )
             self._workflow_runs[command.id] = run.id
-            await report_progress(progress=1, message="Remote workflow started")
+            run_id = run.id
+            await report_progress(
+                progress=1,
+                message="Remote workflow started",
+                result={
+                    "workflow_run": run.model_dump(mode="json"),
+                    "steps": [],
+                },
+            )
             wait_task = asyncio.create_task(self._workflows.wait(run.id))
             last_step: int | None = None
             while not wait_task.done():
@@ -738,6 +935,7 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
                 current = await self._workflows.get_run(run.id)
                 if current.current_step is not None and current.current_step != last_step:
                     last_step = current.current_step
+                    current_steps = await self._workflows.list_step_results(run.id)
                     await report_progress(
                         progress=min(
                             99,
@@ -746,10 +944,23 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
                         message=(
                             f"Workflow step {current.current_step + 1}/{len(definition.steps)}"
                         ),
+                        result={
+                            "workflow_run": current.model_dump(mode="json"),
+                            "steps": [step.model_dump(mode="json") for step in current_steps],
+                        },
                     )
             completed = await wait_task
             steps = await self._workflows.list_step_results(run.id)
             await self._publish_workflow_artifacts(command, steps)
+            result = {
+                "workflow_run": completed.model_dump(mode="json"),
+                "steps": [step.model_dump(mode="json") for step in steps],
+            }
+            await report_progress(
+                progress=99,
+                message=f"Remote workflow {completed.status.value}",
+                result=result,
+            )
             if completed.status is not WorkflowRunStatus.SUCCEEDED:
                 raise RemoteCommandRejectedError(
                     completed.error_message or "Remote workflow failed.",
@@ -757,10 +968,20 @@ class LocalAgentCommandExecutor(AgentCommandExecutor):
                     workflow_status=completed.status.value,
                     workflow_error_code=completed.error_code,
                 )
-            return {
-                "workflow_run": completed.model_dump(mode="json"),
-                "steps": [step.model_dump(mode="json") for step in steps],
-            }
+            return result
+        except asyncio.CancelledError:
+            if run_id is not None:
+                with suppress(Exception):
+                    current = await self._workflows.get_run(run_id)
+                    current_steps = await self._workflows.list_step_results(run_id)
+                    await report_progress(
+                        message="Remote workflow cancellation observed",
+                        result={
+                            "workflow_run": current.model_dump(mode="json"),
+                            "steps": [step.model_dump(mode="json") for step in current_steps],
+                        },
+                    )
+            raise
         finally:
             for digest in pinned_digests:
                 self._artifacts.release(digest)
@@ -874,6 +1095,14 @@ class AgentDistributedRuntime:
         self._task: asyncio.Task[None] | None = None
         self._started = False
         self._transport = transport or StreamingArtifactHttpTransport()
+        serial_artifact_limit = (
+            min(
+                config.serial.artifact_max_size_mb,
+                config.artifacts.max_upload_size_mb,
+            )
+            * 1024
+            * 1024
+        )
 
         leases = SQLiteReservationLeaseStore(database, self.agent_id)
         event_buffer = SQLiteAgentEventBuffer(database, self.agent_id)
@@ -891,7 +1120,7 @@ class AgentDistributedRuntime:
             step_timeout_seconds=config.ci.step_timeout_seconds,
             artifact_service=agent.artifact_service,
             serial_buffer_lines=config.serial.stream_buffer_lines,
-            serial_artifact_max_bytes=config.serial.artifact_max_size_mb * 1024 * 1024,
+            serial_artifact_max_bytes=serial_artifact_limit,
             serial_redact_patterns=config.serial.redact_patterns,
         )
         remote_workflows = WorkflowService(
@@ -918,6 +1147,9 @@ class AgentDistributedRuntime:
             workflow_runner=remote_runner,
             artifacts=cache,
             events=event_buffer,
+            serial_buffer_lines=config.serial.stream_buffer_lines,
+            serial_artifact_max_bytes=serial_artifact_limit,
+            serial_redact_patterns=config.serial.redact_patterns,
         )
         safety = LocalAgentSafetyAdapter(agent, operation_locks)
         handler = AgentCommandHandler(

@@ -710,10 +710,29 @@ class LifecycleReservations:
         )
         raise AssertionError("grant is not used by reservation cleanup")
 
-    async def get(self, _reservation_id: UUID) -> CoordinatedReservationLease:
+    async def get(
+        self,
+        _reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CoordinatedReservationLease:
+        del organisation_id
         if self.fail_get or self.record is None:
             raise ReservationNotFoundError("missing")
         return self.record
+
+    async def require_for_new_work(
+        self,
+        reservation_id: UUID,
+        *,
+        agent_id: UUID,
+        bench_id: str,
+        owner: str,
+        lease_version: int,
+        agent_observed_at: datetime | None = None,
+    ) -> ReservationLease:
+        del agent_id, bench_id, owner, lease_version, agent_observed_at
+        return (await self.get(reservation_id)).lease
 
     async def release(
         self,

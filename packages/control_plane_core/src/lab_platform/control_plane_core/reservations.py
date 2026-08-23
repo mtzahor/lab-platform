@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -25,9 +27,11 @@ from lab_platform.core.authorisation import AuthorisationService
 from lab_platform.core.errors import (
     AuthenticationRequiredError,
     BenchAlreadyReservedError,
+    PlatformError,
     ReservationNotActiveError,
     ReservationNotFoundError,
     ReservationOwnerMismatchError,
+    ReservationTimeConflictError,
 )
 from lab_platform.models import (
     AgentRecord,
@@ -132,6 +136,51 @@ class ReservationLeaseSynchronizer(Protocol):
     async def release_lease(self, lease: ReservationLease) -> None: ...
 
 
+class ScheduledReservationRepository(Protocol):
+    """Durable timed rows that have not yet acquired a distributed lease."""
+
+    async def create(self, reservation: Reservation) -> Reservation: ...
+
+    async def get(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> Reservation | None: ...
+
+    async def update(
+        self,
+        reservation: Reservation,
+        *,
+        expected_status: ReservationStatus | None = None,
+        expected_ends_at: datetime | None = None,
+        require_unlocked: bool = False,
+    ) -> Reservation: ...
+
+    async def list(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        bench_id: str | None = None,
+        owner: str | None = None,
+        status: ReservationStatus | None = None,
+        starts_after: datetime | None = None,
+        starts_before: datetime | None = None,
+        limit: int = 50,
+    ) -> builtins.list[Reservation]: ...
+
+    async def list_due(self, now: datetime) -> builtins.list[Reservation]: ...
+
+    async def find_conflict(
+        self,
+        bench_id: str,
+        starts_at: datetime,
+        ends_at: datetime,
+        *,
+        exclude_id: UUID | None = None,
+    ) -> Reservation | None: ...
+
+
 class CentralReservationLeaseRepository(Protocol):
     """Transactional persistence boundary for global ownership and lease fencing.
 
@@ -161,6 +210,18 @@ class CentralReservationLeaseRepository(Protocol):
         self,
         request: ReservationGrantRequest,
         *,
+        mutation_key: str,
+        request_fingerprint: str,
+        expected_agent_status: AgentStatus,
+        expected_bench_status: GlobalBenchStatus,
+        scheduled_protection_window_seconds: int = 0,
+    ) -> LeaseWriteResult | None: ...
+
+    async def activate_scheduled_if_eligible(
+        self,
+        request: ReservationGrantRequest,
+        *,
+        activated_at: datetime,
         mutation_key: str,
         request_fingerprint: str,
         expected_agent_status: AgentStatus,
@@ -196,6 +257,7 @@ class CentralReservationLeaseService:
         directory: DistributedReservationDirectory,
         synchronizer: ReservationLeaseSynchronizer,
         *,
+        scheduled_repository: ScheduledReservationRepository | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
         default_reservation_duration_seconds: int = 3_600,
@@ -234,6 +296,7 @@ class CentralReservationLeaseService:
             field="maximum_clock_skew_seconds",
         )
         self._repository = repository
+        self._scheduled_repository = scheduled_repository
         self._directory = directory
         self._synchronizer = synchronizer
         self._clock = clock or _utc_now
@@ -266,11 +329,16 @@ class CentralReservationLeaseService:
         authentication_context: AuthenticationContext | None = None,
         allow_legacy_authorisation: bool = False,
         allow_internal_authorisation: bool = False,
+        scheduled_protection_window_seconds: int = 0,
     ) -> CoordinatedReservationLease:
         normalized_owner = _require_text(owner, field="owner", maximum_length=200)
         mutation_key = _require_mutation_key(idempotency_key)
         duration = self._reservation_duration(reservation_duration_seconds)
         lease_ttl = self._lease_ttl(lease_ttl_seconds)
+        _require_nonnegative_seconds(
+            scheduled_protection_window_seconds,
+            field="scheduled_protection_window_seconds",
+        )
         normalized_metadata = dict(metadata or {})
         agent, bench = await self._trusted_route(agent_id, bench_id)
         await self._require_bench_authorisation(
@@ -296,6 +364,7 @@ class CentralReservationLeaseService:
                 "lease_ttl_seconds": lease_ttl,
                 "source": source.value,
                 "metadata": normalized_metadata,
+                "scheduled_protection_window_seconds": scheduled_protection_window_seconds,
             },
         )
         replay = await self._repository.get_mutation_result(
@@ -337,19 +406,291 @@ class CentralReservationLeaseService:
             agent_id=agent_id,
             lease_valid_until=min(ends_at, now + timedelta(seconds=lease_ttl)),
         )
-        result = await self._repository.grant_if_eligible(
-            request,
-            mutation_key=mutation_key,
-            request_fingerprint=fingerprint,
-            expected_agent_status=AgentStatus.ONLINE,
-            expected_bench_status=GlobalBenchStatus.ONLINE,
-        )
+        if scheduled_protection_window_seconds:
+            result = await self._repository.grant_if_eligible(
+                request,
+                mutation_key=mutation_key,
+                request_fingerprint=fingerprint,
+                expected_agent_status=AgentStatus.ONLINE,
+                expected_bench_status=GlobalBenchStatus.ONLINE,
+                scheduled_protection_window_seconds=scheduled_protection_window_seconds,
+            )
+        else:
+            # Preserve compatibility with Phase 5 repository adapters while the
+            # additional protection predicate is only needed by queue promotion.
+            result = await self._repository.grant_if_eligible(
+                request,
+                mutation_key=mutation_key,
+                request_fingerprint=fingerprint,
+                expected_agent_status=AgentStatus.ONLINE,
+                expected_bench_status=GlobalBenchStatus.ONLINE,
+            )
         if result is not None:
             return await self._synchronize_pending(
                 result.record,
                 operation_key=mutation_key,
             )
-        await self._raise_grant_failure(agent_id, bench_id)
+        await self._raise_grant_failure(
+            agent_id,
+            bench_id,
+            starts_at=now,
+            ends_at=ends_at,
+        )
+
+    async def schedule(
+        self,
+        *,
+        agent_id: UUID,
+        bench_id: str,
+        owner: str,
+        owner_principal: ReservationOwner | None = None,
+        starts_at: datetime,
+        idempotency_key: str,
+        reservation_duration_seconds: int | None = None,
+        lease_ttl_seconds: int | None = None,
+        source: ReservationSource = ReservationSource.API,
+        metadata: Mapping[str, str] | None = None,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> Reservation:
+        """Persist a future reservation without prematurely fencing the Agent."""
+
+        scheduled = self._require_scheduled_repository()
+        normalized_owner = _require_text(owner, field="owner", maximum_length=200)
+        mutation_key = _require_mutation_key(idempotency_key)
+        duration = self._reservation_duration(reservation_duration_seconds)
+        # Validate the eventual lease request now so a scheduled request cannot become
+        # permanently unactivatable only after its start time.
+        lease_ttl = self._lease_ttl(lease_ttl_seconds)
+        start = _as_utc(starts_at, field="reservation start timestamp")
+        now = self._now()
+        if start <= now:
+            raise ReservationTimeConflictError(
+                "A future reservation must start after the current time.",
+                bench_id=bench_id,
+            )
+        normalized_metadata = dict(metadata or {})
+        if lease_ttl_seconds is not None:
+            normalized_metadata["_scheduled_lease_ttl_seconds"] = str(lease_ttl)
+        agent, bench = await self._trusted_route(agent_id, bench_id)
+        await self._require_bench_authorisation(
+            agent,
+            bench,
+            "benches:reserve",
+            authentication_context=authentication_context,
+            owner=normalized_owner,
+            owner_principal=owner_principal,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        candidate = Reservation(
+            id=self._id_factory(),
+            organisation_id=bench.organisation_id,
+            bench_id=bench_id,
+            owner=normalized_owner,
+            owner_principal_id=(
+                owner_principal.principal_id if owner_principal is not None else None
+            ),
+            owner_principal_type=(
+                owner_principal.principal_type.value if owner_principal is not None else None
+            ),
+            created_at=now,
+            requested_at=now,
+            starts_at=start,
+            ends_at=start + timedelta(seconds=duration),
+            status=ReservationStatus.SCHEDULED,
+            source=source,
+            metadata=normalized_metadata,
+            idempotency_key=mutation_key,
+        )
+        created = await scheduled.create(candidate)
+        if not _same_scheduled_request(created, candidate):
+            raise ReservationLeaseInvalidError(
+                "Idempotency key was reused with different reservation content.",
+                idempotency_key=mutation_key,
+            )
+        return created
+
+    async def get_uncoordinated(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> Reservation | None:
+        scheduled = self._require_scheduled_repository()
+        reservation = await scheduled.get(
+            reservation_id,
+            organisation_id=organisation_id,
+        )
+        if reservation is None or await self._repository.get(reservation_id) is not None:
+            return None
+        return reservation
+
+    async def list_scheduled(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        bench_id: str | None = None,
+        owner: str | None = None,
+        starts_after: datetime | None = None,
+        starts_before: datetime | None = None,
+        limit: int = 500,
+    ) -> list[Reservation]:
+        scheduled = self._require_scheduled_repository()
+        rows = await scheduled.list(
+            organisation_id=organisation_id,
+            bench_id=bench_id,
+            owner=owner,
+            status=ReservationStatus.SCHEDULED,
+            starts_after=starts_after,
+            starts_before=starts_before,
+            limit=limit,
+        )
+        return [row for row in rows if await self._repository.get(row.id) is None]
+
+    async def cancel_scheduled(
+        self,
+        reservation_id: UUID,
+        *,
+        owner: str | None = None,
+        owner_principal: ReservationOwner | None = None,
+        administrator: bool = False,
+        authentication_context: AuthenticationContext | None = None,
+        allow_legacy_authorisation: bool = False,
+        allow_internal_authorisation: bool = False,
+    ) -> Reservation:
+        scheduled = self._require_scheduled_repository()
+        current = await scheduled.get(reservation_id)
+        if current is None or await self._repository.get(reservation_id) is not None:
+            raise ReservationNotFoundError(
+                f"Reservation {reservation_id} was not found.",
+                reservation_id=str(reservation_id),
+            )
+        bench = await self._directory.get_bench(current.bench_id)
+        if bench is None:
+            raise ReservationNotFoundError(
+                f"Reservation {reservation_id} has no trusted bench route.",
+                reservation_id=str(reservation_id),
+            )
+        agent = await self._directory.get_agent(bench.agent_id)
+        if agent is None:
+            raise AgentNotFoundError("Agent does not exist.", agent_id=str(bench.agent_id))
+        _validate_trusted_route_organisation(agent, bench)
+        await self._require_bench_authorisation(
+            agent,
+            bench,
+            "benches:manage" if administrator else "benches:reserve",
+            authentication_context=authentication_context,
+            owner=None if administrator else owner,
+            owner_principal=None if administrator else owner_principal,
+            allow_legacy_authorisation=allow_legacy_authorisation,
+            allow_internal_authorisation=allow_internal_authorisation,
+        )
+        if not administrator:
+            if owner is None:
+                raise ReservationOwnerMismatchError("Reservation owner is required.")
+            _require_reservation_value_owner(
+                current,
+                owner,
+                owner_principal=owner_principal,
+            )
+        if current.status is ReservationStatus.CANCELLED:
+            return current
+        if current.status is not ReservationStatus.SCHEDULED:
+            raise ReservationNotActiveError(
+                "Only a not-yet-activated reservation can be cancelled without a lease.",
+                reservation_id=str(reservation_id),
+                reservation_status=current.status.value,
+            )
+        now = self._now()
+        cancelled = current.model_copy(
+            update={"status": ReservationStatus.CANCELLED, "released_at": now}
+        )
+        return await scheduled.update(
+            cancelled,
+            expected_status=ReservationStatus.SCHEDULED,
+        )
+
+    async def process_due_scheduled(self, *, limit: int = 1_000) -> int:
+        """Claim and synchronize due schedules; safe to repeat after a restart."""
+
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        scheduled = self._require_scheduled_repository()
+        now = self._now()
+        activated = 0
+        for reservation in (await scheduled.list_due(now))[:limit]:
+            current = await self._repository.get(reservation.id)
+            if current is not None:
+                if current.state is ReservationLeaseState.ACTIVATING and await self._can_sync(
+                    current.lease.agent_id
+                ):
+                    effective = await self._synchronize_pending(
+                        current,
+                        operation_key=_scheduled_activation_key(reservation.id),
+                    )
+                    activated += int(effective.state is ReservationLeaseState.ACTIVE)
+                continue
+            if reservation.ends_at is None or reservation.ends_at <= now:
+                expired = reservation.model_copy(
+                    update={"status": ReservationStatus.EXPIRED, "expired_at": now}
+                )
+                with suppress(KeyError, ReservationNotActiveError):
+                    await scheduled.update(
+                        expired,
+                        expected_status=ReservationStatus.SCHEDULED,
+                    )
+                continue
+            bench = await self._directory.get_bench(reservation.bench_id)
+            if bench is None or not await self._can_sync(bench.agent_id):
+                continue
+            agent = await self._directory.get_agent(bench.agent_id)
+            try:
+                _require_eligible_route(bench.agent_id, bench.id, agent, bench)
+                _validate_trusted_route_organisation(agent, bench)  # type: ignore[arg-type]
+            except PlatformError:
+                continue
+            lease_ttl = _scheduled_lease_ttl(
+                reservation,
+                default=self._default_lease_ttl,
+                maximum=self._maximum_lease_ttl,
+            )
+            request = ReservationGrantRequest(
+                reservation=reservation,
+                agent_id=bench.agent_id,
+                lease_valid_until=min(
+                    reservation.ends_at,
+                    now + timedelta(seconds=lease_ttl),
+                ),
+            )
+            mutation_key = _scheduled_activation_key(reservation.id)
+            fingerprint = _request_fingerprint(
+                "activate-scheduled",
+                {
+                    "reservation_id": str(reservation.id),
+                    "agent_id": str(bench.agent_id),
+                    "bench_id": bench.id,
+                    "starts_at": reservation.starts_at,
+                    "ends_at": reservation.ends_at,
+                },
+            )
+            result = await self._repository.activate_scheduled_if_eligible(
+                request,
+                activated_at=now,
+                mutation_key=mutation_key,
+                request_fingerprint=fingerprint,
+                expected_agent_status=AgentStatus.ONLINE,
+                expected_bench_status=GlobalBenchStatus.ONLINE,
+            )
+            if result is None:
+                continue
+            effective = await self._synchronize_pending(
+                result.record,
+                operation_key=mutation_key,
+            )
+            activated += int(effective.state is ReservationLeaseState.ACTIVE)
+        return activated
 
     async def renew(
         self,
@@ -848,8 +1189,16 @@ class CentralReservationLeaseService:
                 expired += 1
         return expired
 
-    async def get(self, reservation_id: UUID) -> CoordinatedReservationLease:
-        return await self._require_record(reservation_id)
+    async def get(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CoordinatedReservationLease:
+        return await self._require_record(
+            reservation_id,
+            organisation_id=organisation_id,
+        )
 
     async def _trusted_route(
         self,
@@ -1083,12 +1432,27 @@ class CentralReservationLeaseService:
             # will clear an Agent that missed this idempotent release notification.
             return
 
+    async def _can_sync(self, agent_id: UUID) -> bool:
+        checker = getattr(self._synchronizer, "is_available", None)
+        if checker is None:
+            return True
+        return bool(await checker(agent_id))
+
+    def _require_scheduled_repository(self) -> ScheduledReservationRepository:
+        if self._scheduled_repository is None:
+            raise RuntimeError("Scheduled reservation persistence is not configured")
+        return self._scheduled_repository
+
     async def _require_record(
         self,
         reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
     ) -> CoordinatedReservationLease:
         record = await self._repository.get(reservation_id)
-        if record is None:
+        if record is None or (
+            organisation_id is not None and record.reservation.organisation_id != organisation_id
+        ):
             raise ReservationNotFoundError(
                 f"Reservation {reservation_id} was not found.",
                 reservation_id=str(reservation_id),
@@ -1099,6 +1463,9 @@ class CentralReservationLeaseService:
         self,
         agent_id: UUID,
         bench_id: str,
+        *,
+        starts_at: datetime,
+        ends_at: datetime,
     ) -> NoReturn:
         current = await self._repository.get_current_for_bench(bench_id)
         if current is not None:
@@ -1107,6 +1474,18 @@ class CentralReservationLeaseService:
                 bench_id=bench_id,
                 reservation_id=str(current.reservation.id),
             )
+        if self._scheduled_repository is not None:
+            conflict = await self._scheduled_repository.find_conflict(
+                bench_id,
+                starts_at,
+                ends_at,
+            )
+            if conflict is not None:
+                raise ReservationTimeConflictError(
+                    "Reservation overlaps an existing scheduled reservation.",
+                    bench_id=bench_id,
+                    conflicting_reservation_id=str(conflict.id),
+                )
         agent = await self._directory.get_agent(agent_id)
         bench = await self._directory.get_bench(bench_id)
         _require_eligible_route(agent_id, bench_id, agent, bench)
@@ -1314,6 +1693,65 @@ def _require_owner(
             "Reservation owner does not match.",
             reservation_id=str(reservation.id),
         )
+
+
+def _require_reservation_value_owner(
+    reservation: Reservation,
+    owner: str,
+    *,
+    owner_principal: ReservationOwner | None = None,
+) -> None:
+    if owner_principal is not None and reservation.owner_principal_id is not None:
+        owner_mismatch = (
+            reservation.owner_principal_id != owner_principal.principal_id
+            or reservation.owner_principal_type != owner_principal.principal_type.value
+        )
+    else:
+        owner_mismatch = reservation.owner != owner
+    if owner_mismatch:
+        raise ReservationOwnerMismatchError(
+            "Reservation owner does not match.",
+            reservation_id=str(reservation.id),
+        )
+
+
+def _same_scheduled_request(existing: Reservation, candidate: Reservation) -> bool:
+    return all(
+        getattr(existing, field) == getattr(candidate, field)
+        for field in (
+            "organisation_id",
+            "bench_id",
+            "owner",
+            "owner_principal_id",
+            "owner_principal_type",
+            "starts_at",
+            "ends_at",
+            "status",
+            "source",
+            "metadata",
+            "idempotency_key",
+        )
+    )
+
+
+def _scheduled_activation_key(reservation_id: UUID) -> str:
+    return f"activate-scheduled:{reservation_id}"
+
+
+def _scheduled_lease_ttl(
+    reservation: Reservation,
+    *,
+    default: int,
+    maximum: int,
+) -> int:
+    raw = reservation.metadata.get("_scheduled_lease_ttl_seconds")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if 0 < value <= maximum else default
 
 
 def _require_version(record: CoordinatedReservationLease, expected_version: int) -> None:

@@ -32,6 +32,7 @@ from lab_platform.core.errors import (
     AuthenticationRequiredError,
     BenchAlreadyReservedError,
     PermissionDeniedError,
+    ReservationNotFoundError,
     ReservationOwnerMismatchError,
 )
 from lab_platform.models import (
@@ -225,7 +226,9 @@ class FakeCentralReservationLeaseRepository:
         request_fingerprint: str,
         expected_agent_status: AgentStatus,
         expected_bench_status: GlobalBenchStatus,
+        scheduled_protection_window_seconds: int = 0,
     ) -> LeaseWriteResult | None:
+        del scheduled_protection_window_seconds
         bench = self.directory.benches.get(request.reservation.bench_id)
         if bench is None:
             return None
@@ -280,6 +283,25 @@ class FakeCentralReservationLeaseRepository:
             result,
         )
         return result
+
+    async def activate_scheduled_if_eligible(
+        self,
+        request: ReservationGrantRequest,
+        *,
+        activated_at: datetime,
+        mutation_key: str,
+        request_fingerprint: str,
+        expected_agent_status: AgentStatus,
+        expected_bench_status: GlobalBenchStatus,
+    ) -> LeaseWriteResult | None:
+        del activated_at
+        return await self.grant_if_eligible(
+            request,
+            mutation_key=mutation_key,
+            request_fingerprint=request_fingerprint,
+            expected_agent_status=expected_agent_status,
+            expected_bench_status=expected_bench_status,
+        )
 
     async def replace_if_current(
         self,
@@ -523,6 +545,32 @@ def test_grant_is_tentative_until_exact_agent_confirmation() -> None:
         assert record.lease.valid_until == NOW + timedelta(seconds=300)
         assert record.accepts_new_work
         assert synchronizer.local_by_bench[BENCH_ID] == record.lease
+
+    asyncio.run(scenario())
+
+
+def test_get_hides_reservations_outside_the_requested_organisation() -> None:
+    async def scenario() -> None:
+        service, _, _, _, _ = _stack()
+        record = await service.grant(
+            agent_id=AGENT_ID,
+            bench_id=BENCH_ID,
+            owner="github-actions",
+            idempotency_key="tenant-scoped-get",
+        )
+
+        assert (
+            await service.get(
+                record.reservation.id,
+                organisation_id=record.reservation.organisation_id,
+            )
+            == record
+        )
+        with pytest.raises(ReservationNotFoundError):
+            await service.get(
+                record.reservation.id,
+                organisation_id=UUID(int=999),
+            )
 
     asyncio.run(scenario())
 

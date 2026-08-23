@@ -20,6 +20,8 @@ from lab_platform.models import (
     GlobalBenchStatus,
     Reservation,
     ReservationLease,
+    ReservationSource,
+    ReservationStatus,
 )
 from lab_platform.persistence.database import SQLiteDatabase
 
@@ -166,6 +168,7 @@ class SQLiteCentralReservationLeaseRepository:
         request_fingerprint: str,
         expected_agent_status: AgentStatus,
         expected_bench_status: GlobalBenchStatus,
+        scheduled_protection_window_seconds: int = 0,
     ) -> LeaseWriteResult | None:
         try:
             with self._database.transaction(immediate=True) as connection:
@@ -200,7 +203,8 @@ class SQLiteCentralReservationLeaseRepository:
                     reservation.bench_id,
                 ) or _has_uncoordinated_current_reservation(
                     connection,
-                    reservation.bench_id,
+                    reservation,
+                    scheduled_protection_window_seconds=(scheduled_protection_window_seconds),
                 ):
                     return None
 
@@ -239,6 +243,103 @@ class SQLiteCentralReservationLeaseRepository:
         except sqlite3.IntegrityError:
             # Unique indexes and foreign keys are the final guard against a writer
             # using another database connection between application-level checks.
+            return None
+        return LeaseWriteResult(record, LeaseWriteDisposition.APPLIED)
+
+    async def activate_scheduled_if_eligible(
+        self,
+        request: ReservationGrantRequest,
+        *,
+        activated_at: datetime,
+        mutation_key: str,
+        request_fingerprint: str,
+        expected_agent_status: AgentStatus,
+        expected_bench_status: GlobalBenchStatus,
+    ) -> LeaseWriteResult | None:
+        """Atomically turn one due timed row into the authoritative Agent lease."""
+
+        try:
+            with self._database.transaction(immediate=True) as connection:
+                organisation_id = _route_organisation_id(
+                    connection,
+                    request.agent_id,
+                    request.reservation.bench_id,
+                )
+                if organisation_id is None:
+                    return None
+                replay = _mutation_result(
+                    connection,
+                    mutation_key,
+                    organisation_id=organisation_id,
+                    request_fingerprint=request_fingerprint,
+                )
+                if replay is not None:
+                    return replay
+                if not _route_is_eligible(
+                    connection,
+                    request.agent_id,
+                    request.reservation.bench_id,
+                    expected_agent_status=expected_agent_status,
+                    expected_bench_status=expected_bench_status,
+                ):
+                    return None
+                row = connection.execute(
+                    "SELECT * FROM reservations WHERE id = ? AND organisation_id = ? ",
+                    (str(request.reservation.id), str(organisation_id)),
+                ).fetchone()
+                if row is None:
+                    return None
+                reservation = _reservation_from_row(row)
+                if (
+                    reservation != request.reservation
+                    or reservation.status is not ReservationStatus.SCHEDULED
+                    or reservation.starts_at is None
+                    or reservation.starts_at > activated_at
+                    or reservation.ends_at is None
+                    or reservation.ends_at <= activated_at
+                ):
+                    return None
+                if _has_current_coordination(
+                    connection,
+                    reservation.bench_id,
+                ) or _has_other_uncoordinated_current_reservation(
+                    connection,
+                    reservation,
+                    activated_at,
+                ):
+                    return None
+
+                maximum_row = connection.execute(
+                    "SELECT MAX(lease_version) AS maximum_version "
+                    "FROM reservation_leases WHERE bench_id = ?",
+                    (reservation.bench_id,),
+                ).fetchone()
+                maximum_version = maximum_row["maximum_version"]
+                lease_version = (int(maximum_version) if maximum_version is not None else 0) + 1
+                lease = ReservationLease(
+                    reservation_id=reservation.id,
+                    agent_id=request.agent_id,
+                    bench_id=reservation.bench_id,
+                    owner=reservation.owner,
+                    valid_from=activated_at,
+                    valid_until=request.lease_valid_until,
+                    lease_version=lease_version,
+                )
+                record = CoordinatedReservationLease(
+                    reservation=reservation,
+                    lease=lease,
+                    state=ReservationLeaseState.ACTIVATING,
+                    revision=1,
+                )
+                _insert_lease(connection, lease)
+                _insert_coordination(connection, record)
+                _insert_mutation(
+                    connection,
+                    mutation_key,
+                    request_fingerprint=request_fingerprint,
+                    record=record,
+                )
+        except sqlite3.IntegrityError:
             return None
         return LeaseWriteResult(record, LeaseWriteDisposition.APPLIED)
 
@@ -429,15 +530,43 @@ def _has_current_coordination(connection: sqlite3.Connection, bench_id: str) -> 
 
 def _has_uncoordinated_current_reservation(
     connection: sqlite3.Connection,
-    bench_id: str,
+    reservation: Reservation,
+    *,
+    scheduled_protection_window_seconds: int,
 ) -> bool:
+    starts_at = reservation.starts_at or reservation.created_at
+    ends_at = reservation.ends_at
+    if ends_at is None:
+        return True
+    protected_end = ends_at.timestamp() + scheduled_protection_window_seconds
+    protected_end_value = datetime.fromtimestamp(protected_end, tz=UTC).isoformat()
     return (
         connection.execute(
             "SELECT 1 FROM reservations AS reservation WHERE reservation.bench_id = ? "
             "AND reservation.status IN ('scheduled', 'active', 'expired_pending_operation') "
+            "AND (reservation.starts_at IS NULL OR reservation.ends_at IS NULL OR "
+            "(reservation.starts_at < ? AND reservation.ends_at > ?)) "
             "AND NOT EXISTS (SELECT 1 FROM coordinated_reservation_leases AS coordinated "
             "WHERE coordinated.reservation_id = reservation.id)",
-            (bench_id,),
+            (reservation.bench_id, protected_end_value, starts_at.isoformat()),
+        ).fetchone()
+        is not None
+    )
+
+
+def _has_other_uncoordinated_current_reservation(
+    connection: sqlite3.Connection,
+    reservation: Reservation,
+    now: datetime,
+) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM reservations AS other WHERE other.bench_id = ? AND other.id != ? "
+            "AND other.status IN ('active', 'expired_pending_operation') "
+            "AND (other.ends_at IS NULL OR other.ends_at > ?) "
+            "AND NOT EXISTS (SELECT 1 FROM coordinated_reservation_leases AS coordinated "
+            "WHERE coordinated.reservation_id = other.id)",
+            (reservation.bench_id, str(reservation.id), now.isoformat()),
         ).fetchone()
         is not None
     )
@@ -768,6 +897,29 @@ def _lease_from_row(row: sqlite3.Row) -> ReservationLease:
         valid_until=datetime.fromisoformat(row["valid_until"]),
         lease_version=int(row["lease_version"]),
         released_at=_parse_datetime(row["released_at"]),
+    )
+
+
+def _reservation_from_row(row: sqlite3.Row) -> Reservation:
+    return Reservation(
+        id=UUID(row["id"]),
+        organisation_id=UUID(row["organisation_id"]),
+        bench_id=row["bench_id"],
+        owner=row["owner"],
+        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
+        owner_principal_type=row["owner_principal_type"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        released_at=_parse_datetime(row["released_at"]),
+        status=ReservationStatus(row["status"]),
+        requested_at=_parse_datetime(row["requested_at"]),
+        starts_at=_parse_datetime(row["starts_at"]),
+        ends_at=_parse_datetime(row["ends_at"]),
+        activated_at=_parse_datetime(row["activated_at"]),
+        expired_at=_parse_datetime(row["expired_at"]),
+        source=ReservationSource(row["source"]),
+        metadata=json.loads(row["metadata"]),
+        idempotency_key=row["idempotency_key"],
+        release_pending=bool(row["release_pending"]),
     )
 
 

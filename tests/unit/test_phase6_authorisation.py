@@ -106,12 +106,15 @@ class MemoryPolicyRepository:
     ) -> None:
         self.bench = bench
         self.workflow = workflow
+        self.bench_calls = 0
+        self.workflow_calls = 0
 
     async def get_bench_access_policy(
         self,
         organisation_id: UUID,
         bench_id: str,
     ) -> BenchAccessPolicy | None:
+        self.bench_calls += 1
         if organisation_id != ORGANISATION_ID:
             return None
         return self.bench if self.bench is not None and self.bench.bench_id == bench_id else None
@@ -121,6 +124,7 @@ class MemoryPolicyRepository:
         organisation_id: UUID,
         workflow_id: str,
     ) -> WorkflowAccessPolicy | None:
+        self.workflow_calls += 1
         if organisation_id != ORGANISATION_ID:
             return None
         return (
@@ -465,6 +469,52 @@ def test_cross_organisation_access_is_denied_before_repository_queries() -> None
         assert repository.membership_calls == 0
         assert repository.team_calls == 0
         assert repository.assignment_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_request_scope_reuses_principal_and_policy_reads_across_large_permission_matrix() -> None:
+    async def scenario() -> None:
+        repository = MemoryAuthorisationRepository(membership=_membership(OrganisationRole.OWNER))
+        policies = MemoryPolicyRepository()
+        service = AuthorisationService(
+            repository,
+            policy_repository=policies,
+            clock=lambda: NOW,
+        )
+        permissions = (
+            "benches:read",
+            "benches:reserve",
+            "benches:operate",
+            "benches:flash",
+            "benches:reset",
+            "benches:serial",
+            "benches:manage",
+        )
+
+        with service.request_scope():
+            for index in range(1_000):
+                resource = _resource(resource_id=f"home-lab/bench-{index:04d}")
+                for permission in permissions:
+                    assert (await service.evaluate(_principal(), permission, resource)).allowed
+                # An identical visibility check is served by the decision cache.
+                assert (await service.evaluate(_principal(), "benches:read", resource)).allowed
+
+        assert repository.membership_calls == 1
+        assert repository.team_calls == 1
+        assert repository.assignment_calls == 1
+        assert policies.bench_calls == 1_000
+
+        # No authorization data survives the explicit request boundary.
+        assert (
+            await service.evaluate(
+                _principal(),
+                "benches:read",
+                _resource(resource_id="home-lab/bench-0000"),
+            )
+        ).allowed
+        assert repository.membership_calls == 2
+        assert policies.bench_calls == 1_001
 
     asyncio.run(scenario())
 

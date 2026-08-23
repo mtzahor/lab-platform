@@ -867,7 +867,14 @@ def _workflow_command(descriptor: Any, definition: WorkflowDefinition) -> Remote
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("status", [WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED])
+@pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowRunStatus.SUCCEEDED,
+        WorkflowRunStatus.FAILED,
+        WorkflowRunStatus.CANCELLED,
+    ],
+)
 async def test_remote_workflow_execution_reports_steps_artifacts_and_failures(
     tmp_path: Path,
     status: WorkflowRunStatus,
@@ -912,6 +919,7 @@ async def test_remote_workflow_execution_reports_steps_artifacts_and_failures(
         events=cast(Any, events),
     )
     progress_log: list[tuple[int | None, str | None]] = []
+    progress_results: list[Mapping[str, Any]] = []
 
     async def report_progress(
         *,
@@ -919,12 +927,16 @@ async def test_remote_workflow_execution_reports_steps_artifacts_and_failures(
         message: str | None = None,
         result: Mapping[str, Any] | None = None,
     ) -> None:
-        del result
         progress_log.append((progress, message))
+        if result is not None:
+            progress_results.append(result)
 
     command = _workflow_command(descriptor, definition)
-    if status is WorkflowRunStatus.FAILED:
-        with pytest.raises(RemoteCommandRejectedError, match="injected failure"):
+    if status is not WorkflowRunStatus.SUCCEEDED:
+        expected_message = (
+            "injected failure" if status is WorkflowRunStatus.FAILED else "Remote workflow failed"
+        )
+        with pytest.raises(RemoteCommandRejectedError, match=expected_message):
             await executor._run_workflow(command, report_progress=report_progress)
     else:
         result = await executor._run_workflow(command, report_progress=report_progress)
@@ -932,3 +944,67 @@ async def test_remote_workflow_execution_reports_steps_artifacts_and_failures(
     assert artifacts.released == [descriptor.sha256]
     assert events.items[0][0] == MessageType.ARTIFACT_CREATED.value
     assert any(value == 99 for value, _message in progress_log)
+    assert progress_results[-1]["workflow_run"]["status"] == status
+    assert progress_results[-1]["steps"][0]["step_index"] == 0
+
+
+@pytest.mark.anyio
+async def test_remote_workflow_task_cancellation_preserves_latest_snapshot(
+    tmp_path: Path,
+) -> None:
+    content = b"workflow-input"
+    path = tmp_path / "cancelled-task.bin"
+    path.write_bytes(content)
+    descriptor = _descriptor(content)
+    definition = WorkflowDefinition.model_validate(
+        {
+            "name": "coverage-workflow",
+            "version": 1,
+            "requirements": {"capabilities": []},
+            "steps": [{"action": "wait", "seconds": 30}],
+        }
+    )
+    service = _WorkflowService(WorkflowRunStatus.SUCCEEDED, descriptor.artifact_id)
+    wait_started = asyncio.Event()
+
+    async def wait_forever(_run_id: UUID) -> WorkflowRun:
+        wait_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    service.wait = wait_forever  # type: ignore[method-assign]
+    artifacts = _WorkflowArtifacts(path)
+    executor = distributed.LocalAgentCommandExecutor(
+        cast(Any, SimpleNamespace(artifact_service=SimpleNamespace())),
+        locks=cast(Any, SimpleNamespace()),
+        workflows=cast(Any, service),
+        workflow_runner=cast(Any, SimpleNamespace()),
+        artifacts=cast(Any, artifacts),
+        events=cast(Any, _WorkflowEvents()),
+    )
+    progress_results: list[Mapping[str, Any]] = []
+
+    async def report_progress(
+        *,
+        progress: int | None = None,
+        message: str | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
+        del progress, message
+        if result is not None:
+            progress_results.append(result)
+
+    task = asyncio.create_task(
+        executor._run_workflow(
+            _workflow_command(descriptor, definition),
+            report_progress=report_progress,
+        )
+    )
+    await wait_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert artifacts.released == [descriptor.sha256]
+    assert progress_results[-1]["workflow_run"]["status"] == WorkflowRunStatus.RUNNING
+    assert progress_results[-1]["steps"][0]["step_index"] == 0

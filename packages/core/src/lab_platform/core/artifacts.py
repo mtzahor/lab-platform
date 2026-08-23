@@ -58,6 +58,15 @@ class ArtifactRetentionRepository(Protocol):
     ) -> bool: ...
 
 
+class ArtifactListingRepository(Protocol):
+    async def list_all(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[ArtifactRecord]: ...
+
+
 class ArtifactEventRepository(Protocol):
     async def create(self, event: EventRecord) -> EventRecord: ...
 
@@ -272,6 +281,17 @@ class ArtifactService:
             owner_id,
             organisation_id=organisation_id,
         )
+
+    async def list_all(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[ArtifactRecord]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        repository = cast(ArtifactListingRepository, self._repository)
+        return await repository.list_all(organisation_id=organisation_id, limit=limit)
 
     async def content_path(
         self,

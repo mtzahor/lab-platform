@@ -17,7 +17,10 @@ from lab_platform.control_plane_core.reservations import (
     ReservationGrantRequest,
     ReservationLeaseState,
 )
-from lab_platform.core.errors import ArtifactNotFoundError, AuthenticationRequiredError
+from lab_platform.core.errors import (
+    ArtifactNotFoundError,
+    AuthenticationRequiredError,
+)
 from lab_platform.models import (
     AgentStatus,
     ApiTokenScope,
@@ -58,6 +61,7 @@ def _runtime(
     *,
     auto_login_user: str | None = None,
     hide_unauthorised_resources: bool = True,
+    maximum_firmware_size_mb: int = 100,
 ) -> ControlPlaneRuntime:
     return ControlPlaneRuntime(
         ControlPlaneConfig.model_validate(
@@ -70,6 +74,7 @@ def _runtime(
                 "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
                 "distributed": {"queue_commands_for_offline_agents": True},
                 "artifacts": {"directory": tmp_path / "artifacts"},
+                "web": {"uploads": {"maximum_firmware_size_mb": maximum_firmware_size_mb}},
                 "authorisation": {
                     "hide_unauthorised_resources": hide_unauthorised_resources,
                 },
@@ -756,10 +761,91 @@ def test_missing_development_user_does_not_block_loopback_legacy_bootstrap(
         assert client.get("/api/v1/agents").status_code == 401
 
 
+def test_artifact_transfer_issuance_requires_read_permission(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    with TestClient(create_app(runtime)) as client:
+        assert client.portal is not None
+        owner = client.portal.call(
+            _create_user,
+            runtime,
+            "artifact-transfer-owner",
+            OrganisationRole.OWNER,
+        )
+        bench, _other_bench = client.portal.call(_stage_benches, runtime)
+        owner_headers = _login(client, owner.username)
+        probe = client.post(
+            f"/api/v1/benches/{bench.id}/actions/probe",
+            headers=owner_headers,
+            json={},
+        )
+        assert probe.status_code == 202, probe.text
+
+        content = b"read-gated-transfer"
+        upload = client.post(
+            "/api/v1/artifacts",
+            headers=owner_headers,
+            data={
+                "owner_type": ArtifactOwnerType.OPERATION.value,
+                "owner_id": probe.json()["operation_id"],
+                "artifact_type": "test-results",
+                "expected_sha256": hashlib.sha256(content).hexdigest(),
+            },
+            files={"file": ("transfer.bin", content, "application/octet-stream")},
+        )
+        assert upload.status_code == 201, upload.text
+        artifact_id = UUID(upload.json()["id"])
+
+        session_token = owner_headers["Authorization"].removeprefix("Bearer ")
+        context = client.portal.call(runtime.identity.authenticate_session, session_token)
+        write_only_context = context.model_copy(
+            update={"permission_restrictions": {"artifacts:write"}}
+        )
+
+        async def issue_with_write_only_credential() -> None:
+            await runtime.artifact_access.issue_download(
+                artifact_id,
+                agent_id=bench.agent_id,
+                authentication_context=write_only_context,
+            )
+
+        transfer_issuer = AsyncMock()
+        with (
+            patch.object(runtime.artifacts, "issue_download", new=transfer_issuer),
+            pytest.raises(ArtifactNotFoundError),
+        ):
+            client.portal.call(issue_with_write_only_credential)
+        transfer_issuer.assert_not_awaited()
+
+        legacy_write_token = client.portal.call(
+            _issue_legacy_token,
+            runtime,
+            ApiTokenScope.ARTIFACTS_WRITE,
+        )
+        denied = client.post(
+            f"/api/v1/artifacts/{artifact_id}/transfers",
+            headers={"Authorization": f"Bearer {legacy_write_token}"},
+            json={"agent_id": str(bench.agent_id)},
+        )
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["error"]["details"]["missing_scopes"] == ["artifacts:read"]
+
+        legacy_read_token = client.portal.call(
+            _issue_legacy_token,
+            runtime,
+            ApiTokenScope.ARTIFACTS_READ,
+        )
+        issued = client.post(
+            f"/api/v1/artifacts/{artifact_id}/transfers",
+            headers={"Authorization": f"Bearer {legacy_read_token}"},
+            json={"agent_id": str(bench.agent_id)},
+        )
+        assert issued.status_code == 201, issued.text
+
+
 def test_artifacts_inherit_trusted_parents_with_same_org_disjoint_assignments(
     tmp_path: Path,
 ) -> None:
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, maximum_firmware_size_mb=2)
     with TestClient(create_app(runtime)) as client:
         assert client.portal is not None
         alpha = client.portal.call(_create_user, runtime, "artifact-alpha")
@@ -853,6 +939,19 @@ def test_artifacts_inherit_trusted_parents_with_same_org_disjoint_assignments(
         assert {UUID(item["id"]) for item in alpha_remote_list.json()["items"]} == {alpha_remote.id}
         assert {UUID(item["id"]) for item in beta_remote_list.json()["items"]} == {beta_remote.id}
 
+        alpha_all = client.get("/api/v1/artifacts", headers=alpha_headers)
+        beta_all = client.get("/api/v1/artifacts", headers=beta_headers)
+        assert alpha_all.status_code == 200, alpha_all.text
+        assert beta_all.status_code == 200, beta_all.text
+        assert {UUID(item["id"]) for item in alpha_all.json()["items"]} == {
+            alpha_artifact.id,
+            alpha_remote.id,
+        }
+        assert {UUID(item["id"]) for item in beta_all.json()["items"]} == {
+            beta_artifact.id,
+            beta_remote.id,
+        }
+
         denied_owner_list = client.get(
             "/api/v1/artifacts",
             headers=alpha_headers,
@@ -937,7 +1036,9 @@ def test_artifacts_inherit_trusted_parents_with_same_org_disjoint_assignments(
             bench_alpha.id,
             "artifact-parent-reservation",
         )
-        flash_content = b"identity-authorised-firmware"
+        # Firmware uploads use the dashboard's dedicated limit rather than the
+        # control plane's 1 MiB default request-body ceiling.
+        flash_content = b"f" * (1024 * 1024 + 1)
         flash = client.post(
             f"/api/v1/benches/{bench_alpha.id}/actions/flash",
             headers={**alpha_headers, "Idempotency-Key": "artifact-parent-flash"},
@@ -969,6 +1070,24 @@ def test_artifacts_inherit_trusted_parents_with_same_org_disjoint_assignments(
         )
         assert flash_download.status_code == 200, flash_download.text
         assert flash_download.content == flash_content
+        oversized_flash = client.post(
+            f"/api/v1/benches/{bench_alpha.id}/actions/flash",
+            headers={**alpha_headers, "Idempotency-Key": "artifact-parent-flash-oversized"},
+            files={
+                "firmware": (
+                    "oversized.bin",
+                    b"f" * (2 * 1024 * 1024 + 1),
+                    "application/octet-stream",
+                )
+            },
+        )
+        assert oversized_flash.status_code == 413, oversized_flash.text
+        assert oversized_flash.json()["error"] == {
+            "code": "ARTIFACT_TOO_LARGE",
+            "message": "Firmware exceeds the configured upload limit.",
+            "details": {"maximum_size_bytes": 2 * 1024 * 1024},
+            "request_id": oversized_flash.headers["X-Request-ID"],
+        }
         assert (
             client.delete(
                 f"/api/v1/artifacts/{flash_artifact_id}", headers=beta_headers

@@ -145,6 +145,128 @@ def test_oidc_authorization_code_pkce_login_and_state_replay(tmp_path: Path) -> 
         assert provider.exchange_count == 1
 
 
+def test_oidc_browser_intent_redirects_safely_while_legacy_callback_stays_json(
+    tmp_path: Path,
+) -> None:
+    provider = FakeOidcProvider()
+    runtime = _runtime(tmp_path, provider=provider)
+    with TestClient(create_app(runtime), follow_redirects=False) as client:
+        assert client.portal is not None
+        client.portal.call(_seed_oidc_user, runtime, UserStatus.ACTIVE)
+
+        started = client.get(
+            "/api/v1/auth/oidc/login",
+            params={"browser": "true", "return_to": "/operations/current?tab=logs"},
+        )
+        query = parse_qs(urlsplit(started.headers["location"]).query)
+        provider.nonce = query["nonce"][0]
+        browser_cookie = next(
+            cookie for cookie in client.cookies.jar if cookie.name == "lab_oidc_browser"
+        )
+        assert isinstance(browser_cookie.value, str)
+        cookie_payload = json.loads(
+            base64.urlsafe_b64decode(
+                browser_cookie.value + ("=" * (-len(browser_cookie.value) % 4))
+            )
+        )
+        cookie_payload["return_to"] = "/cookie-controlled"
+        client.cookies.set(
+            "lab_oidc_browser",
+            base64.urlsafe_b64encode(json.dumps(cookie_payload, separators=(",", ":")).encode())
+            .rstrip(b"=")
+            .decode(),
+            domain=browser_cookie.domain,
+            path=browser_cookie.path,
+        )
+        completed = client.get(
+            "/api/v1/auth/oidc/callback",
+            params={"state": query["state"][0], "code": "browser-code"},
+        )
+        assert completed.status_code == 303
+        assert completed.headers["location"] == "/operations/current?tab=logs"
+        assert completed.text == ""
+        assert client.cookies.get("lab_session") is not None
+        assert client.cookies.get("lab_oidc_browser") is None
+
+        legacy_start = client.get("/api/v1/auth/oidc/login")
+        legacy_query = parse_qs(urlsplit(legacy_start.headers["location"]).query)
+        provider.nonce = legacy_query["nonce"][0]
+        legacy_callback = client.get(
+            "/api/v1/auth/oidc/callback",
+            params={"state": legacy_query["state"][0], "code": "legacy-code"},
+        )
+        assert legacy_callback.status_code == 200
+        assert str(legacy_callback.json()["access_token"]).startswith("lps_")
+
+
+def test_oidc_browser_callback_fails_closed_when_initiation_cookie_is_missing(
+    tmp_path: Path,
+) -> None:
+    provider = FakeOidcProvider()
+    runtime = _runtime(tmp_path, provider=provider)
+    with TestClient(create_app(runtime), follow_redirects=False) as client:
+        assert client.portal is not None
+        client.portal.call(_seed_oidc_user, runtime, UserStatus.ACTIVE)
+        started = client.get(
+            "/api/v1/auth/oidc/login",
+            params={"browser": "true", "return_to": "/benches"},
+        )
+        query = parse_qs(urlsplit(started.headers["location"]).query)
+        provider.nonce = query["nonce"][0]
+        client.cookies.delete("lab_oidc_browser")
+
+        completed = client.get(
+            "/api/v1/auth/oidc/callback",
+            params={"state": query["state"][0], "code": "browser-code"},
+        )
+        assert completed.status_code == 401
+        assert completed.json()["error"]["code"] == "OIDC_LOGIN_FAILED"
+        assert "access_token" not in completed.text
+        assert "lps_" not in completed.text
+        assert client.cookies.get("lab_session") is None
+        assert provider.exchange_count == 0
+
+
+def test_oidc_overlapping_browser_logins_never_downgrade_the_older_callback(
+    tmp_path: Path,
+) -> None:
+    provider = FakeOidcProvider()
+    runtime = _runtime(tmp_path, provider=provider)
+    with TestClient(create_app(runtime), follow_redirects=False) as client:
+        assert client.portal is not None
+        client.portal.call(_seed_oidc_user, runtime, UserStatus.ACTIVE)
+        first = client.get(
+            "/api/v1/auth/oidc/login",
+            params={"browser": "true", "return_to": "/operations/first"},
+        )
+        first_query = parse_qs(urlsplit(first.headers["location"]).query)
+        second = client.get(
+            "/api/v1/auth/oidc/login",
+            params={"browser": "true", "return_to": "/operations/second"},
+        )
+        second_query = parse_qs(urlsplit(second.headers["location"]).query)
+
+        provider.nonce = first_query["nonce"][0]
+        displaced = client.get(
+            "/api/v1/auth/oidc/callback",
+            params={"state": first_query["state"][0], "code": "first-code"},
+        )
+        assert displaced.status_code == 401
+        assert "access_token" not in displaced.text
+        assert "lps_" not in displaced.text
+        assert provider.exchange_count == 0
+
+        provider.nonce = second_query["nonce"][0]
+        completed = client.get(
+            "/api/v1/auth/oidc/callback",
+            params={"state": second_query["state"][0], "code": "second-code"},
+        )
+        assert completed.status_code == 303
+        assert completed.headers["location"] == "/operations/second"
+        assert client.cookies.get("lab_session") is not None
+        assert provider.exchange_count == 1
+
+
 def test_oidc_state_keeps_same_username_mapped_to_selected_tenant(tmp_path: Path) -> None:
     provider = FakeOidcProvider()
     runtime = _runtime(tmp_path, provider=provider)

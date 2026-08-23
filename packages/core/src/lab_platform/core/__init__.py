@@ -80,6 +80,7 @@ from lab_platform.core.identity_admin import (
 from lab_platform.core.oidc import (
     OidcAuthenticationService,
     OidcIdentityRepository,
+    OidcLoginCompletion,
     OidcLoginStart,
     OidcProvider,
     OidcProviderMetadata,
@@ -166,6 +167,7 @@ __all__ = [
     "IdentityAdministrationService",
     "OidcAuthenticationService",
     "OidcIdentityRepository",
+    "OidcLoginCompletion",
     "OidcLoginStart",
     "OidcProvider",
     "OidcProviderMetadata",

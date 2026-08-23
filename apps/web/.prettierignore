@@ -1,0 +1,6 @@
+node_modules
+coverage
+test-results
+playwright-report
+src/api/schema.ts
+../control_plane/src/lab_platform/control_plane/web_dist

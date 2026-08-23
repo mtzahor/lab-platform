@@ -106,6 +106,43 @@ def _run_concurrently(count: int, operation: Callable[[int], _T]) -> list[_T]:
         return list(executor.map(operation, range(count)))
 
 
+def test_concurrent_overlapping_schedules_have_one_atomic_winner(tmp_path: Path) -> None:
+    worker_count = 16
+    databases = _open_databases(tmp_path / "scheduled-race.db", worker_count)
+    repositories = [SQLiteTimedReservationRepository(database) for database in databases]
+    barrier = Barrier(worker_count)
+
+    def create(index: int) -> Reservation | Exception:
+        barrier.wait(timeout=5)
+        try:
+            return asyncio.run(
+                repositories[index].create(
+                    Reservation(
+                        id=UUID(int=10_000 + index),
+                        bench_id="scheduled-race",
+                        owner=f"owner-{index}",
+                        created_at=NOW,
+                        requested_at=NOW,
+                        starts_at=NOW + timedelta(hours=1),
+                        ends_at=NOW + timedelta(hours=2),
+                        status=ReservationStatus.SCHEDULED,
+                    )
+                )
+            )
+        except Exception as exc:
+            return exc
+
+    try:
+        results = _run_concurrently(worker_count, create)
+        assert sum(isinstance(item, Reservation) for item in results) == 1
+        rejected = [item for item in results if isinstance(item, Exception)]
+        assert len(rejected) == worker_count - 1
+        assert all(isinstance(item, ReservationTimeConflictError) for item in rejected)
+    finally:
+        for database in databases:
+            database.close()
+
+
 class BarrierQueueRepository(SQLiteQueueRepository):
     """Align independent schedulers immediately before the transactional CAS."""
 

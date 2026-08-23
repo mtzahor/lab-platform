@@ -87,7 +87,31 @@ class IdentityAuthenticationRepository(Protocol):
 
     async def get_session(self, session_id: UUID) -> UserSession | None: ...
 
-    async def update_session(self, session: UserSession) -> UserSession: ...
+    async def touch_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_secret_hash: str,
+        last_seen_at: datetime,
+    ) -> bool: ...
+
+    async def rotate_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_secret_hash: str,
+        secret_hash: str,
+        expires_at: datetime,
+        last_seen_at: datetime,
+    ) -> UserSession | None: ...
+
+    async def revoke_session(
+        self,
+        session_id: UUID,
+        *,
+        revoked_at: datetime,
+        expected_secret_hash: str | None = None,
+    ) -> UserSession | None: ...
 
     async def list_sessions(
         self,
@@ -455,8 +479,9 @@ class IdentityAuthenticationService:
 
     async def authenticate_session(self, token: str | None) -> AuthenticationContext:
         session_id, secret = _parse_token(token, _SESSION_PREFIX)
+        secret_hash = _hash_secret(secret)
         session = await self._repository.get_session(session_id)
-        if session is None or not hmac.compare_digest(session.secret_hash, _hash_secret(secret)):
+        if session is None or not hmac.compare_digest(session.secret_hash, secret_hash):
             raise AuthenticationFailedError("The session token is invalid.")
         now = self._clock()
         if session.revoked_at is not None:
@@ -465,13 +490,18 @@ class IdentityAuthenticationService:
             raise SessionExpiredError("The session access token has expired.")
         principal, _organisation = await self._session_principal(session)
         if now > session.last_seen_at:
-            await self._repository.update_session(session.model_copy(update={"last_seen_at": now}))
+            await self._repository.touch_session(
+                session.id,
+                expected_secret_hash=secret_hash,
+                last_seen_at=now,
+            )
         return AuthenticationContext(principal=principal, session_id=session.id)
 
     async def refresh_session(self, token: str | None) -> IssuedSession:
         session_id, secret = _parse_token(token, _SESSION_PREFIX)
+        secret_hash = _hash_secret(secret)
         session = await self._repository.get_session(session_id)
-        if session is None or not hmac.compare_digest(session.secret_hash, _hash_secret(secret)):
+        if session is None or not hmac.compare_digest(session.secret_hash, secret_hash):
             raise AuthenticationFailedError("The session token is invalid.")
         now = self._clock()
         if session.revoked_at is not None:
@@ -480,14 +510,18 @@ class IdentityAuthenticationService:
             raise SessionExpiredError("The session has expired.")
         principal, organisation = await self._session_principal(session)
         new_secret = _encode_bytes(self._secret_factory(_SECRET_BYTES))
-        refreshed = session.model_copy(
-            update={
-                "secret_hash": _hash_secret(new_secret),
-                "expires_at": min(now + self._access_lifetime, session.maximum_expires_at),
-                "last_seen_at": now,
-            }
+        updated = await self._repository.rotate_session(
+            session.id,
+            expected_secret_hash=secret_hash,
+            secret_hash=_hash_secret(new_secret),
+            expires_at=min(now + self._access_lifetime, session.maximum_expires_at),
+            last_seen_at=now,
         )
-        updated = await self._repository.update_session(refreshed)
+        if updated is None:
+            current = await self._repository.get_session(session.id)
+            if current is not None and current.revoked_at is not None:
+                raise SessionRevokedError("The session has been revoked.")
+            raise AuthenticationFailedError("The session token is invalid.")
         return IssuedSession(
             session=updated,
             access_token=_format_token(_SESSION_PREFIX, updated.id, new_secret),
@@ -504,14 +538,19 @@ class IdentityAuthenticationService:
         user_agent: str | None = None,
     ) -> UserSession:
         session_id, secret = _parse_token(token, _SESSION_PREFIX)
+        secret_hash = _hash_secret(secret)
         session = await self._repository.get_session(session_id)
-        if session is None or not hmac.compare_digest(session.secret_hash, _hash_secret(secret)):
+        if session is None or not hmac.compare_digest(session.secret_hash, secret_hash):
             raise AuthenticationFailedError("The session token is invalid.")
         principal, _organisation = await self._session_principal(session)
-        if session.revoked_at is None:
-            session = await self._repository.update_session(
-                session.model_copy(update={"revoked_at": self._clock()})
-            )
+        revoked = await self._repository.revoke_session(
+            session.id,
+            revoked_at=self._clock(),
+            expected_secret_hash=secret_hash,
+        )
+        if revoked is None:
+            raise AuthenticationFailedError("The session token is invalid.")
+        session = revoked
         await self._audit(
             organisation_id=session.organisation_id,
             action="USER_LOGOUT",
@@ -542,10 +581,13 @@ class IdentityAuthenticationService:
             )
         ):
             raise AuthenticationFailedError("The session does not exist.")
-        if session.revoked_at is None:
-            session = await self._repository.update_session(
-                session.model_copy(update={"revoked_at": self._clock()})
-            )
+        revoked = await self._repository.revoke_session(
+            session.id,
+            revoked_at=self._clock(),
+        )
+        if revoked is None:
+            raise AuthenticationFailedError("The session does not exist.")
+        session = revoked
         await self._audit(
             organisation_id=session.organisation_id,
             action="SESSION_REVOKED",

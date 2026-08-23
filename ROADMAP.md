@@ -126,18 +126,47 @@ Remaining before the Phase 6 cut line can be called complete:
   becomes a supported product operation.
 - Legacy-token conversion tooling and removal of its deployment-global compatibility trust
   boundary.
-- Broader public-API/OIDC rate limiting, trusted-proxy/client-address policy, cookie/browser auth if
-  introduced, and broader background/distributed hardening.
+- Broader public-API/OIDC rate limiting, trusted-proxy/client-address policy, and broader
+  background/distributed/browser hardening.
 
 See [Phase 6 status and limitations](docs/PHASE_6.md).
+
+## Phase 7 — web dashboard and operations UX (alpha cut line implemented)
+
+Implemented in the 0.8.0-alpha release:
+
+- React/TypeScript operations shell with responsive, accessible, permission-aware navigation and a
+  generated OpenAPI client.
+- Local and OIDC browser login using rotating `HttpOnly` session cookies, double-submit CSRF,
+  browser-safe auth discovery, safe return paths, and explicit bearer precedence for CLI/CI.
+- Aggregated overview, searchable/filterable benches, bench/Agent details and timelines,
+  immediate and scheduled reservations with owner-safe queues, workflow launch/history,
+  operation/CI inspection, bounded serial text, artifacts, audit, and identity/access
+  administration.
+- Generic presentation APIs for overview counts, action permissions, current reservations and
+  operations, workflow-run summaries, queue position, timelines, and cursor-based serial windows.
+- SSE snapshot/invalidation updates with reconnect behavior and bounded query polling fallback;
+  unknown and reconciling distributed states remain distinct and truthful.
+- Existing-reservation workflow launch with an explicit retain/release lifecycle choice.
+- Integrated static serving with fail-fast bundle validation, immutable fingerprinted assets,
+  restrictive security/cache headers, SPA exclusions, package data, and wheel inspection.
+- A same-origin separate-static layout through a reverse proxy; permissive cross-origin cookie
+  authentication is intentionally excluded.
+- Frontend format/lint/type/test/build/client-freshness/dependency checks alongside Python,
+  OpenAPI, real two-Agent SimLab browser integration, package, and fixture browser validation.
+- Operational, deployment, authentication, permission, live-update, troubleshooting,
+  accessibility, and complete SimLab browser-demo documentation.
+
+See [Phase 7 status](docs/PHASE_7.md) and the
+[browser demonstration](docs/PHASE_7_BROWSER_DEMO.md).
 
 ## Later phases
 
 Deferred work beyond the compact Phase 6 model includes SAML/SCIM/LDAP, external group-role
 mapping, custom policy languages, secret-vault integration, relays, hosted control plane, high
-availability, dashboards, arbitrary pipeline graphs, advanced analytics, billing, and production
-deployment hardening.
+availability, arbitrary pipeline graphs, advanced analytics, billing, and production deployment
+hardening.
 
-The `0.7.0-alpha` reference control plane supports PostgreSQL and development-mode per-Agent bearer
-credentials. mTLS, active-active/HA coordination, and broader production hardening remain later
-deployment work rather than hidden claims of Phase 6.
+The `0.8.0-alpha` reference control plane supports PostgreSQL, the integrated browser dashboard,
+and development-mode per-Agent bearer credentials. mTLS, active-active/HA coordination, and broader
+production hardening remain later deployment work rather than hidden claims of this alpha.

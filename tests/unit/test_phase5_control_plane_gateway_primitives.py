@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -36,7 +37,7 @@ from lab_platform.control_plane_core.errors import AgentAuthenticationFailedErro
 from lab_platform.control_plane_core.inventory import InventoryService
 from lab_platform.control_plane_core.presence import AgentPresenceService
 from lab_platform.core.errors import BenchNotFoundError
-from lab_platform.models import RemoteArtifactMetadata
+from lab_platform.models import AgentTimelineRecord, RemoteArtifactMetadata
 from starlette.websockets import WebSocketState
 
 NOW = datetime(2026, 7, 29, 12, tzinfo=UTC)
@@ -212,7 +213,7 @@ class RecordingPresence:
         self.heartbeats.append(kwargs)
 
     async def get_agent(self, agent_id: UUID) -> object:
-        return {"id": agent_id}
+        return SimpleNamespace(id=agent_id, slug="router-agent")
 
 
 class RecordingInventory:
@@ -230,6 +231,15 @@ class RecordingInventory:
 
     async def apply_bench_health_changed(self, *_args: object, **_kwargs: object) -> None:
         self.calls.append("health")
+
+
+class RecordingTimeline:
+    def __init__(self) -> None:
+        self.items: list[AgentTimelineRecord] = []
+
+    async def append(self, entry: AgentTimelineRecord) -> AgentTimelineRecord:
+        self.items.append(entry)
+        return entry
 
 
 class RecordingCommands:
@@ -336,6 +346,7 @@ def test_message_router_dispatches_inventory_commands_receipts_artifacts_and_rec
         commands = RecordingCommands()
         artifacts = RecordingArtifacts()
         handlers = RecordingOptionalHandlers()
+        timeline = RecordingTimeline()
         router = AgentMessageRouter(
             presence=cast(AgentPresenceService, presence),
             inventory=cast(InventoryService, inventory),
@@ -345,6 +356,7 @@ def test_message_router_dispatches_inventory_commands_receipts_artifacts_and_rec
             lease_receipts=cast(Any, handlers),
             reservation_disconnects=cast(Any, handlers),
             reconciliation=cast(Any, handlers),
+            timeline=cast(Any, timeline),
         )
         reservation_id = UUID(int=470)
         command_id = UUID(int=471)
@@ -486,6 +498,18 @@ def test_message_router_dispatches_inventory_commands_receipts_artifacts_and_rec
         assert handlers.reconciliations[0][0] == messages[-1].message_id
         assert len(presence.heartbeats) == len(messages)
         assert all(item["observed_clock_offset_seconds"] is None for item in presence.heartbeats)
+        assert [item.event_type for item in timeline.items] == [
+            "BENCH_ADDED",
+            "BENCH_REMOVED",
+            "BENCH_HEALTH_CHANGED",
+        ]
+        assert all(item.metadata["bench_id"] == "router-agent/bench-01" for item in timeline.items)
+        assert timeline.items[-1].metadata == {
+            "bench_id": "router-agent/bench-01",
+            "connectivity": "degraded",
+            "health": "warning",
+        }
+        assert timeline.items[-1].severity.value == "WARNING"
 
         disconnect_id = UUID(int=491)
         assert (

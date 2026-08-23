@@ -22,13 +22,20 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from lab_platform.control_plane.dashboard_api import (
+    create_dashboard_router,
+    enrich_benches,
+    reservation_action_permissions,
+)
 from lab_platform.control_plane.identity_admin_api import create_identity_admin_router
 from lab_platform.control_plane.identity_api import (
     authenticate_identity_token,
     create_identity_router,
+    extract_bearer_or_cookie_token,
     is_phase6_identity_token,
 )
 from lab_platform.control_plane.runtime import ControlPlaneRuntime
+from lab_platform.control_plane.web import create_web_router
 from lab_platform.control_plane_core.distributed_ci import (
     DistributedCiCreateRequest,
     DistributedCiStartRequest,
@@ -49,6 +56,7 @@ from lab_platform.control_plane_core.workflows import (
 from lab_platform.core import VERSION, build_test_results, render_junit_xml
 from lab_platform.core.errors import (
     ArtifactNotFoundError,
+    ArtifactTooLargeError,
     AuthenticationFailedError,
     AuthenticationRequiredError,
     BenchNotFoundError,
@@ -88,14 +96,16 @@ from lab_platform.models import (
     PrincipalType,
     RemoteCommand,
     RemoteCommandType,
+    Reservation,
     ReservationOwner,
+    ReservationStatus,
     ResourceType,
     SerialReadRequest,
     UserStatus,
     WorkflowDefinition,
     WorkflowStepResult,
 )
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from starlette.exceptions import HTTPException
 from starlette.types import Message
 
@@ -190,6 +200,8 @@ class ReservationCreateRequest(ApiModel):
     idempotency_key: str = Field(min_length=1, max_length=500)
     reservation_duration_seconds: int | None = Field(default=None, gt=0, le=86_400)
     lease_ttl_seconds: int | None = Field(default=None, gt=0, le=3_600)
+    starts_at: AwareDatetime | None = None
+    description: str | None = Field(default=None, min_length=1, max_length=2_000)
     metadata: dict[str, str] = Field(default_factory=dict, max_length=128)
 
 
@@ -202,12 +214,12 @@ class ReservationRenewRequest(ApiModel):
 
 class ReservationReleaseRequest(ApiModel):
     owner: str | None = Field(default=None, min_length=1, max_length=200)
-    expected_lease_version: int = Field(ge=1)
+    expected_lease_version: int | None = Field(default=None, ge=1)
     idempotency_key: str = Field(min_length=1, max_length=500)
 
 
 class ReservationRevokeRequest(ApiModel):
-    expected_lease_version: int = Field(ge=1)
+    expected_lease_version: int | None = Field(default=None, ge=1)
     idempotency_key: str = Field(min_length=1, max_length=500)
 
 
@@ -221,6 +233,8 @@ class WorkflowRunRequest(ApiModel):
     location: str | None = Field(default=None, min_length=1, max_length=200)
     bench_labels: dict[str, str] = Field(default_factory=dict, max_length=128)
     agent_labels: dict[str, str] = Field(default_factory=dict, max_length=128)
+    reservation_id: UUID | None = None
+    release_reservation_after: bool | None = None
     reservation_duration_seconds: int | None = Field(default=None, gt=0, le=86_400)
     lease_ttl_seconds: int | None = Field(default=None, gt=0, le=3_600)
     command_timeout_seconds: int = Field(default=3_600, gt=0, le=86_400)
@@ -282,6 +296,18 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             # the configured immutable artifact byte limit.
             maximum_bytes = runtime.config.artifacts.max_upload_size_mb * 1024 * 1024 + 1024 * 1024
         elif (
+            request.method == "POST"
+            and request.url.path.startswith("/api/v1/benches/")
+            and request.url.path.endswith("/actions/flash")
+        ):
+            # The firmware file limit is enforced again while streaming below.
+            # Keep a bounded allowance here for multipart framing and form fields.
+            firmware_limit_mb = min(
+                runtime.config.web.uploads.maximum_firmware_size_mb,
+                runtime.config.artifacts.max_upload_size_mb,
+            )
+            maximum_bytes = firmware_limit_mb * 1024 * 1024 + 1024 * 1024
+        elif (
             request.method == "PUT"
             and request.url.path.startswith("/api/v1/artifact-transfers/")
             and request.url.path.endswith("/content")
@@ -322,7 +348,8 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             return message
 
         request._receive = receive_with_limit
-        response = await call_next(request)
+        with runtime.authorisation.request_scope():
+            response = await call_next(request)
         if request_too_large:
             response = await _platform_error_handler(
                 request,
@@ -535,6 +562,18 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         phase6_permissions=(),
     )
 
+    # Dashboard aggregation and live-update routes are registered before the
+    # path-style bench detail route so `/benches/{id}/timeline` remains
+    # reachable for globally-qualified bench IDs containing a slash.
+    app.include_router(
+        create_dashboard_router(
+            runtime,
+            collection_auth=benches_read,
+            bench_auth=bench_read,
+            operation_auth=operation_read,
+        )
+    )
+
     @app.get("/api/v1/version")
     async def version() -> dict[str, str]:
         return {"version": VERSION, "protocol_version": "1.0"}
@@ -646,22 +685,78 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             allow_legacy_authorisation=isinstance(_token, ApiToken),
         )
         connection = await runtime.presence.active_connection(agent_id)
-        benches = [
-            bench.model_dump(mode="json")
-            for bench in await runtime.operational_access.list_visible_benches(
-                agent_id=agent_id,
-                authentication_context=(
-                    _token if isinstance(_token, AuthenticationContext) else None
-                ),
-                allow_legacy_authorisation=isinstance(_token, ApiToken),
-            )
+        visible_benches = await runtime.operational_access.list_visible_benches(
+            agent_id=agent_id,
+            authentication_context=(_token if isinstance(_token, AuthenticationContext) else None),
+            allow_legacy_authorisation=isinstance(_token, ApiToken),
+        )
+        benches = [bench.model_dump(mode="json") for bench in visible_benches]
+        operations: list[DistributedOperation] = []
+        if not isinstance(_token, ApiToken) or ApiTokenScope.OPERATIONS_READ in _token.scopes:
+            try:
+                operations = await runtime.operational_access.list_operations(
+                    agent_id=agent_id,
+                    limit=100,
+                    authentication_context=(
+                        _token if isinstance(_token, AuthenticationContext) else None
+                    ),
+                    allow_legacy_authorisation=isinstance(_token, ApiToken),
+                )
+            except PermissionDeniedError:
+                operations = []
+        reservations = await runtime.reservation_repository.list(
+            organisation_id=_actor_organisation_id(_token),
+            agent_id=agent_id,
+            limit=500,
+        )
+        visible_bench_ids = {bench.id for bench in visible_benches}
+        reservations = [
+            record for record in reservations if record.reservation.bench_id in visible_bench_ids
         ]
+        recent_errors = await runtime.timeline.list(
+            agent_id,
+            severity=AgentTimelineSeverity.ERROR,
+            limit=20,
+        )
+        active_operation_statuses = {
+            DistributedOperationStatus.CREATED,
+            DistributedOperationStatus.DISPATCHED,
+            DistributedOperationStatus.ACCEPTED,
+            DistributedOperationStatus.RUNNING,
+            DistributedOperationStatus.UNKNOWN,
+            DistributedOperationStatus.RECONCILING,
+        }
+        active_reservation_states = {
+            ReservationLeaseState.ACTIVATING,
+            ReservationLeaseState.ACTIVE,
+            ReservationLeaseState.RENEWING,
+            ReservationLeaseState.UNKNOWN,
+        }
         return {
             **agent.model_dump(mode="json"),
             "connection": (
                 connection.connection.model_dump(mode="json") if connection is not None else None
             ),
             "benches": benches,
+            "workload": {
+                "bench_count": len(benches),
+                "active_operations": sum(
+                    operation.status in active_operation_statuses for operation in operations
+                ),
+                "queued_operations": sum(
+                    operation.status is DistributedOperationStatus.CREATED
+                    for operation in operations
+                ),
+                "active_reservations": sum(
+                    record.state in active_reservation_states for record in reservations
+                ),
+            },
+            "active_operations": [
+                operation.model_dump(mode="json", exclude={"result"})
+                for operation in operations
+                if operation.status in active_operation_statuses
+            ],
+            "recent_errors": [entry.model_dump(mode="json") for entry in recent_errors],
         }
 
     @app.post("/api/v1/agents/enrollment-tokens", status_code=status.HTTP_201_CREATED)
@@ -909,7 +1004,8 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        return {"items": [bench.model_dump(mode="json") for bench in benches]}
+        items = await enrich_benches(runtime, token, benches)
+        return {"items": items, "total": len(items)}
 
     @app.post("/api/v1/benches/{bench_id:path}/actions/probe", status_code=202)
     async def probe_bench(
@@ -1102,8 +1198,24 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             )
             return _remote_operation_payload(existing, operation)
 
+        maximum_firmware_bytes = (
+            min(
+                runtime.config.web.uploads.maximum_firmware_size_mb,
+                runtime.config.artifacts.max_upload_size_mb,
+            )
+            * 1024
+            * 1024
+        )
+
         async def chunks() -> AsyncIterator[bytes]:
+            received_bytes = 0
             while chunk := await firmware.read(1024 * 1024):
+                received_bytes += len(chunk)
+                if received_bytes > maximum_firmware_bytes:
+                    raise ArtifactTooLargeError(
+                        "Firmware exceeds the configured upload limit.",
+                        maximum_size_bytes=maximum_firmware_bytes,
+                    )
                 yield chunk
 
         operation_id = uuid4()
@@ -1177,7 +1289,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        return bench.model_dump(mode="json")
+        return (await enrich_benches(runtime, token, [bench]))[0]
 
     @app.post("/api/v1/reservations", status_code=status.HTTP_201_CREATED)
     async def create_reservation(
@@ -1191,28 +1303,50 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         if bench is None:
             raise BenchNotFoundError("Bench does not exist.", bench_id=body.bench_id)
         owner, owner_principal = _reservation_identity(token, body.owner)
-        record = await runtime.reservations.grant(
-            agent_id=bench.agent_id,
-            bench_id=bench.id,
-            owner=owner,
-            owner_principal=owner_principal,
-            idempotency_key=body.idempotency_key,
-            reservation_duration_seconds=body.reservation_duration_seconds,
-            lease_ttl_seconds=body.lease_ttl_seconds,
-            metadata=body.metadata,
-            authentication_context=(token if isinstance(token, AuthenticationContext) else None),
-            allow_legacy_authorisation=isinstance(token, ApiToken),
-        )
-        _require_active_reservation(record)
+        metadata = dict(body.metadata)
+        if body.description is not None:
+            metadata["description"] = body.description
+        if body.starts_at is not None:
+            record: CoordinatedReservationLease | Reservation = await runtime.reservations.schedule(
+                agent_id=bench.agent_id,
+                bench_id=bench.id,
+                owner=owner,
+                owner_principal=owner_principal,
+                starts_at=body.starts_at,
+                idempotency_key=body.idempotency_key,
+                reservation_duration_seconds=body.reservation_duration_seconds,
+                lease_ttl_seconds=body.lease_ttl_seconds,
+                metadata=metadata,
+                authentication_context=(
+                    token if isinstance(token, AuthenticationContext) else None
+                ),
+                allow_legacy_authorisation=isinstance(token, ApiToken),
+            )
+        else:
+            record = await runtime.reservations.grant(
+                agent_id=bench.agent_id,
+                bench_id=bench.id,
+                owner=owner,
+                owner_principal=owner_principal,
+                idempotency_key=body.idempotency_key,
+                reservation_duration_seconds=body.reservation_duration_seconds,
+                lease_ttl_seconds=body.lease_ttl_seconds,
+                metadata=metadata,
+                authentication_context=(
+                    token if isinstance(token, AuthenticationContext) else None
+                ),
+                allow_legacy_authorisation=isinstance(token, ApiToken),
+            )
+            _require_active_reservation(record)
         await _audit_protected_success(
             runtime,
             token,
             "BENCH_RESERVED",
             resource_type="BENCH",
             resource_id=bench.id,
-            metadata={"reservation_id": str(record.reservation.id)},
+            metadata={"reservation_id": str(_reservation_value(record).id)},
         )
-        return _coordinated_reservation_payload(record)
+        return await _reservation_presentation_payload(runtime, token, record)
 
     @app.get("/api/v1/reservations")
     async def list_reservations(
@@ -1232,10 +1366,35 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             states=lease_state,
             limit=limit,
         )
+        scheduled = (
+            await runtime.reservations.list_scheduled(
+                organisation_id=_actor_organisation_id(token),
+                bench_id=bench_id,
+                owner=owner,
+                limit=limit,
+            )
+            if lease_state is None
+            else []
+        )
+        scheduled_agent_ids: dict[UUID, UUID] = {}
+        visible_scheduled: list[Reservation] = []
+        for reservation in scheduled:
+            scheduled_bench = await runtime.inventory_repository.get(
+                reservation.bench_id,
+                organisation_id=_actor_organisation_id(token),
+            )
+            if scheduled_bench is None or (
+                agent_id is not None and scheduled_bench.agent_id != agent_id
+            ):
+                continue
+            scheduled_agent_ids[reservation.id] = scheduled_bench.agent_id
+            visible_scheduled.append(reservation)
+        scheduled = visible_scheduled
         if bench_id is not None:
             records = [record for record in records if record.reservation.bench_id == bench_id]
         if owner is not None:
             records = [record for record in records if record.reservation.owner == owner]
+        combined: list[CoordinatedReservationLease | Reservation] = [*records, *scheduled]
         allowed = await _phase6_allowed_resources(
             runtime,
             token,
@@ -1243,15 +1402,36 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             [
                 AuthorisationResource(
                     type=ResourceType.BENCH,
-                    id=record.reservation.bench_id,
-                    organisation_id=record.reservation.organisation_id,
-                    parent_agent_id=record.lease.agent_id,
+                    id=_reservation_value(record).bench_id,
+                    organisation_id=_reservation_value(record).organisation_id,
+                    parent_agent_id=(
+                        record.lease.agent_id
+                        if isinstance(record, CoordinatedReservationLease)
+                        else scheduled_agent_ids[record.id]
+                    ),
                 )
-                for record in records
+                for record in combined
             ],
         )
-        records = [record for record, visible in zip(records, allowed, strict=True) if visible]
-        return {"items": [_coordinated_reservation_payload(record) for record in records]}
+        combined = [record for record, visible in zip(combined, allowed, strict=True) if visible]
+        combined.sort(
+            key=lambda item: (
+                _reservation_value(item).starts_at or _reservation_value(item).created_at
+            ),
+            reverse=True,
+        )
+        presented = await asyncio.gather(
+            *(
+                _reservation_presentation_payload(
+                    runtime,
+                    token,
+                    record,
+                    parent_agent_id=scheduled_agent_ids.get(_reservation_value(record).id),
+                )
+                for record in combined[:limit]
+            )
+        )
+        return {"items": list(presented)}
 
     @app.get("/api/v1/reservations/{reservation_id}")
     async def get_reservation(
@@ -1263,8 +1443,14 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             organisation_id=_actor_organisation_id(token),
         )
         if record is None:
-            raise ReservationNotFoundError("Reservation does not exist.")
-        return _coordinated_reservation_payload(record)
+            uncoordinated = await runtime.reservations.get_uncoordinated(
+                reservation_id,
+                organisation_id=_actor_organisation_id(token),
+            )
+            if uncoordinated is None:
+                raise ReservationNotFoundError("Reservation does not exist.")
+            return await _reservation_presentation_payload(runtime, token, uncoordinated)
+        return await _reservation_presentation_payload(runtime, token, record)
 
     @app.post("/api/v1/reservations/{reservation_id}/renew")
     async def renew_reservation(
@@ -1304,6 +1490,37 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         token: Annotated[AuthenticatedActor | None, Depends(reservation_write)],
     ) -> dict[str, object]:
         owner, owner_principal = _reservation_identity(token, body.owner)
+        scheduled = await runtime.reservations.get_uncoordinated(
+            reservation_id,
+            organisation_id=_actor_organisation_id(token),
+        )
+        if scheduled is not None and scheduled.status in {
+            ReservationStatus.SCHEDULED,
+            ReservationStatus.CANCELLED,
+        }:
+            cancelled = await runtime.reservations.cancel_scheduled(
+                reservation_id,
+                owner=owner,
+                owner_principal=owner_principal,
+                authentication_context=(
+                    token if isinstance(token, AuthenticationContext) else None
+                ),
+                allow_legacy_authorisation=isinstance(token, ApiToken),
+            )
+            await _audit_protected_success(
+                runtime,
+                token,
+                "BENCH_RELEASED",
+                resource_type="BENCH",
+                resource_id=cancelled.bench_id,
+                metadata={"reservation_id": str(cancelled.id), "scheduled": True},
+            )
+            return _reservation_payload(cancelled)
+        if body.expected_lease_version is None:
+            raise ReservationLeaseInvalidError(
+                "expected_lease_version is required after a reservation activates.",
+                reservation_id=str(reservation_id),
+            )
         record = await runtime.reservations.release(
             reservation_id,
             owner=owner,
@@ -1329,6 +1546,36 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         body: ReservationRevokeRequest,
         token: Annotated[AuthenticatedActor | None, Depends(reservation_manage)],
     ) -> dict[str, object]:
+        scheduled = await runtime.reservations.get_uncoordinated(
+            reservation_id,
+            organisation_id=_actor_organisation_id(token),
+        )
+        if scheduled is not None and scheduled.status in {
+            ReservationStatus.SCHEDULED,
+            ReservationStatus.CANCELLED,
+        }:
+            cancelled = await runtime.reservations.cancel_scheduled(
+                reservation_id,
+                administrator=True,
+                authentication_context=(
+                    token if isinstance(token, AuthenticationContext) else None
+                ),
+                allow_legacy_authorisation=isinstance(token, ApiToken),
+            )
+            await _audit_protected_success(
+                runtime,
+                token,
+                "BENCH_RESERVATION_REVOKED",
+                resource_type="BENCH",
+                resource_id=cancelled.bench_id,
+                metadata={"reservation_id": str(cancelled.id), "scheduled": True},
+            )
+            return _reservation_payload(cancelled)
+        if body.expected_lease_version is None:
+            raise ReservationLeaseInvalidError(
+                "expected_lease_version is required after a reservation activates.",
+                reservation_id=str(reservation_id),
+            )
         record = await runtime.reservations.revoke(
             reservation_id,
             expected_lease_version=body.expected_lease_version,
@@ -1388,6 +1635,14 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         body: WorkflowRunRequest,
         token: Annotated[AuthenticatedActor | None, Depends(workflow_run)],
     ) -> dict[str, object]:
+        if (
+            isinstance(token, ApiToken)
+            and body.release_reservation_after is True
+            and ApiTokenScope.RESERVATIONS_WRITE not in token.scopes
+        ):
+            raise PermissionDeniedError(
+                "Releasing an existing reservation requires reservations:write scope."
+            )
         definition = await runtime.workflow_repository.get_definition(
             workflow_name,
             body.version,
@@ -1418,6 +1673,8 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
                 location=body.location,
                 bench_labels=body.bench_labels,
                 agent_labels=body.agent_labels,
+                reservation_id=body.reservation_id,
+                release_reservation_after=body.release_reservation_after,
                 reservation_duration_seconds=body.reservation_duration_seconds,
                 lease_ttl_seconds=body.lease_ttl_seconds,
                 command_timeout_seconds=body.command_timeout_seconds,
@@ -1453,7 +1710,11 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        return _distributed_workflow_payload(operation)
+        command = await runtime.command_records.get(
+            operation.remote_command_id,
+            organisation_id=operation.organisation_id,
+        )
+        return _distributed_workflow_payload(operation, command)
 
     @app.post("/api/v1/workflow-runs/{operation_id:uuid}/cancel", status_code=202)
     async def cancel_distributed_workflow_run(
@@ -1811,7 +2072,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        items = [item.model_dump(mode="json") for item in collection.platform]
+        items = [item.model_dump(mode="json", exclude={"path"}) for item in collection.platform]
         items.extend(item.model_dump(mode="json") for item in collection.remote)
         items.sort(key=lambda item: str(item.get("created_at", "")))
         return {"items": items}
@@ -1834,7 +2095,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        return {"items": [item.model_dump(mode="json") for item in operations]}
+        return {"items": [item.model_dump(mode="json", exclude={"result"}) for item in operations]}
 
     @app.get("/api/v1/operations/{operation_id}")
     async def get_operation(
@@ -1945,7 +2206,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             resource_id=str(record.id),
             metadata={"owner_type": owner_type.value, "owner_id": str(owner_id)},
         )
-        return record.model_dump(mode="json")
+        return record.model_dump(mode="json", exclude={"path"})
 
     @app.get("/api/v1/artifacts")
     async def list_artifacts(
@@ -1970,7 +2231,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        items = [item.model_dump(mode="json") for item in collection.platform]
+        items = [item.model_dump(mode="json", exclude={"path"}) for item in collection.platform]
         items.extend(item.model_dump(mode="json") for item in collection.remote)
         items.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
         return {"items": items[:limit]}
@@ -2006,7 +2267,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
                 media_type=content.record.content_type,
                 filename=content.record.name,
             )
-        return record.model_dump(mode="json")
+        return record.model_dump(mode="json", exclude={"path"})
 
     @app.get("/api/v1/artifacts/{artifact_id}/content")
     async def download_artifact_content(
@@ -2035,7 +2296,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
     async def issue_artifact_download(
         artifact_id: UUID,
         body: ArtifactTransferRequest,
-        token: Annotated[AuthenticatedActor | None, Depends(artifacts_write)],
+        token: Annotated[AuthenticatedActor | None, Depends(artifacts_read)],
     ) -> dict[str, object]:
         issued = await runtime.artifact_access.issue_download(
             artifact_id,
@@ -2111,6 +2372,9 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         path = await runtime.artifacts.download_path(transfer_id, token)
         return FileResponse(path, filename=str(transfer_id))
 
+    # The SPA fallback must be the final router so it can never shadow API,
+    # documentation, metrics, health, or Agent gateway paths.
+    app.include_router(create_web_router(runtime.config.web))
     return app
 
 
@@ -2230,27 +2494,73 @@ def _distributed_workflow_status(operation: DistributedOperation) -> str:
         DistributedOperationStatus.ACCEPTED,
     }:
         return "pending"
-    if operation.status in {
-        DistributedOperationStatus.RUNNING,
-        DistributedOperationStatus.UNKNOWN,
-        DistributedOperationStatus.RECONCILING,
-    }:
+    if operation.status is DistributedOperationStatus.RUNNING:
         return "running"
+    if operation.status is DistributedOperationStatus.UNKNOWN:
+        return "unknown"
+    if operation.status is DistributedOperationStatus.RECONCILING:
+        return "reconciling"
     return operation.status.value.casefold()
 
 
-def _distributed_workflow_payload(operation: DistributedOperation) -> dict[str, object]:
+def _distributed_workflow_payload(
+    operation: DistributedOperation,
+    command: RemoteCommand | None = None,
+) -> dict[str, object]:
     raw_workflow = (operation.result or {}).get("workflow_run")
     workflow = dict(raw_workflow) if isinstance(raw_workflow, dict) else {}
+    raw_definition = command.payload.get("definition") if command is not None else None
+    definition = dict(raw_definition) if isinstance(raw_definition, dict) else {}
+    workflow.setdefault(
+        "workflow_name",
+        workflow.get("name") or definition.get("name") or operation.operation_type,
+    )
+    if "version" not in workflow and definition.get("version") is not None:
+        workflow["version"] = definition["version"]
+    if "steps" not in workflow and isinstance(definition.get("steps"), list):
+        workflow["steps"] = definition["steps"]
     local_workflow_run_id = workflow.get("id")
     workflow.update(
         {
             "id": str(operation.id),
             "local_workflow_run_id": local_workflow_run_id,
             "bench_id": operation.bench_id,
+            "agent_id": str(operation.agent_id),
+            "reservation_id": (
+                str(operation.reservation_id) if operation.reservation_id is not None else None
+            ),
             "status": _distributed_workflow_status(operation),
+            "operation_status": operation.status.value,
             "progress": operation.progress,
             "message": operation.message,
+            "created_at": operation.created_at.isoformat(),
+            "started_at": (
+                operation.started_at.isoformat() if operation.started_at is not None else None
+            ),
+            "completed_at": (
+                operation.completed_at.isoformat() if operation.completed_at is not None else None
+            ),
+            "last_agent_update_at": (
+                operation.last_agent_update_at.isoformat()
+                if operation.last_agent_update_at is not None
+                else None
+            ),
+            "connection_state": (
+                "RECONNECTING"
+                if operation.status
+                in {
+                    DistributedOperationStatus.UNKNOWN,
+                    DistributedOperationStatus.RECONCILING,
+                }
+                else "LIVE"
+                if operation.status
+                not in {
+                    DistributedOperationStatus.SUCCEEDED,
+                    DistributedOperationStatus.FAILED,
+                    DistributedOperationStatus.CANCELLED,
+                }
+                else "COMPLETE"
+            ),
             "error_code": operation.error_code,
             "error_message": operation.error_message,
         }
@@ -2504,9 +2814,10 @@ def _require_scopes(
         request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_BEARER)] = None,
     ) -> AuthenticatedActor | None:
+        credential = extract_bearer_or_cookie_token(request, credentials)
         context: AuthenticationContext | None = None
         if (
-            credentials is None
+            credential is None
             and allow_bootstrap
             and runtime.config.authorisation.legacy_token_compatibility_enabled
             and not await runtime.token_service.list()
@@ -2516,11 +2827,11 @@ def _require_scopes(
             # fresh database even when development auto-login names a user that has
             # not been created yet.
             return None
-        if credentials is None:
+        if credential is None:
             context = await _development_auto_login_context(runtime)
-        if credentials is None and context is None:
-            raise AuthenticationRequiredError("An Authorization bearer token is required.")
-        token = credentials.credentials if credentials is not None else None
+        if credential is None and context is None:
+            raise AuthenticationRequiredError("A bearer token or browser session is required.")
+        token = credential.token if credential is not None else None
         if (
             context is None
             and token is not None
@@ -2574,10 +2885,11 @@ def _require_reservation_creation(
         body: ReservationCreateRequest,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_BEARER)] = None,
     ) -> AuthenticatedActor:
-        context = await _development_auto_login_context(runtime) if credentials is None else None
-        if credentials is None and context is None:
-            raise AuthenticationRequiredError("An Authorization bearer token is required.")
-        token = credentials.credentials if credentials is not None else None
+        credential = extract_bearer_or_cookie_token(request, credentials)
+        context = await _development_auto_login_context(runtime) if credential is None else None
+        if credential is None and context is None:
+            raise AuthenticationRequiredError("A bearer token or browser session is required.")
+        token = credential.token if credential is not None else None
         if (
             context is None
             and token is not None
@@ -2809,7 +3121,24 @@ async def _phase6_authorisation_resource(
         organisation_id=organisation_id,
     )
     if reservation is None:
-        raise ReservationNotFoundError("Reservation does not exist.")
+        uncoordinated = await runtime.reservations.get_uncoordinated(
+            _path_uuid(request, "reservation_id"),
+            organisation_id=organisation_id,
+        )
+        if uncoordinated is None:
+            raise ReservationNotFoundError("Reservation does not exist.")
+        bench = await runtime.inventory_repository.get(
+            uncoordinated.bench_id,
+            organisation_id=organisation_id,
+        )
+        if bench is None:
+            raise ReservationNotFoundError("Reservation does not exist.")
+        return AuthorisationResource(
+            type=ResourceType.BENCH,
+            id=uncoordinated.bench_id,
+            organisation_id=organisation_id,
+            parent_agent_id=bench.agent_id,
+        )
     return AuthorisationResource(
         type=ResourceType.BENCH,
         id=reservation.reservation.bench_id,
@@ -3029,6 +3358,43 @@ def _coordinated_reservation_payload(
     }
 
 
+def _reservation_value(value: CoordinatedReservationLease | Reservation) -> Reservation:
+    return value.reservation if isinstance(value, CoordinatedReservationLease) else value
+
+
+async def _reservation_presentation_payload(
+    runtime: ControlPlaneRuntime,
+    actor: AuthenticatedActor | None,
+    value: CoordinatedReservationLease | Reservation,
+    *,
+    parent_agent_id: UUID | None = None,
+) -> dict[str, object]:
+    payload = _reservation_payload(value)
+    permissions = await reservation_action_permissions(
+        runtime,
+        actor,
+        value,
+        parent_agent_id=parent_agent_id,
+    )
+    payload["permissions"] = permissions.model_dump(mode="json")
+    return payload
+
+
+def _reservation_payload(
+    value: CoordinatedReservationLease | Reservation,
+) -> dict[str, object]:
+    if isinstance(value, CoordinatedReservationLease):
+        return _coordinated_reservation_payload(value)
+    return {
+        "reservation": value.model_dump(mode="json"),
+        "lease": None,
+        "state": value.status.value.upper(),
+        "revision": 0,
+        "unknown_since": None,
+        "reconciliation_deadline": None,
+    }
+
+
 def _require_active_reservation(value: CoordinatedReservationLease) -> None:
     if value.state is not ReservationLeaseState.ACTIVE:
         raise ReservationLeaseInvalidError(
@@ -3094,8 +3460,12 @@ _ERROR_STATUS = {
     "RESERVATION_LEASE_VERSION_MISMATCH": 409,
     "RESERVATION_NOT_FOUND": 404,
     "RESERVATION_NOT_ACTIVE": 409,
+    "RESERVATION_TIME_CONFLICT": 409,
     "RESERVATION_OWNER_MISMATCH": 403,
     "RESERVATION_MAX_DURATION_EXCEEDED": 400,
+    "QUEUE_ENTRY_NOT_FOUND": 404,
+    "QUEUE_OWNER_MISMATCH": 403,
+    "QUEUE_DISABLED": 409,
     "NO_COMPATIBLE_BENCH": 409,
     "WORKFLOW_NOT_FOUND": 404,
     "WORKFLOW_INVALID": 400,

@@ -53,6 +53,7 @@ async def _seed_terminal_workflow(
     number: int,
     lifecycle: str,
     command_terminal: bool,
+    release_after: bool | None = None,
 ) -> CoordinatedReservationLease:
     now = datetime.now(UTC)
     agent = AgentRecord(
@@ -181,7 +182,16 @@ async def _seed_terminal_workflow(
         agent_id=agent.id,
         bench_id=bench.id,
         command_type=RemoteCommandType.RUN_WORKFLOW,
-        payload={},
+        payload=(
+            {}
+            if release_after is None
+            else {
+                "reservation_lifecycle": {
+                    "management": "caller",
+                    "release_after": release_after,
+                }
+            }
+        ),
         status=command_status,
         created_at=now,
         dispatched_at=now + timedelta(seconds=1),
@@ -227,6 +237,20 @@ def test_runtime_monitor_releases_persisted_workflow_after_restart_only_when_man
             lifecycle="caller",
             command_terminal=True,
         )
+        caller_release_after = await _seed_terminal_workflow(
+            initial,
+            number=3,
+            lifecycle="caller",
+            command_terminal=False,
+            release_after=True,
+        )
+        caller_retain_override = await _seed_terminal_workflow(
+            initial,
+            number=4,
+            lifecycle="workflow",
+            command_terminal=True,
+            release_after=False,
+        )
         initial.database.close()
 
         restarted = ControlPlaneRuntime(config)
@@ -234,9 +258,13 @@ def test_runtime_monitor_releases_persisted_workflow_after_restart_only_when_man
         await restarted.monitor_once()
         released = await restarted.reservations.get(managed.reservation.id)
         retained = await restarted.reservations.get(caller_managed.reservation.id)
+        released_caller = await restarted.reservations.get(caller_release_after.reservation.id)
+        retained_override = await restarted.reservations.get(caller_retain_override.reservation.id)
         assert released.state is ReservationLeaseState.RELEASED
         assert released.lease.lease_version == managed.lease.lease_version
         assert retained.state is ReservationLeaseState.ACTIVE
+        assert released_caller.state is ReservationLeaseState.RELEASED
+        assert retained_override.state is ReservationLeaseState.ACTIVE
 
         await restarted.monitor_once()
         with restarted.database.transaction() as connection:
@@ -245,7 +273,7 @@ def test_runtime_monitor_releases_persisted_workflow_after_restart_only_when_man
                 "WHERE mutation_key LIKE 'workflow-terminal-release:%'"
             ).fetchone()
         assert cleanup_mutations is not None
-        assert cleanup_mutations["count"] == 1
+        assert cleanup_mutations["count"] == 2
         restarted.database.close()
 
     asyncio.run(scenario())

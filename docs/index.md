@@ -1,5 +1,17 @@
 # Lab Platform documentation
 
+## Phase 7 web dashboard
+
+- [Phase 7 status, architecture, security, and cut line](PHASE_7.md)
+- [Dashboard routes and screen diagrams](WEB_DASHBOARD.md)
+- [Integrated and separate-static deployment](WEB_DEPLOYMENT.md)
+- [Browser authentication and CSRF](WEB_AUTHENTICATION.md)
+- [Permission-aware UI model](WEB_PERMISSIONS.md)
+- [SSE, polling, and distributed-state updates](LIVE_UPDATES.md)
+- [Web troubleshooting](WEB_TROUBLESHOOTING.md)
+- [Web accessibility requirements and acceptance pass](WEB_ACCESSIBILITY.md)
+- [Complete SimLab browser demonstration](PHASE_7_BROWSER_DEMO.md)
+
 ## Phase 6 identity and access control
 
 - [Phase 6 status, architecture, and remaining cut line](PHASE_6.md)

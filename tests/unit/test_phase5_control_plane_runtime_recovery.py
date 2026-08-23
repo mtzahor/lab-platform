@@ -372,6 +372,8 @@ def test_runtime_monitor_drives_timeout_cleanup_and_suppresses_drain_refresh_fai
         mark_disconnected = AsyncMock()
         command_expiry = AsyncMock()
         reservation_expiry = AsyncMock()
+        scheduled_activation = AsyncMock(return_value=1)
+        queue_promotion = AsyncMock(return_value=0)
         reconciliation_timeout = AsyncMock()
         workflow_cleanup = AsyncMock()
         ci_maintenance = AsyncMock()
@@ -386,6 +388,16 @@ def test_runtime_monitor_drives_timeout_cleanup_and_suppresses_drain_refresh_fai
             mark_disconnected,
         )
         monkeypatch.setattr(runtime.reservations, "expire_due", reservation_expiry)
+        monkeypatch.setattr(
+            runtime.reservations,
+            "process_due_scheduled",
+            scheduled_activation,
+        )
+        monkeypatch.setattr(
+            runtime.reservation_queue_service,
+            "promote_waiting",
+            queue_promotion,
+        )
         monkeypatch.setattr(
             runtime.reconciliation_service,
             "timeout_unreconciled_operations",
@@ -410,6 +422,8 @@ def test_runtime_monitor_drives_timeout_cleanup_and_suppresses_drain_refresh_fai
         )
         command_expiry.assert_awaited_once_with()
         reservation_expiry.assert_awaited_once_with()
+        scheduled_activation.assert_awaited_once_with()
+        queue_promotion.assert_awaited_once_with()
         reconciliation_timeout.assert_awaited_once_with()
         workflow_cleanup.assert_awaited_once_with()
         ci_maintenance.assert_awaited_once_with()

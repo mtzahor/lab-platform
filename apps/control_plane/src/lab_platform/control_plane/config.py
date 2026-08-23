@@ -126,6 +126,7 @@ class DistributedSettings(ControlPlaneConfigModel):
         le=604_800,
     )
     queue_commands_for_offline_agents: bool = False
+    scheduled_protection_window_seconds: int = Field(default=300, ge=0, le=86_400)
 
 
 class ControlPlaneArtifactSettings(ControlPlaneConfigModel):
@@ -284,6 +285,73 @@ class SecuritySettings(ControlPlaneConfigModel):
     login_rate_limit: LoginRateLimitSettings = Field(default_factory=LoginRateLimitSettings)
 
 
+class WebLiveUpdatesSettings(ControlPlaneConfigModel):
+    sse_enabled: bool = True
+    polling_fallback_seconds: int = Field(default=5, ge=1, le=300)
+
+
+class WebUploadsSettings(ControlPlaneConfigModel):
+    maximum_firmware_size_mb: int = Field(default=100, ge=1, le=4096)
+
+
+class WebFeaturesSettings(ControlPlaneConfigModel):
+    identity_admin: bool = True
+    audit_viewer: bool = True
+    ci_sessions: bool = True
+
+
+class WebBrandingSettings(ControlPlaneConfigModel):
+    product_name: str = Field(default="Lab Platform", min_length=1, max_length=100)
+
+
+class WebSettings(ControlPlaneConfigModel):
+    """Public dashboard and integrated static-hosting configuration."""
+
+    enabled: bool = False
+    public_url: str | None = None
+    api_base_url: str = "/api/v1"
+    live_updates: WebLiveUpdatesSettings = Field(default_factory=WebLiveUpdatesSettings)
+    uploads: WebUploadsSettings = Field(default_factory=WebUploadsSettings)
+    features: WebFeaturesSettings = Field(default_factory=WebFeaturesSettings)
+    branding: WebBrandingSettings = Field(default_factory=WebBrandingSettings)
+
+    @field_validator("public_url")
+    @classmethod
+    def validate_public_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = _parse_http_url(value, field_name="web.public_url", allow_path=False)
+        if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname or ""):
+            raise ValueError("web.public_url must use HTTPS except on loopback")
+        return urlunsplit(parsed).rstrip("/")
+
+    @field_validator("api_base_url")
+    @classmethod
+    def validate_api_base_url(cls, value: str) -> str:
+        if value.startswith("/"):
+            parsed = urlsplit(value)
+            if (
+                value.startswith("//")
+                or parsed.scheme
+                or parsed.netloc
+                or parsed.query
+                or parsed.fragment
+                or any(part in {".", ".."} for part in parsed.path.split("/"))
+            ):
+                raise ValueError(
+                    "web.api_base_url must be a root-relative path without a query or fragment"
+                )
+            normalized = parsed.path.rstrip("/")
+            if not normalized:
+                raise ValueError("web.api_base_url must not resolve to the site root")
+            return normalized
+
+        parsed = _parse_http_url(value, field_name="web.api_base_url", allow_path=True)
+        if parsed.path in {"", "/"}:
+            raise ValueError("web.api_base_url must include an API path")
+        return urlunsplit(parsed._replace(path=parsed.path.rstrip("/")))
+
+
 class ControlPlaneDevelopmentSettings(ControlPlaneConfigModel):
     enabled: bool = False
     auto_login_user: str | None = Field(default=None, min_length=1, max_length=200)
@@ -301,6 +369,7 @@ class ControlPlaneConfig(ControlPlaneConfigModel):
     authorisation: AuthorisationSettings = Field(default_factory=AuthorisationSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    web: WebSettings = Field(default_factory=WebSettings)
     development: ControlPlaneDevelopmentSettings = Field(
         default_factory=ControlPlaneDevelopmentSettings
     )
@@ -365,6 +434,22 @@ class ControlPlaneConfig(ControlPlaneConfigModel):
             raise ValueError("OIDC authentication requires identity.enabled")
         return self
 
+    @model_validator(mode="after")
+    def require_safe_web_configuration(self) -> ControlPlaneConfig:
+        if not self.web.enabled:
+            return self
+        if self.web.public_url is None:
+            raise ValueError("enabled web dashboard requires web.public_url")
+        if not self.identity.enabled:
+            raise ValueError("enabled web dashboard requires identity.enabled")
+        if self.web.features.audit_viewer and not self.audit.enabled:
+            raise ValueError("web.features.audit_viewer requires audit.enabled")
+        if self.web.uploads.maximum_firmware_size_mb > self.artifacts.max_upload_size_mb:
+            raise ValueError(
+                "web firmware upload limit must not exceed the control-plane artifact limit"
+            )
+        return self
+
     @property
     def agent_gateway_url(self) -> str:
         """Return the public WebSocket endpoint derived from the REST public URL."""
@@ -392,21 +477,27 @@ def load_control_plane_config(
 
 
 def _parse_public_url(value: str) -> SplitResult:
+    return _parse_http_url(value, field_name="control_plane.public_url", allow_path=False)
+
+
+def _parse_http_url(value: str, *, field_name: str, allow_path: bool) -> SplitResult:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError("control_plane.public_url must use HTTP or HTTPS")
+        raise ValueError(f"{field_name} must use HTTP or HTTPS")
     if parsed.hostname is None:
-        raise ValueError("control_plane.public_url must include a hostname")
+        raise ValueError(f"{field_name} must include a hostname")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("control_plane.public_url must not contain credentials")
+        raise ValueError(f"{field_name} must not contain credentials")
     if parsed.query or parsed.fragment:
-        raise ValueError("control_plane.public_url must not contain a query or fragment")
-    if parsed.path not in {"", "/"}:
-        raise ValueError("control_plane.public_url must not contain a path")
+        raise ValueError(f"{field_name} must not contain a query or fragment")
+    if not allow_path and parsed.path not in {"", "/"}:
+        raise ValueError(f"{field_name} must not contain a path")
+    if any(part in {".", ".."} for part in parsed.path.split("/")):
+        raise ValueError(f"{field_name} must not contain dot segments")
     try:
         _ = parsed.port
     except ValueError as exc:
-        raise ValueError("control_plane.public_url contains an invalid port") from exc
+        raise ValueError(f"{field_name} contains an invalid port") from exc
     return parsed
 
 

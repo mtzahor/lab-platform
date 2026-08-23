@@ -39,6 +39,11 @@ class HubReservationLeaseSynchronizer:
         self._pending: dict[tuple[UUID, int], asyncio.Future[LeaseApplicationReceipt]] = {}
         self._lock = asyncio.Lock()
 
+    async def is_available(self, agent_id: UUID) -> bool:
+        """Return whether a scheduled lease can be offered without guessing from DB presence."""
+
+        return await self._hub.is_connected(agent_id)
+
     async def apply_lease(self, lease: ReservationLease) -> LeaseApplicationReceipt:
         if not await self._hub.is_connected(lease.agent_id):
             raise AgentOfflineError(

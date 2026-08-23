@@ -3,10 +3,11 @@
 Reservations grant one owner exclusive mutating access to a bench for a bounded interval. They
 survive Agent restarts and use UTC internally.
 
-This page documents the standalone Agent's Phase 3 scheduling surface. The distributed control
-plane instead exposes global `create`, lease-versioned `renew`, and lease-versioned `release`;
-future scheduling, `extend`, `cancel`, and the immediate `bench reserve/release` aliases are not
-control-plane routes. See [Phase 5](PHASE_5.md#reservation-routing-and-command-safety).
+This page documents the standalone Agent's Phase 3 scheduling surface and its distributed control-
+plane counterpart. The control plane exposes immediate and future `create`, lease-versioned
+`renew`, owner `release`, administrator `revoke`, and Phase 7 durable FIFO bench queues. It does
+not expose the standalone `extend`, `cancel`, or immediate `bench reserve/release` aliases. See
+[Phase 5](PHASE_5.md#reservation-routing-and-command-safety) and [queueing](QUEUEING.md).
 
 ## Immediate reservations
 
@@ -29,6 +30,24 @@ labctl reservation create bench-01 \
 Scheduled intervals for the same bench cannot overlap. Offset-bearing RFC 3339 input is converted
 to UTC before persistence.
 
+The distributed API uses the same concept through `POST /api/v1/reservations`:
+
+```json
+{
+  "bench_id": "home-lab/virtual-esp32-01",
+  "idempotency_key": "calendar:change-4821",
+  "starts_at": "2026-07-21T08:00:00Z",
+  "reservation_duration_seconds": 3600,
+  "description": "Release-candidate validation"
+}
+```
+
+`starts_at` and `description` are top-level request fields. The response and list endpoint report
+`status: SCHEDULED`; there is no active Agent lease or lease version until the control-plane
+maintenance loop activates the due slot. Dashboard cancellation calls owner `release` or
+administrator `revoke` without an expected lease version. Once activation succeeds, ordinary
+lease-version fencing applies.
+
 ## Inspecting reservations
 
 ```bash
@@ -48,6 +67,11 @@ labctl reservation cancel <reservation-id> --owner michael
 Only the owner may mutate a reservation. Extension applies to an active reservation and fails when
 it would exceed the configured maximum duration or overlap the next scheduled reservation.
 Releasing an already released reservation is idempotent.
+
+A distributed workflow launch can reference the caller's existing active coordinated reservation.
+The request must explicitly choose whether terminal/pre-dispatch cleanup releases that reservation;
+omitting a reservation retains the original managed-grant behavior. Ownership, bench, tenant,
+active state, and lease validity are revalidated by the workflow service.
 
 Cancellation is for queued or scheduled work; release is for an active reservation. Phase 1
 commands remain aliases where practical:

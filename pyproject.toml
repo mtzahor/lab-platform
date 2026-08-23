@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-platform"
-version = "0.7.0a0"
+version = "0.8.0a0"
 description = "Distributed remote hardware bench management platform."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -76,6 +76,13 @@ packages = [
 "lab_platform.real_backend.targets.esp32" = "packages/real_backend/src/lab_platform/real_backend/targets/esp32"
 "lab_platform.simlab" = "packages/simlab/src/lab_platform/simlab"
 "lab_platform.simlab_adapter" = "packages/simlab_adapter/src/lab_platform/simlab_adapter"
+
+[tool.setuptools.package-data]
+"lab_platform.control_plane" = [
+    "web_dist/*",
+    "web_dist/assets/*",
+    "web_dist/**/*",
+]
 
 [tool.ruff]
 line-length = 100

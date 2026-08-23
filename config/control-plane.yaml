@@ -68,6 +68,23 @@ security:
     attempts: 10
     window_minutes: 15
 
+web:
+  # The release wheel includes apps/web; startup fails fast if that bundle is absent.
+  enabled: true
+  public_url: http://127.0.0.1:8443
+  api_base_url: /api/v1
+  live_updates:
+    sse_enabled: true
+    polling_fallback_seconds: 5
+  uploads:
+    maximum_firmware_size_mb: 100
+  features:
+    identity_admin: true
+    audit_viewer: true
+    ci_sessions: true
+  branding:
+    product_name: Lab Platform
+
 development:
   enabled: true
   auto_login_user: local-admin

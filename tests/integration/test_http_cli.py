@@ -47,7 +47,7 @@ def test_complete_cli_workflow_uses_real_versioned_http_api(
     prefix = ["--server", base_url]
     try:
         assert cli_main([*prefix, "version"]) == 0
-        assert capsys.readouterr().out.strip() == "labctl 0.7.0-alpha"
+        assert capsys.readouterr().out.strip() == "labctl 0.8.0-alpha"
 
         assert cli_main([*prefix, "health", "--output", "json"]) == 0
         health = json.loads(capsys.readouterr().out)

@@ -128,7 +128,13 @@ class IdentityAdministrationRepository(Protocol):
         user_id: UUID,
     ) -> list[UserSession]: ...
 
-    async def update_session(self, session: UserSession) -> UserSession: ...
+    async def revoke_session(
+        self,
+        session_id: UUID,
+        *,
+        revoked_at: datetime,
+        expected_secret_hash: str | None = None,
+    ) -> UserSession | None: ...
 
     async def create_team(self, team: Team) -> Team: ...
 
@@ -157,6 +163,12 @@ class IdentityAdministrationRepository(Protocol):
         organisation_id: UUID,
         team_id: UUID,
     ) -> list[TeamMembership]: ...
+
+    async def list_team_ids_for_user(
+        self,
+        organisation_id: UUID,
+        user_id: UUID,
+    ) -> Collection[UUID]: ...
 
     async def delete_team_membership(
         self,
@@ -257,10 +269,18 @@ class IdentityAdministrationRepository(Protocol):
         self,
         organisation_id: UUID,
         *,
+        actor: str | None = None,
+        actor_id: UUID | None = None,
         action: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
         outcome: AuditOutcome | None = None,
+        request_id: UUID | None = None,
+        command_id: UUID | None = None,
+        operation_id: UUID | None = None,
         after: datetime | None = None,
         before: datetime | None = None,
+        cursor: UUID | None = None,
         limit: int = 500,
     ) -> list[AuditEvent]: ...
 
@@ -506,6 +526,47 @@ class IdentityAdministrationService:
             raise UserNotFoundError("The user does not exist.")
         return user
 
+    async def list_user_team_memberships(
+        self,
+        context: AuthenticationContext,
+        user_id: UUID,
+    ) -> list[tuple[Team, TeamMembership]]:
+        await self._require(context, "users:read")
+        await self._require(context, "teams:read")
+        await self.get_user(context, user_id)
+        organisation_id = context.principal.organisation_id
+        memberships: list[tuple[Team, TeamMembership]] = []
+        for team_id in await self._repository.list_team_ids_for_user(
+            organisation_id,
+            user_id,
+        ):
+            team = await self._repository.get_team(organisation_id, team_id)
+            if team is None:
+                continue
+            team_memberships = await self._repository.list_team_memberships(
+                organisation_id,
+                team_id,
+            )
+            membership = next(
+                (item for item in team_memberships if item.user_id == user_id),
+                None,
+            )
+            if membership is not None:
+                memberships.append((team, membership))
+        return memberships
+
+    async def list_user_sessions(
+        self,
+        context: AuthenticationContext,
+        user_id: UUID,
+    ) -> list[UserSession]:
+        await self._require(context, "users:read")
+        await self.get_user(context, user_id)
+        return await self._repository.list_sessions(
+            context.principal.organisation_id,
+            user_id,
+        )
+
     async def update_user(
         self,
         context: AuthenticationContext,
@@ -682,6 +743,24 @@ class IdentityAdministrationService:
         if not removed:
             raise TeamMembershipNotFoundError("The team membership does not exist.")
         await self._audit_success(context, "TEAM_MEMBER_REMOVED", "TEAM", str(team_id))
+
+    async def list_team_members(
+        self,
+        context: AuthenticationContext,
+        team_id: UUID,
+    ) -> list[tuple[TeamMembership, User]]:
+        await self._require(context, "teams:read")
+        await self.get_team(context, team_id)
+        organisation_id = context.principal.organisation_id
+        members: list[tuple[TeamMembership, User]] = []
+        for membership in await self._repository.list_team_memberships(
+            organisation_id,
+            team_id,
+        ):
+            user = await self._repository.get_user(organisation_id, membership.user_id)
+            if user is not None:
+                members.append((membership, user))
+        return members
 
     async def create_service_account(
         self,
@@ -899,11 +978,26 @@ class IdentityAdministrationService:
     async def list_role_assignments(
         self,
         context: AuthenticationContext,
+        *,
+        subject_type: RoleSubjectType | None = None,
+        subject_id: UUID | None = None,
+        resource_type: ResourceType | None = None,
+        resource_id: str | None = None,
     ) -> Sequence[RoleAssignment]:
         await self._require(context, "roles:read")
-        return await self._repository.list_role_assignments(
+        if (subject_type is None) != (subject_id is None):
+            raise ValueError("subject_type and subject_id must be supplied together.")
+        assignments = await self._repository.list_role_assignments(
             context.principal.organisation_id,
-            None,
+            {(subject_type, subject_id)}
+            if subject_type is not None and subject_id is not None
+            else None,
+        )
+        return tuple(
+            assignment
+            for assignment in assignments
+            if (resource_type is None or assignment.resource_type is resource_type)
+            and (resource_id is None or assignment.resource_id == resource_id)
         )
 
     async def list_roles(self, context: AuthenticationContext) -> tuple[RoleName, ...]:
@@ -1099,19 +1193,35 @@ class IdentityAdministrationService:
         self,
         context: AuthenticationContext,
         *,
+        actor: str | None = None,
+        actor_id: UUID | None = None,
         action: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
         outcome: AuditOutcome | None = None,
+        request_id: UUID | None = None,
+        command_id: UUID | None = None,
+        operation_id: UUID | None = None,
         after: datetime | None = None,
         before: datetime | None = None,
+        cursor: UUID | None = None,
         limit: int = 100,
     ) -> list[AuditEvent]:
         await self._require(context, "audit:read")
         events = await self._repository.list_audit_events(
             context.principal.organisation_id,
+            actor=actor,
+            actor_id=actor_id,
             action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
             outcome=outcome,
+            request_id=request_id,
+            command_id=command_id,
+            operation_id=operation_id,
             after=after,
             before=before,
+            cursor=cursor,
             limit=limit,
         )
         await self._audit_success(
@@ -1121,10 +1231,16 @@ class IdentityAdministrationService:
             None,
             metadata={
                 "result_count": len(events),
+                "actor_filter_applied": actor is not None or actor_id is not None,
                 "action_filter_applied": action is not None,
+                "resource_filter_applied": resource_type is not None or resource_id is not None,
                 "outcome_filter_applied": outcome is not None,
+                "correlation_filter_applied": any(
+                    item is not None for item in (request_id, command_id, operation_id)
+                ),
                 "after_filter_applied": after is not None,
                 "before_filter_applied": before is not None,
+                "cursor_applied": cursor is not None,
                 "requested_limit": limit,
             },
         )
@@ -1214,9 +1330,7 @@ class IdentityAdministrationService:
     ) -> None:
         for session in await self._repository.list_sessions(organisation_id, user_id):
             if session.revoked_at is None:
-                await self._repository.update_session(
-                    session.model_copy(update={"revoked_at": revoked_at})
-                )
+                await self._repository.revoke_session(session.id, revoked_at=revoked_at)
 
     async def _audit_success(
         self,

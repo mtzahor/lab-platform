@@ -17,6 +17,12 @@ first. It derives the organisation and principal from that bearer, resolves trus
 applies roles/access policies/credential narrowing, and passes the authenticated context into
 protected application services. Identity-only administration routes never accept a legacy token.
 
+Phase 7 browser login uses the same identity sessions through `HttpOnly` `lab_session` cookies.
+Cookie-authenticated unsafe methods require `X-CSRF-Token` to match the readable `lab_csrf`
+cookie. An explicit bearer header takes precedence, so CLI/CI semantics do not change merely
+because a request also carries browser cookies. `GET /api/v1/auth/config` returns browser-safe
+feature/auth configuration, and `/auth/me` includes the effective high-level permission bootstrap.
+
 When `authorisation.legacy_token_compatibility_enabled` is true, protected operational routes may
 fall back to a hashed Phase 4/5 scope-bearing token. If that token store is empty, the first
 `POST /api/v1/tokens` request may bootstrap it without a bearer and must grant all nine supported
@@ -59,14 +65,16 @@ before reconnecting.
 | Agent identity | `/api/v1/agents`, `/api/v1/agents/enrollment-tokens`, `/api/v1/agents/enroll` |
 | Agent administration | `/api/v1/agents/{id}/revoke`, `/credentials/rotate`, `/drain`, `/undrain`, `/actions/refresh-inventory`, `/timeline` |
 | Unified inventory | `GET /api/v1/benches`, `GET /api/v1/benches/{global_id}` |
+| Dashboard presentation | `/api/v1/overview`, `/api/v1/events`, `/api/v1/workflow-runs`, `/operations/{id}/serial`, `/benches/{global_id}/timeline` |
 | Direct remote actions | `/api/v1/benches/{global_id}/actions/probe`, `/reset`, `/read-serial`, `/flash` |
-| Central reservations | `/api/v1/reservations`, `/{id}/renew`, `/{id}/release` |
+| Central reservations | `/api/v1/reservations` (immediate or scheduled), `/{id}/renew`, `/{id}/release`, `/{id}/revoke` |
+| Central reservation queue | `/api/v1/benches/{global_id}/queue`, `/api/v1/queue/{id}` |
 | Remote workflows | `/api/v1/workflows`, `/api/v1/workflows/{name}/runs` |
 | Remote operations | `/api/v1/operations`, `/{id}`, `/{id}/cancel`, `/{id}/reconcile`, `/{id}/artifacts/serial` |
 | Distributed CI | `/api/v1/ci/sessions`, `/{id}/run`, `/{id}/heartbeat`, `/{id}/cancel`, `/{id}/finalize`, `/{id}/artifacts` |
 | Artifacts | `GET/POST /api/v1/artifacts`, `GET/DELETE /api/v1/artifacts/{id}`, `/{id}/content`, `/{id}/transfers` |
 | Transfer capabilities | `/api/v1/artifact-transfers/{id}/content` |
-| User authentication | `/api/v1/auth/login`, `/refresh`, `/logout`, `/me`, `/sessions` |
+| User authentication | `/api/v1/auth/config`, `/login`, `/refresh`, `/logout`, `/me`, `/sessions` |
 | OIDC | `/api/v1/auth/oidc/login`, `/callback` |
 | Identity administration | `/api/v1/organisation`, `/users`, `/teams`, `/service-accounts`, `/role-assignments`, `/permissions/effective` |
 | Access policies and audit | `/api/v1/access-policies/benches`, `/access-policies/workflows`, `/audit-events` |
@@ -127,8 +135,19 @@ Poll `GET /api/v1/operations/{operation_id}` for the Agent-confirmed terminal re
 serial command exposes its synchronized text through
 `GET /api/v1/operations/{operation_id}/artifacts/serial`. Cancellation uses
 `POST /api/v1/operations/{operation_id}/cancel` with `owner` and an optional `reason`. The
-control plane does not expose the standalone Agent's legacy `power-on`, `power-off`,
-`power-cycle`, immediate bench-reservation, queue, bench-timeline, or event-list routes.
+control plane additionally exposes bounded cursor windows through
+`GET /api/v1/operations/{operation_id}/serial`, a composite bench timeline, and a durable
+organisation-scoped FIFO queue. It does not expose the standalone Agent's legacy `power-on`,
+`power-off`, `power-cycle`, or immediate bench-reservation aliases.
+
+`POST /api/v1/workflows/{name}/runs` can reuse a caller-owned active coordinated reservation with
+`reservation_id`. `release_reservation_after` is explicit for a reused reservation. Omitting the
+reservation keeps the managed grant-and-release behavior. Ownership, active lease state, bench,
+tenant, and workflow access are checked server-side before dispatch.
+
+`GET /api/v1/events` is an authenticated SSE invalidation/snapshot channel with event IDs and
+heartbeats, not a durable audit/event journal. Clients refetch authoritative REST state after
+reconnect and use bounded polling when streaming is unavailable.
 
 ### Transport and persistence deployment modes
 
@@ -140,8 +159,9 @@ when the process binds to loopback and `development.allow_tls_termination_proxy:
 rejected on non-loopback binds. An HTTPS URL with neither direct certificates nor that constrained
 proxy mode is rejected rather than serving misleading plaintext.
 
-The production control-plane store is PostgreSQL. Schema v10 uses composite tenant workflow keys
-and organisation-scoped CI/artifact/reservation/queue retry keys. Both `postgresql://` and
+The production control-plane store is PostgreSQL. Schema v10 introduced composite tenant workflow
+keys and organisation-scoped CI/artifact/reservation/queue retry keys; schema v11 adds durable
+distributed reservation queues. Both `postgresql://` and
 `postgresql+psycopg://` configuration spellings are accepted; the latter is normalized to a
 Psycopg/libpq `postgresql://` DSN. SQLite remains available for the loopback developer demo, but
 is not the recommended central production store. Apply migrations before starting a deployment

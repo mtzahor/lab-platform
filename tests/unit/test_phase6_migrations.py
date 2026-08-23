@@ -80,8 +80,8 @@ def test_schema_v10_installs_identity_tables_default_organisation_and_scope_colu
 ) -> None:
     database = _database(tmp_path / "phase6.db")
     with database.transaction() as connection:
-        assert SCHEMA_VERSION == 10
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
+        assert SCHEMA_VERSION == 11
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 11
         tables = {
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -151,7 +151,7 @@ def test_existing_v10_database_repairs_ci_cancel_evidence_schema_unconditionally
             DROP TABLE authorisation_snapshots_new_shape;
             """
         )
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 11
         old_definition = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' "
             "AND name = 'authorisation_snapshots'"
@@ -256,7 +256,7 @@ def test_v8_upgrade_preserves_legacy_rows_and_repairs_interrupted_phase6_objects
 
     upgraded = _database(path)
     with upgraded.transaction() as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 11
         legacy_token = connection.execute(
             "SELECT name, owner, scopes_json FROM api_tokens WHERE id = 'legacy-token'"
         ).fetchone()

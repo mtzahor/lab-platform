@@ -19,6 +19,7 @@ from lab_platform.core.errors import (
 )
 from lab_platform.core.identity import (
     IdentityAuthenticationService,
+    IssuedSession,
     ScryptPasswordHasher,
     sanitize_audit_metadata,
 )
@@ -89,8 +90,65 @@ class IdentityRepository:
     async def get_session(self, session_id: UUID) -> UserSession | None:
         return self.sessions.get(session_id)
 
-    async def update_session(self, session: UserSession) -> UserSession:
-        self.sessions[session.id] = session
+    async def touch_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_secret_hash: str,
+        last_seen_at: datetime,
+    ) -> bool:
+        session = self.sessions.get(session_id)
+        if (
+            session is None
+            or session.secret_hash != expected_secret_hash
+            or session.revoked_at is not None
+            or session.last_seen_at >= last_seen_at
+        ):
+            return False
+        self.sessions[session_id] = session.model_copy(update={"last_seen_at": last_seen_at})
+        return True
+
+    async def rotate_session(
+        self,
+        session_id: UUID,
+        *,
+        expected_secret_hash: str,
+        secret_hash: str,
+        expires_at: datetime,
+        last_seen_at: datetime,
+    ) -> UserSession | None:
+        session = self.sessions.get(session_id)
+        if (
+            session is None
+            or session.secret_hash != expected_secret_hash
+            or session.revoked_at is not None
+        ):
+            return None
+        rotated = session.model_copy(
+            update={
+                "secret_hash": secret_hash,
+                "expires_at": expires_at,
+                "last_seen_at": last_seen_at,
+            }
+        )
+        self.sessions[session_id] = rotated
+        return rotated
+
+    async def revoke_session(
+        self,
+        session_id: UUID,
+        *,
+        revoked_at: datetime,
+        expected_secret_hash: str | None = None,
+    ) -> UserSession | None:
+        session = self.sessions.get(session_id)
+        if session is None or (
+            expected_secret_hash is not None and session.secret_hash != expected_secret_hash
+        ):
+            return None
+        if session.revoked_at is None:
+            session = session.model_copy(update={"revoked_at": revoked_at})
+            self.sessions[session_id] = session
         return session
 
     async def list_sessions(
@@ -172,10 +230,32 @@ class IdentityRepository:
         ]
 
 
+class RacingIdentityRepository(IdentityRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self._session_read_gate: asyncio.Event | None = None
+        self._gated_session_reads = 0
+
+    def gate_next_two_session_reads(self) -> None:
+        self._session_read_gate = asyncio.Event()
+        self._gated_session_reads = 0
+
+    async def get_session(self, session_id: UUID) -> UserSession | None:
+        snapshot = await super().get_session(session_id)
+        gate = self._session_read_gate
+        if gate is not None and self._gated_session_reads < 2:
+            self._gated_session_reads += 1
+            if self._gated_session_reads == 2:
+                gate.set()
+            await gate.wait()
+        return snapshot
+
+
 def authentication_fixture(
     *,
     user_status: UserStatus = UserStatus.ACTIVE,
     organisation_status: OrganisationStatus = OrganisationStatus.ACTIVE,
+    repository: IdentityRepository | None = None,
 ) -> tuple[
     IdentityRepository,
     IdentityAuthenticationService,
@@ -184,7 +264,7 @@ def authentication_fixture(
     datetime,
 ]:
     now = datetime(2026, 8, 2, 8, tzinfo=UTC)
-    repository = IdentityRepository()
+    repository = repository or IdentityRepository()
     organisation = Organisation(
         slug="Example-Team",
         name="Example Team",
@@ -272,6 +352,38 @@ def test_local_login_session_refresh_and_revocation() -> None:
         "USER_LOGIN_SUCCEEDED",
         "USER_LOGOUT",
     ]
+
+
+def test_concurrent_refresh_rotates_a_session_exactly_once() -> None:
+    async def scenario() -> None:
+        racing_repository = RacingIdentityRepository()
+        repository, service, _organisation, _user, _now = authentication_fixture(
+            repository=racing_repository
+        )
+        issued = await service.login(
+            organisation_slug="example-team",
+            username="alice",
+            password="correct horse battery staple",
+        )
+        assert repository is racing_repository
+        racing_repository.gate_next_two_session_reads()
+
+        results = await asyncio.gather(
+            service.refresh_session(issued.access_token),
+            service.refresh_session(issued.access_token),
+            return_exceptions=True,
+        )
+        refreshed = [item for item in results if isinstance(item, IssuedSession)]
+        rejected = [item for item in results if isinstance(item, AuthenticationFailedError)]
+        assert len(refreshed) == 1
+        assert len(rejected) == 1
+
+        context = await service.authenticate_session(refreshed[0].access_token)
+        assert context.session_id == issued.session.id
+        with pytest.raises(AuthenticationFailedError):
+            await service.authenticate_session(issued.access_token)
+
+    asyncio.run(scenario())
 
 
 def test_oidc_user_cannot_use_a_stale_local_password_record() -> None:

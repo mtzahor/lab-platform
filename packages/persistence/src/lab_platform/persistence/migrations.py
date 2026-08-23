@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 DEFAULT_ORGANISATION_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -79,6 +79,11 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         _upgrade_phase10_tenant_storage_boundaries(connection)
         connection.execute(
             "INSERT INTO schema_migrations(version, applied_at) VALUES (10, datetime('now'))"
+        )
+    _upgrade_phase11_reservation_queue(connection)
+    if 11 not in applied:
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))"
         )
     _create_queue_transition_trigger(connection)
 
@@ -1784,6 +1789,45 @@ def _add_distributed_operation_result_column(connection: sqlite3.Connection) -> 
     )
 
 
+def _upgrade_phase11_reservation_queue(connection: sqlite3.Connection) -> None:
+    """Keep queue ownership and FIFO order durable across process restarts."""
+
+    _add_column(connection, "reservation_queue", "owner_principal_id", "TEXT")
+    _add_column(
+        connection,
+        "reservation_queue",
+        "owner_principal_type",
+        "TEXT CHECK (owner_principal_type IS NULL OR "
+        "owner_principal_type IN ('USER', 'SERVICE_ACCOUNT'))",
+    )
+    _add_column(connection, "reservation_queue", "description", "TEXT")
+    _add_column(connection, "reservation_queue", "queue_order", "BIGINT")
+
+    maximum_row = connection.execute(
+        "SELECT COALESCE(MAX(queue_order), 0) FROM reservation_queue"
+    ).fetchone()
+    maximum = maximum_row[0] if maximum_row is not None else 0
+    next_order = int(maximum) + 1
+    rows = connection.execute(
+        "SELECT id FROM reservation_queue WHERE queue_order IS NULL ORDER BY created_at, id"
+    ).fetchall()
+    for row in rows:
+        connection.execute(
+            "UPDATE reservation_queue SET queue_order = ? WHERE id = ?",
+            (next_order, row[0]),
+        )
+        next_order += 1
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS reservation_queue_order "
+        "ON reservation_queue(queue_order) WHERE queue_order IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS reservation_queue_waiting_order "
+        "ON reservation_queue(organisation_id, bench_id, queue_order) "
+        "WHERE status = 'waiting'"
+    )
+
+
 def _create_phase3_tables(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
@@ -1791,8 +1835,15 @@ def _create_phase3_tables(connection: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             bench_id TEXT NOT NULL,
             owner TEXT NOT NULL,
+            owner_principal_id TEXT,
+            owner_principal_type TEXT CHECK (
+                owner_principal_type IS NULL OR
+                owner_principal_type IN ('USER', 'SERVICE_ACCOUNT')
+            ),
             requested_duration_seconds INTEGER NOT NULL
                 CHECK (requested_duration_seconds > 0),
+            description TEXT,
+            queue_order BIGINT,
             status TEXT NOT NULL
                 CHECK (status IN ('waiting', 'promoted', 'cancelled', 'expired')),
             created_at TEXT NOT NULL,
