@@ -405,9 +405,9 @@ def test_v9_workflow_upgrade_preserves_rows_and_rebinds_run_and_step_tenant(
     upgraded = _database(path)
     try:
         with upgraded.transaction() as connection:
-            assert SCHEMA_VERSION == 10
+            assert SCHEMA_VERSION == 11
             assert (
-                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 11
             )
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
             run_scope = connection.execute(

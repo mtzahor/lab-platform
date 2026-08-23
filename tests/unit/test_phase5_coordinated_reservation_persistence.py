@@ -22,7 +22,10 @@ from lab_platform.models import (
     ReservationSource,
     ReservationStatus,
 )
-from lab_platform.persistence import SQLiteCentralReservationLeaseRepository
+from lab_platform.persistence import (
+    SQLiteCentralReservationLeaseRepository,
+    SQLiteTimedReservationRepository,
+)
 from lab_platform.persistence.database import SQLiteDatabase
 
 NOW = datetime(2026, 7, 28, 14, tzinfo=UTC)
@@ -173,6 +176,114 @@ def test_coordinated_schema_is_migrated_and_repository_is_exported(tmp_path: Pat
         SQLiteCentralReservationLeaseRepository,
     )
     database.close()
+
+
+def test_due_scheduled_row_is_atomically_claimed_and_restart_replayed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "scheduled-claim.db"
+        database = _database(path)
+        _seed_agent(database)
+        _seed_bench(database)
+        timed = SQLiteTimedReservationRepository(database)
+        central = SQLiteCentralReservationLeaseRepository(database)
+        scheduled = _reservation(
+            UUID(int=190),
+            idempotency_key="future-claim",
+            starts_at=NOW + timedelta(hours=1),
+        )
+        await timed.create(scheduled)
+        assert scheduled.starts_at is not None
+        scheduled_start = scheduled.starts_at
+        request = ReservationGrantRequest(
+            reservation=scheduled,
+            agent_id=AGENT_ID,
+            lease_valid_until=scheduled_start + timedelta(minutes=10),
+        )
+
+        claimed = await central.activate_scheduled_if_eligible(
+            request,
+            activated_at=scheduled_start,
+            mutation_key="activate-scheduled:190",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        assert claimed is not None
+        assert claimed.disposition is LeaseWriteDisposition.APPLIED
+        assert claimed.record.state is ReservationLeaseState.ACTIVATING
+        assert claimed.record.lease.valid_from == scheduled_start
+
+        restarted = SQLiteCentralReservationLeaseRepository(database)
+        replay = await restarted.activate_scheduled_if_eligible(
+            request,
+            activated_at=scheduled_start,
+            mutation_key="activate-scheduled:190",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+        )
+        assert replay is not None
+        assert replay.disposition is LeaseWriteDisposition.REPLAY
+        assert replay.record == claimed.record
+        with database.transaction() as connection:
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM reservations WHERE id = ?",
+                    (str(scheduled.id),),
+                ).fetchone()[0]
+                == 1
+            )
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM reservation_leases WHERE reservation_id = ?",
+                    (str(scheduled.id),),
+                ).fetchone()[0]
+                == 1
+            )
+        database.close()
+
+    asyncio.run(scenario())
+
+
+def test_future_schedule_allows_safe_immediate_but_protects_queue_boundary(
+    tmp_path: Path,
+) -> None:
+    async def grant_with_window(path: Path, protection_seconds: int) -> bool:
+        database = _database(path)
+        _seed_agent(database)
+        _seed_bench(database)
+        timed = SQLiteTimedReservationRepository(database)
+        central = SQLiteCentralReservationLeaseRepository(database)
+        scheduled = _reservation(
+            UUID(int=191 + protection_seconds),
+            idempotency_key=f"scheduled-{protection_seconds}",
+            starts_at=NOW + timedelta(hours=1, minutes=4),
+        )
+        await timed.create(scheduled)
+        request = _grant_request(
+            UUID(int=291 + protection_seconds),
+            idempotency_key=f"immediate-{protection_seconds}",
+        )
+        request = ReservationGrantRequest(
+            reservation=request.reservation.model_copy(
+                update={"ends_at": NOW + timedelta(hours=1)}
+            ),
+            agent_id=request.agent_id,
+            lease_valid_until=NOW + timedelta(minutes=10),
+        )
+        result = await central.grant_if_eligible(
+            request,
+            mutation_key=f"immediate-{protection_seconds}",
+            request_fingerprint=FINGERPRINT_A,
+            expected_agent_status=AgentStatus.ONLINE,
+            expected_bench_status=GlobalBenchStatus.ONLINE,
+            scheduled_protection_window_seconds=protection_seconds,
+        )
+        database.close()
+        return result is not None
+
+    assert asyncio.run(grant_with_window(tmp_path / "safe.db", 0)) is True
+    assert asyncio.run(grant_with_window(tmp_path / "protected.db", 300)) is False
 
 
 def test_grant_persists_base_lease_coordination_and_restart_safe_replay(

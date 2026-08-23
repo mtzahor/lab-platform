@@ -8,7 +8,12 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run pytest -m "not hardware"
+cd apps/web
+npm ci
+npm run check
+cd ../..
 uv build
+uv run python scripts/verify_web_wheel.py dist/*.whl
 ```
 
 The test suite includes repository/domain tests, shared backend contracts, protocol contracts,
@@ -42,6 +47,54 @@ uv run pytest tests/unit/test_phase5_postgresql.py -k optional_live_smoke
 
 The ordinary non-hardware suite remains self-contained and uses temporary SQLite databases.
 
+## Dashboard development
+
+Use Node.js 22 or a compatible current LTS release. The Vite development server proxies `/api` to
+the loopback control plane:
+
+```console
+cd apps/web
+npm ci
+npm run dev
+```
+
+Generate the TypeScript schema only after updating the checked control-plane OpenAPI contract:
+
+```console
+uv run python scripts/export_openapi.py --service control-plane \
+  docs/control-plane-openapi.json
+cd apps/web
+npm run api:generate
+npm run api:check
+npm run format:check
+npm run lint
+npm run typecheck
+npm run test
+npx playwright install chromium
+npm run e2e:all
+npm run build
+npm audit --audit-level=high
+```
+
+`npm run e2e` runs deterministic browser-network fixtures. `npm run e2e:integration` builds the
+packaged application and starts a fresh control plane plus two connected SimLab Agents on loopback
+ports; its state and credentials live only in a temporary directory. `npm run e2e:all` runs both
+suites and is the CI gate. The real suite is intentionally serial and has no retry because it
+creates fixed identities and assignments inside its disposable database.
+
+The production build writes the integrated bundle to the control-plane package's `web_dist`
+directory. Commit the source, generated API schema, and built bundle together. Do not edit the
+generated TypeScript schema or fingerprinted assets by hand.
+
+The generated `openapi-fetch` client is the default dashboard transport for browser authentication,
+overview data, bench and Agent inventory, Agent administration, workflow launch and results, CI
+sessions, artifacts, audit filtering, and identity/access administration. Path parameters, query
+parameters, and mutation bodies are checked directly against the generated schema while the shared
+transport preserves cookie credentials, CSRF injection, refresh/replay, and structured API errors.
+Presentation code still normalizes intentionally open response maps through `ApiRecord`; use the
+small `apiFetch` compatibility escape hatch only where an endpoint has not yet published a useful
+OpenAPI response shape, and add a generated wrapper when that contract is tightened.
+
 Generate or verify both checked-in OpenAPI schemas:
 
 ```console
@@ -49,7 +102,7 @@ uv run python scripts/export_openapi.py --service agent docs/openapi.json
 uv run python scripts/export_openapi.py --service agent --check docs/openapi.json
 uv run python scripts/export_openapi.py --service control-plane docs/control-plane-openapi.json
 uv run python scripts/export_openapi.py --service control-plane --check \
-  docs/control-plane-openapi.json
+docs/control-plane-openapi.json
 ```
 
 ## Adding a backend

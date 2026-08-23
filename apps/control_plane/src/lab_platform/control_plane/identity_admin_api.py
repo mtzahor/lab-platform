@@ -5,7 +5,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from lab_platform.control_plane.identity_api import authenticate_identity_token
+from lab_platform.control_plane.identity_api import (
+    authenticate_identity_token,
+    extract_bearer_or_cookie_token,
+)
 from lab_platform.control_plane.runtime import ControlPlaneRuntime
 from lab_platform.core.authorisation import ALL_PERMISSIONS
 from lab_platform.core.errors import (
@@ -212,11 +215,12 @@ def create_identity_admin_router(runtime: ControlPlaneRuntime) -> APIRouter:
             Security(_ADMIN_BEARER),
         ] = None,
     ) -> AuthenticationContext:
-        if credentials is None:
-            raise AuthenticationRequiredError("An Authorization bearer token is required.")
+        credential = extract_bearer_or_cookie_token(request, credentials)
+        if credential is None:
+            raise AuthenticationRequiredError("A bearer token or browser session is required.")
         return await authenticate_identity_token(
             runtime,
-            credentials.credentials,
+            credential.token,
             source_ip=request.client.host if request.client is not None else None,
         )
 
@@ -263,6 +267,42 @@ def create_identity_admin_router(runtime: ControlPlaneRuntime) -> APIRouter:
     async def get_user(user_id: UUID, context: IdentityContext) -> dict[str, object]:
         user = await runtime.identity_administration.get_user(context, user_id)
         return user.model_dump(mode="json")
+
+    @router.get("/users/{user_id:uuid}/teams")
+    async def list_user_teams(
+        user_id: UUID,
+        context: IdentityContext,
+    ) -> dict[str, object]:
+        memberships = await runtime.identity_administration.list_user_team_memberships(
+            context,
+            user_id,
+        )
+        return {
+            "items": [
+                {
+                    "team": team.model_dump(mode="json"),
+                    "membership": membership.model_dump(mode="json"),
+                }
+                for team, membership in memberships
+            ]
+        }
+
+    @router.get("/users/{user_id:uuid}/sessions")
+    async def list_user_sessions(
+        user_id: UUID,
+        context: IdentityContext,
+    ) -> dict[str, object]:
+        sessions = await runtime.identity_administration.list_user_sessions(context, user_id)
+        now = datetime.now(UTC)
+        return {
+            "items": [
+                {
+                    **session.model_dump(mode="json", exclude={"secret_hash"}),
+                    "active": session.revoked_at is None and session.expires_at > now,
+                }
+                for session in sessions
+            ]
+        }
 
     @router.patch("/users/{user_id:uuid}")
     async def update_user(
@@ -358,6 +398,22 @@ def create_identity_admin_router(runtime: ControlPlaneRuntime) -> APIRouter:
             role=body.role,
         )
         return membership.model_dump(mode="json")
+
+    @router.get("/teams/{team_id:uuid}/members")
+    async def list_team_members(
+        team_id: UUID,
+        context: IdentityContext,
+    ) -> dict[str, object]:
+        members = await runtime.identity_administration.list_team_members(context, team_id)
+        return {
+            "items": [
+                {
+                    "membership": membership.model_dump(mode="json"),
+                    "user": user.model_dump(mode="json"),
+                }
+                for membership, user in members
+            ]
+        }
 
     @router.delete(
         "/teams/{team_id:uuid}/members/{user_id:uuid}",
@@ -478,8 +534,20 @@ def create_identity_admin_router(runtime: ControlPlaneRuntime) -> APIRouter:
         return {"role": role.value, "permissions": sorted(permissions)}
 
     @router.get("/role-assignments")
-    async def list_role_assignments(context: IdentityContext) -> dict[str, object]:
-        assignments = await runtime.identity_administration.list_role_assignments(context)
+    async def list_role_assignments(
+        context: IdentityContext,
+        subject_type: Annotated[RoleSubjectType | None, Query()] = None,
+        subject_id: Annotated[UUID | None, Query()] = None,
+        resource_type: Annotated[ResourceType | None, Query()] = None,
+        resource_id: Annotated[str | None, Query(min_length=1, max_length=500)] = None,
+    ) -> dict[str, object]:
+        assignments = await runtime.identity_administration.list_role_assignments(
+            context,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
         return {"items": [assignment.model_dump(mode="json") for assignment in assignments]}
 
     @router.post("/role-assignments", status_code=status.HTTP_201_CREATED)
@@ -624,21 +692,43 @@ def create_identity_admin_router(runtime: ControlPlaneRuntime) -> APIRouter:
     @router.get("/audit-events")
     async def list_audit_events(
         context: IdentityContext,
+        actor: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+        actor_id: Annotated[UUID | None, Query()] = None,
         action: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+        resource_type: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+        resource_id: Annotated[str | None, Query(min_length=1, max_length=500)] = None,
         outcome: Annotated[AuditOutcome | None, Query()] = None,
+        request_id: Annotated[UUID | None, Query()] = None,
+        command_id: Annotated[UUID | None, Query()] = None,
+        operation_id: Annotated[UUID | None, Query()] = None,
         after: Annotated[datetime | None, Query()] = None,
         before: Annotated[datetime | None, Query()] = None,
+        cursor: Annotated[UUID | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, object]:
         events = await runtime.identity_administration.list_audit_events(
             context,
+            actor=actor,
+            actor_id=actor_id,
             action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
             outcome=outcome,
+            request_id=request_id,
+            command_id=command_id,
+            operation_id=operation_id,
             after=after,
             before=before,
-            limit=limit,
+            cursor=cursor,
+            limit=limit + 1,
         )
-        return {"items": [event.model_dump(mode="json") for event in events]}
+        visible = events[:limit]
+        has_more = len(events) > limit
+        return {
+            "items": [event.model_dump(mode="json") for event in visible],
+            "has_more": has_more,
+            "next_cursor": str(visible[-1].id) if has_more and visible else None,
+        }
 
     @router.get("/audit-events/{event_id:uuid}")
     async def get_audit_event(event_id: UUID, context: IdentityContext) -> dict[str, object]:

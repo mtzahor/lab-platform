@@ -25,6 +25,7 @@ from lab_platform.control_plane.gateway import (
 )
 from lab_platform.control_plane.oidc_provider import HttpOidcProvider
 from lab_platform.control_plane.operational_access import OperationalAccessService
+from lab_platform.control_plane.reservation_queue import CentralReservationQueueService
 from lab_platform.control_plane.reservations import (
     CoordinatedReconciliationHandler,
     HubReservationLeaseSynchronizer,
@@ -84,6 +85,8 @@ from lab_platform.persistence import (
     SQLiteCiSessionRepository,
     SQLiteEventRepository,
     SQLiteGenericArtifactRepository,
+    SQLiteQueueRepository,
+    SQLiteTimedReservationRepository,
     SQLiteWorkflowRepository,
 )
 from lab_platform.persistence.agents import SQLiteAgentEnrollmentRepository
@@ -156,13 +159,24 @@ class ControlPlaneRuntime:
             confirmation_timeout_seconds=config.agent_gateway.handshake_timeout_seconds,
         )
         self.reservation_repository = SQLiteCentralReservationLeaseRepository(self.database)
+        self.scheduled_reservation_repository = SQLiteTimedReservationRepository(self.database)
         self.reservations = CentralReservationLeaseService(
             self.reservation_repository,
             self.directory,
             self.lease_synchronizer,
+            scheduled_repository=self.scheduled_reservation_repository,
             maximum_clock_skew_seconds=(config.distributed.maximum_clock_skew_seconds),
             offline_reservation_grace_seconds=(
                 config.distributed.offline_reservation_grace_seconds
+            ),
+        )
+        self.reservation_queue = SQLiteQueueRepository(self.database)
+        self.reservation_queue_service = CentralReservationQueueService(
+            self.reservation_queue,
+            self.reservations,
+            self.inventory_repository,
+            scheduled_protection_window_seconds=(
+                config.distributed.scheduled_protection_window_seconds
             ),
         )
 
@@ -265,6 +279,7 @@ class ControlPlaneRuntime:
             lease_receipts=self.lease_synchronizer,
             reservation_disconnects=self.reservations,
             reconciliation=self.reconciliation,
+            timeline=self.timeline,
         )
         self.gateway = AgentGateway(
             enrollment=self.enrollment,
@@ -1060,6 +1075,8 @@ class ControlPlaneRuntime:
                 )
         await self.commands.expire_due()
         await self.reservations.expire_due()
+        await self.reservations.process_due_scheduled()
+        await self.reservation_queue_service.promote_waiting()
         await self.reconciliation_service.timeout_unreconciled_operations()
         await self.workflow_reservations.release_terminal()
         await self.ci.process_maintenance()

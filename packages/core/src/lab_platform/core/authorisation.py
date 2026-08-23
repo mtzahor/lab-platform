@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -205,6 +207,26 @@ class AuthorisationDecision:
     granting_assignment_ids: frozenset[UUID]
 
 
+@dataclass(frozen=True, slots=True)
+class _PrincipalAccess:
+    subjects: frozenset[tuple[RoleSubjectType, UUID]]
+    organisation_role: OrganisationRole | None
+    team_ids: frozenset[UUID]
+    assignments: tuple[RoleAssignment, ...]
+
+
+@dataclass(slots=True)
+class _RequestAuthorisationCache:
+    principals: dict[tuple[UUID, PrincipalType, UUID], _PrincipalAccess]
+    bench_policies: dict[tuple[UUID, str], BenchAccessPolicy | None]
+    workflow_policies: dict[tuple[UUID, str], WorkflowAccessPolicy | None]
+    decisions: dict[tuple[object, ...], AuthorisationDecision]
+
+    @classmethod
+    def empty(cls) -> _RequestAuthorisationCache:
+        return cls(principals={}, bench_policies={}, workflow_policies={}, decisions={})
+
+
 class AuthorisationService:
     """Resolve the effective additive permissions for one trusted resource."""
 
@@ -224,6 +246,20 @@ class AuthorisationService:
         self._default_bench_visibility = default_bench_visibility
         self._audit_enabled = audit_enabled
         self._clock = clock
+        self._request_cache: ContextVar[_RequestAuthorisationCache | None] = ContextVar(
+            f"lab_platform_authorisation_cache_{id(self)}",
+            default=None,
+        )
+
+    @contextmanager
+    def request_scope(self) -> Iterator[None]:
+        """Reuse immutable identity and policy reads within one request only."""
+
+        token = self._request_cache.set(_RequestAuthorisationCache.empty())
+        try:
+            yield
+        finally:
+            self._request_cache.reset(token)
 
     async def evaluate(
         self,
@@ -233,53 +269,41 @@ class AuthorisationService:
         *,
         credential_restrictions: Collection[str] | None = None,
     ) -> AuthorisationDecision:
+        cache = self._request_cache.get()
+        decision_key = _decision_cache_key(
+            principal,
+            permission,
+            resource,
+            credential_restrictions,
+        )
+        if cache is not None and decision_key in cache.decisions:
+            return cache.decisions[decision_key]
         if principal.organisation_id != resource.organisation_id:
-            return _denied_decision()
+            denied = _denied_decision()
+            if cache is not None:
+                cache.decisions[decision_key] = denied
+            return denied
 
         now = _as_utc(self._clock())
-        subjects: set[tuple[RoleSubjectType, UUID]] = {
-            (_principal_subject_type(principal.type), principal.id)
-        }
-        organisation_role: OrganisationRole | None = None
-        team_ids: Collection[UUID] = ()
-        if principal.type is PrincipalType.USER:
-            membership = await self._repository.get_organisation_membership(
-                principal.organisation_id,
-                principal.id,
-            )
-            if (
-                membership is not None
-                and membership.organisation_id == principal.organisation_id
-                and membership.user_id == principal.id
-            ):
-                organisation_role = membership.role
-            team_ids = await self._repository.list_team_ids_for_user(
-                principal.organisation_id,
-                principal.id,
-            )
-            subjects.update((RoleSubjectType.TEAM, team_id) for team_id in team_ids)
-
-        assignments = await self._repository.list_role_assignments(
-            principal.organisation_id,
-            frozenset(subjects),
-        )
+        access = await self._principal_access(principal)
         applicable = tuple(
             assignment
-            for assignment in assignments
+            for assignment in access.assignments
             if assignment.organisation_id == principal.organisation_id
-            and (assignment.subject_type, assignment.subject_id) in subjects
+            and (assignment.subject_type, assignment.subject_id) in access.subjects
             and _assignment_is_active(assignment, now)
             and _assignment_applies_to(assignment, resource)
         )
 
         policy_permissions: set[str] = set()
+        organisation_role = access.organisation_role
         if self._policy_repository is not None:
             applicable, organisation_role, policy_permissions = await self._apply_access_policy(
                 principal,
                 resource,
                 permission,
                 organisation_role,
-                frozenset(team_ids) if principal.type is PrincipalType.USER else frozenset(),
+                access.team_ids,
                 applicable,
             )
 
@@ -307,12 +331,59 @@ class AuthorisationService:
             if allowed
             else frozenset()
         )
-        return AuthorisationDecision(
+        decision = AuthorisationDecision(
             allowed=allowed,
             roles=frozenset(roles),
             permissions=frozen_permissions,
             granting_assignment_ids=granting_assignment_ids,
         )
+        if cache is not None:
+            cache.decisions[decision_key] = decision
+        return decision
+
+    async def _principal_access(self, principal: Principal) -> _PrincipalAccess:
+        cache = self._request_cache.get()
+        key = (principal.id, principal.type, principal.organisation_id)
+        if cache is not None and key in cache.principals:
+            return cache.principals[key]
+
+        subjects: set[tuple[RoleSubjectType, UUID]] = {
+            (_principal_subject_type(principal.type), principal.id)
+        }
+        organisation_role: OrganisationRole | None = None
+        team_ids: Collection[UUID] = ()
+        if principal.type is PrincipalType.USER:
+            membership = await self._repository.get_organisation_membership(
+                principal.organisation_id,
+                principal.id,
+            )
+            if (
+                membership is not None
+                and membership.organisation_id == principal.organisation_id
+                and membership.user_id == principal.id
+            ):
+                organisation_role = membership.role
+            team_ids = await self._repository.list_team_ids_for_user(
+                principal.organisation_id,
+                principal.id,
+            )
+            subjects.update((RoleSubjectType.TEAM, team_id) for team_id in team_ids)
+        frozen_subjects = frozenset(subjects)
+        assignments = tuple(
+            await self._repository.list_role_assignments(
+                principal.organisation_id,
+                frozen_subjects,
+            )
+        )
+        access = _PrincipalAccess(
+            subjects=frozen_subjects,
+            organisation_role=organisation_role,
+            team_ids=frozenset(team_ids),
+            assignments=assignments,
+        )
+        if cache is not None:
+            cache.principals[key] = access
+        return access
 
     async def _apply_access_policy(
         self,
@@ -327,10 +398,17 @@ class AuthorisationService:
         if repository is None:  # pragma: no cover - guarded by evaluate
             return assignments, organisation_role, set()
         if resource.type is ResourceType.BENCH:
-            bench_policy = await repository.get_bench_access_policy(
-                principal.organisation_id,
-                resource.id,
-            )
+            cache = self._request_cache.get()
+            key = (principal.organisation_id, resource.id)
+            if cache is not None and key in cache.bench_policies:
+                bench_policy = cache.bench_policies[key]
+            else:
+                bench_policy = await repository.get_bench_access_policy(
+                    principal.organisation_id,
+                    resource.id,
+                )
+                if cache is not None:
+                    cache.bench_policies[key] = bench_policy
             visibility = (
                 bench_policy.visibility
                 if bench_policy is not None
@@ -359,10 +437,17 @@ class AuthorisationService:
             return filtered, effective_role, permissions
 
         if resource.type is ResourceType.WORKFLOW:
-            workflow_policy = await repository.get_workflow_access_policy(
-                principal.organisation_id,
-                resource.id,
-            )
+            cache = self._request_cache.get()
+            key = (principal.organisation_id, resource.id)
+            if cache is not None and key in cache.workflow_policies:
+                workflow_policy = cache.workflow_policies[key]
+            else:
+                workflow_policy = await repository.get_workflow_access_policy(
+                    principal.organisation_id,
+                    resource.id,
+                )
+                if cache is not None:
+                    cache.workflow_policies[key] = workflow_policy
             if (
                 workflow_policy is None
                 or workflow_policy.visibility is WorkflowVisibility.ORGANISATION
@@ -740,6 +825,28 @@ def _denied_decision() -> AuthorisationDecision:
         roles=frozenset(),
         permissions=frozenset(),
         granting_assignment_ids=frozenset(),
+    )
+
+
+def _decision_cache_key(
+    principal: Principal,
+    permission: str,
+    resource: AuthorisationResource,
+    credential_restrictions: Collection[str] | None,
+) -> tuple[object, ...]:
+    restrictions = (
+        tuple(sorted(credential_restrictions)) if credential_restrictions is not None else None
+    )
+    return (
+        principal.id,
+        principal.type,
+        principal.organisation_id,
+        permission,
+        resource.type,
+        resource.id,
+        resource.organisation_id,
+        resource.parent_agent_id,
+        restrictions,
     )
 
 

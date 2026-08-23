@@ -43,12 +43,19 @@ class OidcLoginStart:
 
 
 @dataclass(frozen=True, slots=True)
+class OidcLoginCompletion:
+    issued_session: IssuedSession
+    browser_return_to: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _PendingLogin:
     nonce: str
     code_verifier: str
     organisation_slug: str
     redirect_uri: str
     expires_at: datetime
+    browser_return_to: str | None
 
 
 class OidcProvider(Protocol):
@@ -145,6 +152,7 @@ class OidcAuthenticationService:
         *,
         organisation_slug: str,
         redirect_uri: str,
+        browser_return_to: str | None = None,
     ) -> OidcLoginStart:
         provider, issuer, client_id = self._require_configured()
         _validate_redirect_uri(redirect_uri)
@@ -166,6 +174,7 @@ class OidcAuthenticationService:
                 organisation_slug=organisation_slug.strip().casefold(),
                 redirect_uri=redirect_uri,
                 expires_at=expires_at,
+                browser_return_to=browser_return_to,
             )
         query = urlencode(
             {
@@ -195,10 +204,43 @@ class OidcAuthenticationService:
         user_agent: str | None = None,
         request_id: UUID | None = None,
     ) -> IssuedSession:
+        completion = await self.complete_login_with_intent(
+            state=state,
+            code=code,
+            provider_error=provider_error,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            request_id=request_id,
+        )
+        return completion.issued_session
+
+    async def complete_login_with_intent(
+        self,
+        *,
+        state: str,
+        code: str | None,
+        provider_error: str | None = None,
+        browser_state_digest: str | None = None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+        request_id: UUID | None = None,
+    ) -> OidcLoginCompletion:
+        """Complete one login while preserving its server-bound browser intent.
+
+        Browser transactions additionally require the short-lived, HTTP-only
+        initiation-cookie binding. Losing that binding fails closed before code
+        exchange; it can never select the legacy bearer-token response path.
+        """
+
         provider, issuer, client_id = self._require_configured()
         pending = await self._consume_state(state)
         try:
-            return await self._complete_pending_login(
+            if pending.browser_return_to is not None and (
+                browser_state_digest is None
+                or not hmac.compare_digest(browser_state_digest, _state_digest(state))
+            ):
+                raise OidcLoginFailedError("The browser OIDC login binding is invalid or expired.")
+            issued = await self._complete_pending_login(
                 pending,
                 provider=provider,
                 issuer=issuer,
@@ -208,6 +250,10 @@ class OidcAuthenticationService:
                 ip_address=ip_address,
                 user_agent=user_agent,
                 request_id=request_id,
+            )
+            return OidcLoginCompletion(
+                issued_session=issued,
+                browser_return_to=pending.browser_return_to,
             )
         except (OidcLoginFailedError, OidcIdentityNotMappedError) as exc:
             await self._session_issuer.record_oidc_login_failure(
@@ -562,6 +608,7 @@ def _is_loopback_host(value: str) -> bool:
 __all__ = [
     "OidcAuthenticationService",
     "OidcIdentityRepository",
+    "OidcLoginCompletion",
     "OidcLoginStart",
     "OidcProvider",
     "OidcProviderMetadata",

@@ -275,9 +275,16 @@ def test_sessions_service_accounts_and_api_credentials_round_trip(tmp_path: Path
         assert await repository.get_session_for_organisation(DEFAULT_ORG_ID, session.id) == session
         assert await repository.get_session_for_organisation(SECOND_ORG_ID, session.id) is None
         assert await repository.list_sessions(DEFAULT_ORG_ID, user.id) == [session]
-        revoked = session.model_copy(update={"revoked_at": NOW + timedelta(minutes=1)})
-        await repository.update_session(revoked)
-        assert await repository.get_session(session.id) == revoked
+        revoked_at = NOW + timedelta(minutes=1)
+        revoked = session.model_copy(update={"revoked_at": revoked_at})
+        assert (
+            await repository.revoke_session(
+                session.id,
+                revoked_at=revoked_at,
+                expected_secret_hash=session.secret_hash,
+            )
+            == revoked
+        )
 
         account = ServiceAccount(
             id=UUID(int=303),
@@ -318,6 +325,70 @@ def test_sessions_service_accounts_and_api_credentials_round_trip(tmp_path: Path
         await repository.update_api_credential(used)
         assert await repository.get_api_credential_by_id(credential.id) == used
         assert not hasattr(repository, "get_api_credential_by_secret_hash")
+        database.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_rotation_fences_stale_touch_and_token_logout(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = _database(tmp_path / "session-cas.db")
+        repository = SQLiteIdentityRepository(database)
+        user = _user(311)
+        await repository.create_user(user)
+        session = UserSession(
+            id=UUID(int=312),
+            user_id=user.id,
+            organisation_id=DEFAULT_ORG_ID,
+            secret_hash="a" * 64,
+            created_at=NOW,
+            expires_at=NOW + timedelta(minutes=15),
+            maximum_expires_at=NOW + timedelta(hours=12),
+            last_seen_at=NOW,
+        )
+        await repository.create_session(session)
+
+        assert await repository.touch_session(
+            session.id,
+            expected_secret_hash="a" * 64,
+            last_seen_at=NOW + timedelta(seconds=1),
+        )
+        rotated = await repository.rotate_session(
+            session.id,
+            expected_secret_hash="a" * 64,
+            secret_hash="b" * 64,
+            expires_at=NOW + timedelta(minutes=20),
+            last_seen_at=NOW + timedelta(seconds=2),
+        )
+        assert rotated is not None
+        assert rotated.secret_hash == "b" * 64
+
+        assert not await repository.touch_session(
+            session.id,
+            expected_secret_hash="a" * 64,
+            last_seen_at=NOW + timedelta(seconds=3),
+        )
+        assert (
+            await repository.revoke_session(
+                session.id,
+                revoked_at=NOW + timedelta(seconds=3),
+                expected_secret_hash="a" * 64,
+            )
+            is None
+        )
+        current = await repository.get_session(session.id)
+        assert current is not None
+        assert current.secret_hash == "b" * 64
+        assert current.last_seen_at == NOW + timedelta(seconds=2)
+        assert current.revoked_at is None
+
+        revoked = await repository.revoke_session(
+            session.id,
+            revoked_at=NOW + timedelta(seconds=4),
+        )
+        assert revoked is not None
+        assert revoked.secret_hash == "b" * 64
+        assert revoked.revoked_at == NOW + timedelta(seconds=4)
         database.close()
 
     asyncio.run(scenario())
@@ -394,6 +465,24 @@ def test_policies_snapshots_and_append_only_audit_are_scoped(tmp_path: Path) -> 
             action="BENCH_FLASH_REQUESTED",
             outcome=AuditOutcome.SUCCEEDED,
         ) == [event]
+        assert await repository.list_audit_events(DEFAULT_ORG_ID, actor="lic") == [event]
+        assert await repository.list_audit_events(DEFAULT_ORG_ID, actor_id=event.actor_id) == [
+            event
+        ]
+        assert await repository.list_audit_events(
+            DEFAULT_ORG_ID,
+            resource_type="BENCH",
+            resource_id=bench_policy.bench_id,
+            request_id=event.request_id,
+            command_id=UUID(int=407),
+        ) == [event]
+        assert (
+            await repository.list_audit_events(
+                DEFAULT_ORG_ID,
+                operation_id=UUID(int=408),
+            )
+            == []
+        )
         assert not hasattr(repository, "update_audit_event")
         assert not hasattr(repository, "delete_audit_event")
         database.close()

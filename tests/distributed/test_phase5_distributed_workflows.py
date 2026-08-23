@@ -9,7 +9,10 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from lab_platform.control_plane_core.errors import ReservationLeaseInvalidError
+from lab_platform.control_plane_core.errors import (
+    ReservationLeaseInvalidError,
+    ReservationLeaseVersionMismatchError,
+)
 from lab_platform.control_plane_core.inventory import (
     InMemoryInventoryRepository,
     InventoryService,
@@ -30,6 +33,9 @@ from lab_platform.core.errors import (
     BenchAlreadyReservedError,
     NoCompatibleBenchError,
     PermissionDeniedError,
+    ReservationNotActiveError,
+    ReservationNotFoundError,
+    ReservationOwnerMismatchError,
 )
 from lab_platform.core.workflows import WorkflowInvalidError
 from lab_platform.models import (
@@ -53,6 +59,7 @@ from lab_platform.models import (
     RemoteCommandType,
     Reservation,
     ReservationLease,
+    ReservationOwner,
     ReservationSource,
     ReservationStatus,
     ResourceType,
@@ -280,6 +287,8 @@ class FakeReservations:
         self.non_race_error = False
         self.lease_valid_until = NOW + timedelta(hours=1)
         self.release_calls: list[dict[str, object]] = []
+        self.require_calls: list[dict[str, object]] = []
+        self.advance_lease_before_require = False
 
     async def grant(
         self,
@@ -287,6 +296,7 @@ class FakeReservations:
         agent_id: UUID,
         bench_id: str,
         owner: str,
+        owner_principal: ReservationOwner | None = None,
         idempotency_key: str,
         reservation_duration_seconds: int | None = None,
         lease_ttl_seconds: int | None = None,
@@ -335,6 +345,12 @@ class FakeReservations:
                 id=reservation_id,
                 bench_id=bench_id,
                 owner=owner,
+                owner_principal_id=(
+                    owner_principal.principal_id if owner_principal is not None else None
+                ),
+                owner_principal_type=(
+                    owner_principal.principal_type.value if owner_principal is not None else None
+                ),
                 created_at=NOW,
                 requested_at=NOW,
                 starts_at=NOW,
@@ -366,11 +382,89 @@ class FakeReservations:
             self.records[idempotency_key] = record
             return record
 
-    async def get(self, reservation_id: UUID) -> CoordinatedReservationLease:
+    async def get(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CoordinatedReservationLease:
         for record in self.records.values():
             if record.reservation.id == reservation_id:
+                if (
+                    organisation_id is not None
+                    and record.reservation.organisation_id != organisation_id
+                ):
+                    break
                 return record
-        raise AssertionError(f"Unknown reservation {reservation_id}")
+        raise ReservationNotFoundError(
+            f"Reservation {reservation_id} was not found.",
+            reservation_id=str(reservation_id),
+        )
+
+    async def require_for_new_work(
+        self,
+        reservation_id: UUID,
+        *,
+        agent_id: UUID,
+        bench_id: str,
+        owner: str,
+        lease_version: int,
+        agent_observed_at: datetime | None = None,
+    ) -> ReservationLease:
+        del agent_observed_at
+        current = await self.get(reservation_id)
+        self.require_calls.append(
+            {
+                "reservation_id": reservation_id,
+                "agent_id": agent_id,
+                "bench_id": bench_id,
+                "owner": owner,
+                "lease_version": lease_version,
+            }
+        )
+        if self.advance_lease_before_require:
+            self.advance_lease_before_require = False
+            advanced = CoordinatedReservationLease(
+                reservation=current.reservation,
+                lease=current.lease.model_copy(
+                    update={"lease_version": current.lease.lease_version + 1}
+                ),
+                state=current.state,
+                revision=current.revision + 1,
+            )
+            for key, record in tuple(self.records.items()):
+                if record.reservation.id == reservation_id:
+                    self.records[key] = advanced
+                    break
+            current = advanced
+        if current.reservation.owner != owner:
+            raise ReservationOwnerMismatchError(
+                "Reservation owner does not match.",
+                reservation_id=str(reservation_id),
+            )
+        if current.lease.lease_version != lease_version:
+            raise ReservationLeaseVersionMismatchError(
+                "Reservation lease version is stale.",
+                reservation_id=str(reservation_id),
+                expected_lease_version=lease_version,
+                current_lease_version=current.lease.lease_version,
+            )
+        if current.lease.agent_id != agent_id or current.lease.bench_id != bench_id:
+            raise ReservationLeaseInvalidError(
+                "Reservation route does not match.",
+                reservation_id=str(reservation_id),
+            )
+        if current.state is not ReservationLeaseState.ACTIVE:
+            raise ReservationNotActiveError(
+                "Reservation is not active.",
+                reservation_id=str(reservation_id),
+            )
+        if not current.lease.is_valid_at(NOW):
+            raise ReservationLeaseInvalidError(
+                "Reservation lease is not current.",
+                reservation_id=str(reservation_id),
+            )
+        return current.lease
 
     async def release(
         self,
@@ -657,6 +751,27 @@ def _coordinator(
     return coordinator, lease_service, artifact_service, command_service
 
 
+async def _seed_existing_reservation(
+    reservations: FakeReservations,
+    agent: AgentRecord,
+    bench: GlobalBenchRecord,
+    *,
+    owner: str = "api/alice",
+    owner_principal: ReservationOwner | None = None,
+    idempotency_key: str = "existing-reservation",
+) -> CoordinatedReservationLease:
+    record = await reservations.grant(
+        agent_id=agent.id,
+        bench_id=bench.id,
+        owner=owner,
+        owner_principal=owner_principal,
+        idempotency_key=idempotency_key,
+        metadata={"reservation_lifecycle": "caller"},
+    )
+    reservations.calls.clear()
+    return record
+
+
 @_run_async_test
 async def test_selects_deterministically_without_accepting_an_agent_id() -> None:
     first_agent = _agent(1, "agent-a")
@@ -763,6 +878,319 @@ async def test_explicit_global_bench_routes_via_its_owner_and_respects_filters()
                 kind=GlobalBenchKind.SIMULATED,
             )
         )
+
+
+@pytest.mark.parametrize(("release_after", "released"), [(False, False), (True, True)])
+@_run_async_test
+async def test_existing_reservation_is_reused_without_a_second_grant_and_honours_release_intent(
+    release_after: bool,
+    released: bool,
+) -> None:
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    reservations = FakeReservations()
+    existing = await _seed_existing_reservation(reservations, agent, bench)
+    coordinator, _, _, commands = _coordinator(
+        [agent],
+        [bench],
+        reservations=reservations,
+    )
+
+    dispatch = await coordinator.run(
+        DistributedWorkflowRequest(
+            definition=_workflow(),
+            owner=existing.reservation.owner,
+            idempotency_key=f"reuse-{release_after}",
+            reservation_id=existing.reservation.id,
+            release_reservation_after=release_after,
+        )
+    )
+
+    assert reservations.calls == []
+    assert reservations.require_calls == [
+        {
+            "reservation_id": existing.reservation.id,
+            "agent_id": agent.id,
+            "bench_id": bench.id,
+            "owner": existing.reservation.owner,
+            "lease_version": existing.lease.lease_version,
+        }
+    ]
+    assert dispatch.reservation == existing
+    assert commands.calls[0]["lease"] == existing.lease
+    assert commands.dispatch_calls[0]["reservation_lease"] == existing.lease
+    assert commands.calls[0]["payload"]["reservation_lifecycle"] == {
+        "management": "caller",
+        "release_after": release_after,
+    }
+    with pytest.raises(WorkflowInvalidError, match="idempotency key"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=existing.reservation.owner,
+                idempotency_key=f"reuse-{release_after}",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=not release_after,
+            )
+        )
+
+    command_key, (command, operation) = next(iter(commands.created.items()))
+    commands.created[command_key] = (
+        command.model_copy(
+            update={
+                "status": RemoteCommandStatus.SUCCEEDED,
+                "completed_at": NOW + timedelta(seconds=1),
+            }
+        ),
+        operation,
+    )
+    lifecycle = DistributedWorkflowReservationLifecycle(commands, reservations)
+    assert await lifecycle.release_terminal() == int(released)
+    assert len(reservations.release_calls) == int(released)
+
+
+@pytest.mark.parametrize("release_after", [False, True])
+@_run_async_test
+async def test_existing_reservation_pre_dispatch_failure_never_releases_callers_lease(
+    release_after: bool,
+) -> None:
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    reservations = FakeReservations()
+    existing = await _seed_existing_reservation(
+        reservations,
+        agent,
+        bench,
+        idempotency_key=f"existing-failure-{release_after}",
+    )
+    commands = FakeCommands()
+    commands.create_error = RuntimeError("create failed")
+    coordinator, _, _, _ = _coordinator(
+        [agent],
+        [bench],
+        reservations=reservations,
+        commands=commands,
+    )
+
+    with pytest.raises(RuntimeError, match="create failed"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=existing.reservation.owner,
+                idempotency_key=f"reuse-failure-{release_after}",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=release_after,
+            )
+        )
+
+    assert reservations.calls == []
+    assert reservations.release_calls == []
+    current = await reservations.get(existing.reservation.id)
+    assert current.state is ReservationLeaseState.ACTIVE
+
+
+@_run_async_test
+async def test_existing_reservation_requires_current_active_compatible_owned_lease() -> None:
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+
+    stale_reservations = FakeReservations()
+    stale = await _seed_existing_reservation(stale_reservations, agent, bench)
+    stale_reservations.advance_lease_before_require = True
+    stale_coordinator, _, _, stale_commands = _coordinator(
+        [agent], [bench], reservations=stale_reservations
+    )
+    with pytest.raises(ReservationLeaseVersionMismatchError):
+        await stale_coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=stale.reservation.owner,
+                idempotency_key="reuse-stale",
+                reservation_id=stale.reservation.id,
+                release_reservation_after=False,
+            )
+        )
+    assert stale_reservations.calls == []
+    assert stale_commands.calls == []
+
+    inactive_reservations = FakeReservations()
+    inactive_reservations.return_state = ReservationLeaseState.UNKNOWN
+    inactive = await _seed_existing_reservation(
+        inactive_reservations,
+        agent,
+        bench,
+        idempotency_key="existing-inactive",
+    )
+    inactive_coordinator, _, _, inactive_commands = _coordinator(
+        [agent], [bench], reservations=inactive_reservations
+    )
+    with pytest.raises(ReservationNotActiveError):
+        await inactive_coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=inactive.reservation.owner,
+                idempotency_key="reuse-inactive",
+                reservation_id=inactive.reservation.id,
+                release_reservation_after=False,
+            )
+        )
+    assert inactive_reservations.calls == []
+    assert inactive_commands.calls == []
+
+    incompatible_reservations = FakeReservations()
+    incompatible = await _seed_existing_reservation(
+        incompatible_reservations,
+        agent,
+        bench,
+        idempotency_key="existing-incompatible",
+    )
+    incompatible_coordinator, _, _, incompatible_commands = _coordinator(
+        [agent], [bench], reservations=incompatible_reservations
+    )
+    with pytest.raises(NoCompatibleBenchError):
+        await incompatible_coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=incompatible.reservation.owner,
+                idempotency_key="reuse-incompatible",
+                reservation_id=incompatible.reservation.id,
+                release_reservation_after=False,
+                kind=GlobalBenchKind.SIMULATED,
+            )
+        )
+    assert incompatible_reservations.calls == []
+    assert incompatible_reservations.require_calls == []
+    assert incompatible_commands.calls == []
+
+
+@_run_async_test
+async def test_existing_reservation_cannot_cross_requested_bench_or_organisation() -> None:
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    reservations = FakeReservations()
+    existing = await _seed_existing_reservation(reservations, agent, bench)
+    coordinator, _, _, commands = _coordinator([agent], [bench], reservations=reservations)
+
+    with pytest.raises(ReservationLeaseInvalidError, match="requested bench"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=existing.reservation.owner,
+                idempotency_key="reuse-other-bench",
+                bench_id="agent-a/other-bench",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=False,
+            )
+        )
+
+    record_key = next(iter(reservations.records))
+    reservations.records[record_key] = CoordinatedReservationLease(
+        reservation=existing.reservation.model_copy(update={"organisation_id": UUID(int=999)}),
+        lease=existing.lease,
+        state=existing.state,
+        revision=existing.revision,
+    )
+    with pytest.raises(ReservationNotFoundError):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=existing.reservation.owner,
+                idempotency_key="reuse-other-organisation",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=False,
+            )
+        )
+
+    assert reservations.calls == []
+    assert reservations.require_calls == []
+    assert commands.calls == []
+
+
+@_run_async_test
+async def test_existing_reservation_requires_the_same_durable_owner_principal() -> None:
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    owner = ReservationOwner(
+        principal_id=UUID(int=101),
+        principal_type=PrincipalType.USER,
+        display_name="Alice",
+    )
+    reservations = FakeReservations()
+    existing = await _seed_existing_reservation(
+        reservations,
+        agent,
+        bench,
+        owner=owner.display_name,
+        owner_principal=owner,
+    )
+    coordinator, _, _, commands = _coordinator([agent], [bench], reservations=reservations)
+
+    with pytest.raises(ReservationOwnerMismatchError):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=owner.display_name,
+                owner_principal=owner.model_copy(update={"principal_id": UUID(int=102)}),
+                idempotency_key="reuse-wrong-principal",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=False,
+            )
+        )
+
+    assert reservations.calls == []
+    assert reservations.require_calls == []
+    assert commands.calls == []
+
+
+@_run_async_test
+async def test_existing_reservation_release_after_requires_reservation_permission() -> None:
+    definition = _workflow()
+    context, actor = _authenticated_workflow_actor(definition)
+    owner = ReservationOwner(
+        principal_id=context.principal.id,
+        principal_type=context.principal.type,
+        display_name=context.principal.display_name,
+    )
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    reservations = FakeReservations()
+    existing = await _seed_existing_reservation(
+        reservations,
+        agent,
+        bench,
+        owner=owner.display_name,
+        owner_principal=owner,
+    )
+    authorisation = FakeWorkflowAuthorisation(allowed_benches={bench.id})
+    coordinator, _, _, commands = _coordinator(
+        [agent],
+        [bench],
+        reservations=reservations,
+        authorisation=authorisation,
+        definition_catalog=FakeWorkflowDefinitionCatalog((definition,)),
+    )
+
+    with pytest.raises(PermissionDeniedError):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=definition,
+                owner=owner.display_name,
+                owner_principal=owner,
+                actor_context=actor,
+                authentication_context=context,
+                organisation_id=definition.organisation_id,
+                idempotency_key="reuse-release-permission",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=True,
+            )
+        )
+
+    assert ("benches:reserve", bench.id) in [
+        (permission, resource.id) for permission, resource in authorisation.required
+    ]
+    assert reservations.calls == []
+    assert reservations.require_calls == []
+    assert commands.calls == []
 
 
 @_run_async_test
@@ -1052,6 +1480,27 @@ def test_coordinator_rejects_an_unbounded_idempotency_cache() -> None:
         ({"lease_ttl_seconds": False}, "lease_ttl_seconds"),
         ({"command_timeout_seconds": 0}, "command_timeout_seconds"),
         ({"manage_reservation_lifecycle": 1}, "manage_reservation_lifecycle"),
+        ({"reservation_id": "not-a-uuid"}, "reservation_id"),
+        ({"release_reservation_after": False}, "requires an existing reservation_id"),
+        (
+            {"reservation_id": UUID(int=700)},
+            "release_reservation_after must be explicit",
+        ),
+        (
+            {
+                "reservation_id": UUID(int=701),
+                "release_reservation_after": 1,
+            },
+            "release_reservation_after must be a boolean",
+        ),
+        (
+            {
+                "reservation_id": UUID(int=702),
+                "release_reservation_after": False,
+                "lease_ttl_seconds": 60,
+            },
+            "cannot be granted or renewed",
+        ),
     ],
 )
 @_run_async_test
@@ -1340,6 +1789,68 @@ async def test_creation_failure_releases_but_dispatch_failure_remains_fenced() -
     assert dispatch_failure.calls[0]["dispatch"] is False
     assert len(dispatch_failure.dispatch_calls) == 1
     assert dispatch_reservations.release_calls == []
+
+    command_key, (command, operation) = next(iter(dispatch_failure.created.items()))
+    dispatch_failure.created[command_key] = (
+        command.model_copy(
+            update={
+                "status": RemoteCommandStatus.EXPIRED,
+                "completed_at": NOW + timedelta(seconds=1),
+            }
+        ),
+        operation,
+    )
+    lifecycle = DistributedWorkflowReservationLifecycle(
+        dispatch_failure,
+        dispatch_reservations,
+    )
+    assert await lifecycle.release_terminal() == 1
+
+
+@_run_async_test
+async def test_reused_dispatch_failure_releases_only_after_durable_terminal_state() -> None:
+    agent = _agent(1, "agent-a")
+    bench = _bench(agent, "bench-a")
+    reservations = FakeReservations()
+    existing = await _seed_existing_reservation(reservations, agent, bench)
+    commands = FakeCommands()
+    commands.dispatch_error = RuntimeError("delivery uncertain")
+    coordinator, _, _, _ = _coordinator(
+        [agent],
+        [bench],
+        reservations=reservations,
+        commands=commands,
+    )
+
+    with pytest.raises(RuntimeError, match="delivery uncertain"):
+        await coordinator.run(
+            DistributedWorkflowRequest(
+                definition=_workflow(),
+                owner=existing.reservation.owner,
+                idempotency_key="reused-dispatch-failure",
+                reservation_id=existing.reservation.id,
+                release_reservation_after=True,
+            )
+        )
+
+    assert reservations.release_calls == []
+    command_key, (command, operation) = next(iter(commands.created.items()))
+    assert command.payload["reservation_lifecycle"] == {
+        "management": "caller",
+        "release_after": True,
+    }
+    commands.created[command_key] = (
+        command.model_copy(
+            update={
+                "status": RemoteCommandStatus.FAILED,
+                "completed_at": NOW + timedelta(seconds=1),
+            }
+        ),
+        operation,
+    )
+    lifecycle = DistributedWorkflowReservationLifecycle(commands, reservations)
+    assert await lifecycle.release_terminal() == 1
+    assert len(reservations.release_calls) == 1
 
 
 @pytest.mark.parametrize(

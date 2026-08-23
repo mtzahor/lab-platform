@@ -339,6 +339,7 @@ class AgentMessageRouter:
         lease_receipts: ReservationLeaseReceiptHandler | None = None,
         reservation_disconnects: ReservationDisconnectHandler | None = None,
         reconciliation: ReconciliationReportHandler | None = None,
+        timeline: AgentTimelineSink | None = None,
     ) -> None:
         self._presence = presence
         self._inventory = inventory
@@ -348,6 +349,7 @@ class AgentMessageRouter:
         self._lease_receipts = lease_receipts
         self._reservation_disconnects = reservation_disconnects
         self._reconciliation = reconciliation
+        self._timeline = timeline
 
     async def handle(
         self,
@@ -386,6 +388,18 @@ class AgentMessageRouter:
                 observed_at=observed_at,
                 expected_boot_id=boot_id,
             )
+            await self._append_bench_timeline(
+                envelope.agent_id,
+                envelope.message_id,
+                observed_at,
+                f"{agent.slug}/{envelope.payload.bench.local_bench_id}",
+                "BENCH_ADDED",
+                "Bench was added to the Agent inventory.",
+                metadata={
+                    "connectivity": envelope.payload.bench.connectivity.value,
+                    "health": envelope.payload.bench.health.value,
+                },
+            )
         elif isinstance(envelope, BenchRemovedEnvelope):
             await self._inventory.apply_bench_removed(
                 agent,
@@ -393,12 +407,43 @@ class AgentMessageRouter:
                 observed_at=observed_at,
                 expected_boot_id=boot_id,
             )
+            await self._append_bench_timeline(
+                envelope.agent_id,
+                envelope.message_id,
+                observed_at,
+                f"{agent.slug}/{envelope.payload.local_bench_id}",
+                "BENCH_REMOVED",
+                "Bench was removed from the Agent inventory.",
+                severity=AgentTimelineSeverity.WARNING,
+            )
         elif isinstance(envelope, BenchHealthChangedEnvelope):
             await self._inventory.apply_bench_health_changed(
                 agent,
                 envelope.payload,
                 observed_at=observed_at,
                 expected_boot_id=boot_id,
+            )
+            await self._append_bench_timeline(
+                envelope.agent_id,
+                envelope.message_id,
+                observed_at,
+                f"{agent.slug}/{envelope.payload.local_bench_id}",
+                "BENCH_HEALTH_CHANGED",
+                (
+                    "Bench health changed to "
+                    f"{envelope.payload.health.value} "
+                    f"({envelope.payload.connectivity.value})."
+                ),
+                severity=(
+                    AgentTimelineSeverity.INFO
+                    if envelope.payload.health.value == "healthy"
+                    and envelope.payload.connectivity.value == "online"
+                    else AgentTimelineSeverity.WARNING
+                ),
+                metadata={
+                    "connectivity": envelope.payload.connectivity.value,
+                    "health": envelope.payload.health.value,
+                },
             )
         elif isinstance(envelope, CommandAcceptedEnvelope):
             await self._commands.accepted(envelope.agent_id, envelope.payload)
@@ -490,6 +535,34 @@ class AgentMessageRouter:
         artifact = await self._artifacts.register_remote_artifact(payload.artifact)
         if self._artifact_uploads is not None:
             await self._artifact_uploads.request_artifact_upload(agent_id, artifact.id)
+
+    async def _append_bench_timeline(
+        self,
+        agent_id: UUID,
+        correlation_id: UUID,
+        observed_at: datetime,
+        bench_id: str,
+        event_type: str,
+        message: str,
+        *,
+        severity: AgentTimelineSeverity = AgentTimelineSeverity.INFO,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        if self._timeline is None:
+            return
+        details = {"bench_id": bench_id, **(metadata or {})}
+        await self._timeline.append(
+            AgentTimelineRecord(
+                agent_id=agent_id,
+                timestamp=_utc(observed_at),
+                event_type=event_type,
+                severity=severity,
+                message=message,
+                correlation_id=correlation_id,
+                metadata=details,
+                deduplication_key=(f"bench:{bench_id}:{event_type}:{correlation_id}"),
+            )
+        )
 
     async def mark_agent_unknown(
         self,

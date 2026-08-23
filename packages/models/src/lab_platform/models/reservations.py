@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from lab_platform.models.domain import LEGACY_ORGANISATION_ID, LabModel
@@ -21,7 +21,10 @@ class QueueEntry(LabModel):
     organisation_id: UUID = LEGACY_ORGANISATION_ID
     bench_id: str
     owner: str
+    owner_principal_id: UUID | None = None
+    owner_principal_type: Literal["USER", "SERVICE_ACCOUNT"] | None = None
     requested_duration_seconds: int = Field(gt=0)
+    description: str | None = Field(default=None, max_length=2000)
     status: QueueEntryStatus = QueueEntryStatus.WAITING
     created_at: datetime
     promoted_at: datetime | None = None
@@ -33,6 +36,22 @@ class QueueEntry(LabModel):
     @classmethod
     def _normalize_timestamp(cls, value: datetime | None) -> datetime | None:
         return _as_utc(value)
+
+    @field_validator("description")
+    @classmethod
+    def _normalize_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def _validate_principal_identity(self) -> QueueEntry:
+        if (self.owner_principal_id is None) != (self.owner_principal_type is None):
+            raise ValueError(
+                "owner_principal_id and owner_principal_type must be provided together"
+            )
+        return self
 
 
 class BenchOperationLock(LabModel):

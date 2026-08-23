@@ -14,10 +14,12 @@ import pytest
 from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime
 from lab_platform.core.errors import ConfigurationError
 from lab_platform.persistence.database import SCHEMA_VERSION, SQLiteDatabase
+from lab_platform.persistence.distributed_adapters import SQLiteRemoteCommandServiceRepository
 from lab_platform.persistence.postgresql import (
     PostgreSQLDatabase,
     create_control_plane_database,
 )
+from lab_platform.persistence.reservations import SQLiteQueueRepository
 
 POSTGRES_URL = "postgresql://lab:secret@database.example:5432/lab_platform"
 
@@ -370,6 +372,34 @@ def test_sql_compatibility_rewrites_insert_ignore_and_json_extract() -> None:
     assert "::jsonb" in sql
     assert "reservation_lifecycle" in sql
     assert "uploaded_at IS NOT DISTINCT FROM %s" in sql
+
+
+def test_terminal_workflow_release_intent_query_is_postgresql_compatible() -> None:
+    database, raw, _factory = initialized_database()
+    raw.clear_observations()
+    repository = SQLiteRemoteCommandServiceRepository(cast(Any, database))
+
+    assert asyncio.run(repository.list_terminal_workflow_commands(limit=10)) == []
+
+    sql = executed_sql(raw)
+    assert "json_extract" not in sql.casefold()
+    assert "jsonb_extract_path_text(command.payload_json::jsonb" in sql
+    assert "'reservation_lifecycle', 'release_after'" in sql
+    assert "AS TEXT) IN ('1', 'true')" in sql
+
+
+def test_reservation_queue_fifo_head_query_is_postgresql_compatible() -> None:
+    database, raw, _factory = initialized_database()
+    raw.clear_observations()
+    repository = SQLiteQueueRepository(cast(Any, database))
+
+    assert asyncio.run(repository.list_waiting(limit=25)) == []
+
+    sql = executed_sql(raw)
+    assert "rowid" not in sql.casefold()
+    assert "NOT EXISTS" in sql
+    assert "earlier.queue_order < queued.queue_order" in sql
+    assert "ORDER BY queued.queue_order, queued.id" in sql
 
 
 def test_metrics_sql_uses_postgresql_scalar_and_datetime_compatibility() -> None:

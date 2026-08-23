@@ -33,16 +33,71 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
       - run: uv sync --frozen --extra dev
-      - run: uv run ruff format --check .
-      - run: uv run ruff check .
-      - run: uv run mypy
-      - run: uv run pytest -m "not hardware"
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: apps/web
+      - name: Python format
+        run: uv run ruff format --check .
+      - name: Python lint
+        run: uv run ruff check .
+      - name: Python typecheck
+        run: uv run mypy
+      - name: Frontend format
+        run: npm run format:check
+        working-directory: apps/web
+      - name: Frontend lint
+        run: npm run lint
+        working-directory: apps/web
+      - name: Frontend typecheck
+        run: npm run typecheck
+        working-directory: apps/web
+      - name: Frontend unit and component tests
+        run: npm run test
+        working-directory: apps/web
+      - name: Check generated frontend API client
+        run: npm run api:check
+        working-directory: apps/web
+      - name: Frontend dependency audit
+        run: npm run audit:dependencies
+        working-directory: apps/web
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+      - name: Frontend fixture browser tests
+        run: npm run e2e
+        working-directory: apps/web
+      - name: Real control-plane and SimLab browser tests
+        run: npm run e2e:integration
+        working-directory: apps/web
+      - name: Python and SimLab tests
+        run: uv run pytest -m "not hardware"
         env:
           LAB_PLATFORM_TEST_POSTGRESQL_URL: >-
             postgresql://lab_test:lab_test@127.0.0.1:5432/lab_platform_test
-      - run: uv run python scripts/export_openapi.py --service agent --check docs/openapi.json
-      - run: >-
+      - name: Check Agent OpenAPI contract
+        run: uv run python scripts/export_openapi.py --service agent --check docs/openapi.json
+      - name: Check control-plane OpenAPI contract
+        run: >-
           uv run python scripts/export_openapi.py --service control-plane --check
           docs/control-plane-openapi.json
-      - run: uv build
+      - name: Build production dashboard
+        run: npm run build
+        working-directory: apps/web
+      - name: Check committed dashboard bundle
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain -- apps/control_plane/src/lab_platform/control_plane/web_dist)" ]]; then
+            git status --short -- apps/control_plane/src/lab_platform/control_plane/web_dist
+            echo "The packaged dashboard is stale. Run npm run build in apps/web."
+            exit 1
+          fi
+      - name: Build Python source and wheel distributions
+        run: uv build
+      - name: Inspect dashboard in wheel
+        run: uv run python scripts/verify_web_wheel.py dist/*.whl

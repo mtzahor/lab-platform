@@ -83,6 +83,8 @@ _RETRYABLE_GRANT_ERRORS = (
 _RESERVATION_LIFECYCLE_METADATA_KEY = "reservation_lifecycle"
 _WORKFLOW_MANAGED_RESERVATION = "workflow"
 _CALLER_MANAGED_RESERVATION = "caller"
+_RESERVATION_LIFECYCLE_RELEASE_AFTER_KEY = "release_after"
+_RESERVATION_LIFECYCLE_MANAGEMENT_KEY = "management"
 _EXPECTED_RELEASE_RACES = (
     ReservationLeaseInvalidError,
     ReservationLeaseVersionMismatchError,
@@ -117,6 +119,8 @@ class DistributedWorkflowRequest:
     lease_ttl_seconds: int | None = None
     command_timeout_seconds: int = 3_600
     manage_reservation_lifecycle: bool = True
+    reservation_id: UUID | None = None
+    release_reservation_after: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +241,23 @@ class WorkflowReservationService(Protocol):
         metadata: Mapping[str, str] | None = None,
     ) -> CoordinatedReservationLease: ...
 
-    async def get(self, reservation_id: UUID) -> CoordinatedReservationLease: ...
+    async def get(
+        self,
+        reservation_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> CoordinatedReservationLease: ...
+
+    async def require_for_new_work(
+        self,
+        reservation_id: UUID,
+        *,
+        agent_id: UUID,
+        bench_id: str,
+        owner: str,
+        lease_version: int,
+        agent_observed_at: datetime | None = None,
+    ) -> ReservationLease: ...
 
     async def release(
         self,
@@ -312,7 +332,8 @@ class DistributedWorkflowReservationLifecycle:
     Both terminal commands and terminal operations are inspected.  The overlap is
     intentional: those records are updated by separate compare-and-set writes, so
     either one can be the durable terminal witness after an abrupt process exit.
-    Caller-managed reservations (notably CI sessions) are never touched here.
+    Caller-managed reservations are retained unless the durable workflow command
+    records the caller's explicit release-after intent.
     """
 
     def __init__(
@@ -346,9 +367,16 @@ class DistributedWorkflowReservationLifecycle:
             reservation = await self._reservations.get(command.reservation_id)
         except ReservationNotFoundError:
             return False
+        release_after = _command_release_reservation_after(command)
         if (
-            reservation.reservation.metadata.get(_RESERVATION_LIFECYCLE_METADATA_KEY)
-            != _WORKFLOW_MANAGED_RESERVATION
+            (
+                release_after is False
+                or (
+                    release_after is None
+                    and reservation.reservation.metadata.get(_RESERVATION_LIFECYCLE_METADATA_KEY)
+                    != _WORKFLOW_MANAGED_RESERVATION
+                )
+            )
             or reservation.state
             in {
                 ReservationLeaseState.RELEASED,
@@ -470,6 +498,27 @@ class DistributedWorkflowCoordinator:
         )
         if not isinstance(request.manage_reservation_lifecycle, bool):
             raise ValueError("manage_reservation_lifecycle must be a boolean")
+        if request.reservation_id is not None and not isinstance(request.reservation_id, UUID):
+            raise ValueError("reservation_id must be a UUID")
+        if request.release_reservation_after is not None and not isinstance(
+            request.release_reservation_after, bool
+        ):
+            raise ValueError("release_reservation_after must be a boolean")
+        if request.reservation_id is None:
+            if request.release_reservation_after is not None:
+                raise ValueError("release_reservation_after requires an existing reservation_id")
+        else:
+            if request.release_reservation_after is None:
+                raise ValueError(
+                    "release_reservation_after must be explicit when reservation_id is supplied"
+                )
+            if (
+                request.reservation_duration_seconds is not None
+                or request.lease_ttl_seconds is not None
+            ):
+                raise ValueError(
+                    "Existing workflow reservations cannot be granted or renewed by a run request"
+                )
         await self._authorise_workflow(request, definition)
         for _input_name, reference in artifact_inputs:
             await self._artifacts.require_access(
@@ -572,67 +621,74 @@ class DistributedWorkflowCoordinator:
         idempotency_key: str,
         fingerprint: str,
     ) -> DistributedWorkflowDispatch:
-        candidates = await self._eligible_candidates(request, definition)
-        if not candidates:
-            raise _no_compatible_bench(request, definition)
-
         reservation: CoordinatedReservationLease | None = None
         selected_agent: AgentRecord | None = None
         selected_bench: GlobalBenchRecord | None = None
+        reused_reservation = request.reservation_id is not None
         raced_benches: list[str] = []
         organisation_key = str(_effective_request_organisation(request))
-        reservation_key = _derived_key(
-            "workflow-reservation",
-            organisation_key,
-            idempotency_key,
-        )
-        for agent, bench in candidates:
-            try:
-                grant_options: dict[str, Any] = {
-                    "agent_id": agent.id,
-                    "bench_id": bench.id,
-                    "owner": owner,
-                    "idempotency_key": reservation_key,
-                    "reservation_duration_seconds": request.reservation_duration_seconds,
-                    "lease_ttl_seconds": request.lease_ttl_seconds,
-                    "source": ReservationSource.API,
-                    "metadata": {
-                        "workload": "workflow",
-                        "workflow_name": definition.name,
-                        "workflow_version": str(definition.version),
-                        "workflow_fingerprint": fingerprint,
-                        _RESERVATION_LIFECYCLE_METADATA_KEY: (
-                            _WORKFLOW_MANAGED_RESERVATION
-                            if request.manage_reservation_lifecycle
-                            else _CALLER_MANAGED_RESERVATION
-                        ),
-                    },
-                }
-                if request.owner_principal is not None:
-                    grant_options["owner_principal"] = request.owner_principal
-                if isinstance(self._reservations, CentralReservationLeaseService):
-                    grant_options["authentication_context"] = request.authentication_context
-                    grant_options["allow_internal_authorisation"] = True
-                candidate = await self._reservations.grant(**grant_options)
-            except _RETRYABLE_GRANT_ERRORS:
-                raced_benches.append(bench.id)
-                continue
-            except ReservationLeaseInvalidError as exc:
-                if not _is_atomic_eligibility_race(exc):
-                    raise
-                raced_benches.append(bench.id)
-                continue
-            if candidate.state is not ReservationLeaseState.ACTIVE:
-                await self._release_pre_dispatch(candidate)
-                raise ReservationLeaseInvalidError(
-                    "Workflow reservation was not semantically confirmed by the Agent.",
-                    reservation_id=str(candidate.reservation.id),
-                    lease_state=candidate.state.value,
-                )
-            reservation = candidate
-            selected_agent = agent
-            selected_bench = bench
-            break
+        if request.reservation_id is not None:
+            reservation, selected_agent, selected_bench = await self._reuse_reservation(
+                request,
+                definition=definition,
+                owner=owner,
+            )
+        else:
+            candidates = await self._eligible_candidates(request, definition)
+            if not candidates:
+                raise _no_compatible_bench(request, definition)
+            reservation_key = _derived_key(
+                "workflow-reservation",
+                organisation_key,
+                idempotency_key,
+            )
+            for agent, bench in candidates:
+                try:
+                    grant_options: dict[str, Any] = {
+                        "agent_id": agent.id,
+                        "bench_id": bench.id,
+                        "owner": owner,
+                        "idempotency_key": reservation_key,
+                        "reservation_duration_seconds": request.reservation_duration_seconds,
+                        "lease_ttl_seconds": request.lease_ttl_seconds,
+                        "source": ReservationSource.API,
+                        "metadata": {
+                            "workload": "workflow",
+                            "workflow_name": definition.name,
+                            "workflow_version": str(definition.version),
+                            "workflow_fingerprint": fingerprint,
+                            _RESERVATION_LIFECYCLE_METADATA_KEY: (
+                                _WORKFLOW_MANAGED_RESERVATION
+                                if request.manage_reservation_lifecycle
+                                else _CALLER_MANAGED_RESERVATION
+                            ),
+                        },
+                    }
+                    if request.owner_principal is not None:
+                        grant_options["owner_principal"] = request.owner_principal
+                    if isinstance(self._reservations, CentralReservationLeaseService):
+                        grant_options["authentication_context"] = request.authentication_context
+                        grant_options["allow_internal_authorisation"] = True
+                    candidate = await self._reservations.grant(**grant_options)
+                except _RETRYABLE_GRANT_ERRORS:
+                    raced_benches.append(bench.id)
+                    continue
+                except ReservationLeaseInvalidError as exc:
+                    if not _is_atomic_eligibility_race(exc):
+                        raise
+                    raced_benches.append(bench.id)
+                    continue
+                if candidate.state is not ReservationLeaseState.ACTIVE:
+                    await self._release_pre_dispatch(candidate)
+                    raise ReservationLeaseInvalidError(
+                        "Workflow reservation was not semantically confirmed by the Agent.",
+                        reservation_id=str(candidate.reservation.id),
+                        lease_state=candidate.state.value,
+                    )
+                reservation = candidate
+                selected_agent = agent
+                selected_bench = bench
+                break
 
         if reservation is None or selected_agent is None or selected_bench is None:
             error = _no_compatible_bench(request, definition)
@@ -689,6 +745,10 @@ class DistributedWorkflowCoordinator:
                 "owner": owner,
                 "artifact_transfers": [transfer.as_payload() for transfer in transfers],
                 "reservation_lease": reservation.lease.model_dump(mode="json"),
+                _RESERVATION_LIFECYCLE_METADATA_KEY: _workflow_reservation_lifecycle_payload(
+                    request,
+                    reused_reservation=reused_reservation,
+                ),
             }
             command_options: dict[str, Any] = {
                 "agent_id": selected_agent.id,
@@ -717,7 +777,11 @@ class DistributedWorkflowCoordinator:
             if operation is None:
                 raise RuntimeError("RUN_WORKFLOW command did not create a distributed operation")
         except BaseException:
-            await self._release_pre_dispatch(reservation)
+            # A reused lease remains owned by the caller until a durable command
+            # records this request's release-after intent.  Releasing it here can
+            # fence unrelated work that is already using the same reservation.
+            if not reused_reservation:
+                await self._release_pre_dispatch(reservation)
             raise
 
         command, dispatched_operation = await self._commands.dispatch(
@@ -766,12 +830,15 @@ class DistributedWorkflowCoordinator:
                 str(reservation.lease.lease_version),
             )
             if isinstance(self._reservations, CentralReservationLeaseService):
+                release_options: dict[str, Any] = {
+                    "owner": reservation.reservation.owner,
+                    "expected_lease_version": reservation.lease.lease_version,
+                    "idempotency_key": release_key,
+                }
+                release_options["allow_internal_authorisation"] = True
                 await self._reservations.release(
                     reservation.reservation.id,
-                    owner=reservation.reservation.owner,
-                    expected_lease_version=reservation.lease.lease_version,
-                    idempotency_key=release_key,
-                    allow_internal_authorisation=True,
+                    **release_options,
                 )
             else:
                 await self._reservations.release(
@@ -784,6 +851,68 @@ class DistributedWorkflowCoordinator:
             # A concurrent terminal transition or lease renewal already fenced this
             # exact grant. Never broaden cleanup to a newer lease generation.
             return
+
+    async def _reuse_reservation(
+        self,
+        request: DistributedWorkflowRequest,
+        *,
+        definition: WorkflowDefinition,
+        owner: str,
+    ) -> tuple[CoordinatedReservationLease, AgentRecord, GlobalBenchRecord]:
+        reservation_id = request.reservation_id
+        if reservation_id is None:  # pragma: no cover - guarded by the caller
+            raise RuntimeError("Existing reservation selection requires a reservation ID")
+        expected_organisation = _effective_request_organisation(request)
+        reservation = await self._reservations.get(
+            reservation_id,
+            organisation_id=expected_organisation,
+        )
+        if request.bench_id is not None and request.bench_id != reservation.lease.bench_id:
+            raise ReservationLeaseInvalidError(
+                "Workflow reservation does not match the explicitly requested bench.",
+                reservation_id=str(reservation_id),
+                reservation_bench_id=reservation.lease.bench_id,
+                requested_bench_id=request.bench_id,
+            )
+
+        # Pin routing to the caller's lease. This retains the usual workflow and
+        # bench authorisation/compatibility checks without ever considering a
+        # fallback bench that would need a second reservation.
+        candidates = await self._eligible_candidates(
+            replace(request, bench_id=reservation.lease.bench_id),
+            definition,
+        )
+        selected = next(
+            (
+                (agent, bench)
+                for agent, bench in candidates
+                if agent.id == reservation.lease.agent_id and bench.id == reservation.lease.bench_id
+            ),
+            None,
+        )
+        if selected is None:
+            error = _no_compatible_bench(request, definition)
+            error.details["reservation_id"] = str(reservation_id)
+            error.details["reservation_bench_id"] = reservation.lease.bench_id
+            raise error
+
+        if request.release_reservation_after is True:
+            await self._authorise_reservation_release(request, selected[1])
+        _require_reservation_principal_owner(reservation, request.owner_principal)
+        current_lease = await self._reservations.require_for_new_work(
+            reservation_id,
+            agent_id=reservation.lease.agent_id,
+            bench_id=reservation.lease.bench_id,
+            owner=owner,
+            lease_version=reservation.lease.lease_version,
+        )
+        if current_lease != reservation.lease:
+            raise ReservationLeaseInvalidError(
+                "Reservation lease changed while the workflow was being prepared.",
+                reservation_id=str(reservation_id),
+                lease_version=reservation.lease.lease_version,
+            )
+        return reservation, selected[0], selected[1]
 
     async def _eligible_candidates(
         self,
@@ -918,6 +1047,27 @@ class DistributedWorkflowCoordinator:
                 credential_restrictions=context.permission_restrictions,
             )
         return allowed
+
+    async def _authorise_reservation_release(
+        self,
+        request: DistributedWorkflowRequest,
+        bench: GlobalBenchRecord,
+    ) -> None:
+        authorisation = self._authorisation
+        context = request.authentication_context
+        if authorisation is None or context is None:
+            return
+        await authorisation.require(
+            context.principal,
+            "benches:reserve",
+            AuthorisationResource(
+                type=ResourceType.BENCH,
+                id=bench.id,
+                organisation_id=bench.organisation_id,
+                parent_agent_id=bench.agent_id,
+            ),
+            credential_restrictions=context.permission_restrictions,
+        )
 
     async def _claim_request(
         self,
@@ -1110,6 +1260,15 @@ def _authenticated_request_context(
         raise WorkflowInvalidError(
             "Workflow actor context does not match the authenticated principal."
         )
+    owner_principal = request.owner_principal
+    if owner_principal is not None and (
+        owner_principal.principal_id != principal.id
+        or owner_principal.principal_type is not principal.type
+        or owner_principal.display_name != principal.display_name
+    ):
+        raise WorkflowInvalidError(
+            "Workflow reservation owner does not match the authenticated principal."
+        )
     return context
 
 
@@ -1154,6 +1313,10 @@ def _workflow_fingerprint(
         "lease_ttl_seconds": request.lease_ttl_seconds,
         "command_timeout_seconds": request.command_timeout_seconds,
         "manage_reservation_lifecycle": request.manage_reservation_lifecycle,
+        "reservation_id": (
+            str(request.reservation_id) if request.reservation_id is not None else None
+        ),
+        "release_reservation_after": request.release_reservation_after,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode()).hexdigest()
@@ -1188,6 +1351,63 @@ def _json_inputs(inputs: Mapping[str, object]) -> dict[str, object]:
         else:
             encoded[name] = value
     return encoded
+
+
+def _workflow_reservation_lifecycle_payload(
+    request: DistributedWorkflowRequest,
+    *,
+    reused_reservation: bool,
+) -> dict[str, object]:
+    if reused_reservation:
+        management = _CALLER_MANAGED_RESERVATION
+        release_after = request.release_reservation_after is True
+    else:
+        management = (
+            _WORKFLOW_MANAGED_RESERVATION
+            if request.manage_reservation_lifecycle
+            else _CALLER_MANAGED_RESERVATION
+        )
+        release_after = request.manage_reservation_lifecycle
+    return {
+        _RESERVATION_LIFECYCLE_MANAGEMENT_KEY: management,
+        _RESERVATION_LIFECYCLE_RELEASE_AFTER_KEY: release_after,
+    }
+
+
+def _command_release_reservation_after(command: RemoteCommand) -> bool | None:
+    if _RESERVATION_LIFECYCLE_METADATA_KEY not in command.payload:
+        # Commands persisted before Phase 7 use reservation metadata instead.
+        return None
+    raw_lifecycle = command.payload[_RESERVATION_LIFECYCLE_METADATA_KEY]
+    if not isinstance(raw_lifecycle, Mapping):
+        return False
+    management = raw_lifecycle.get(_RESERVATION_LIFECYCLE_MANAGEMENT_KEY)
+    release_after = raw_lifecycle.get(_RESERVATION_LIFECYCLE_RELEASE_AFTER_KEY)
+    if management not in {
+        _WORKFLOW_MANAGED_RESERVATION,
+        _CALLER_MANAGED_RESERVATION,
+    } or not isinstance(release_after, bool):
+        return False
+    return release_after
+
+
+def _require_reservation_principal_owner(
+    reservation: CoordinatedReservationLease,
+    owner_principal: ReservationOwner | None,
+) -> None:
+    stored_id = reservation.reservation.owner_principal_id
+    stored_type = reservation.reservation.owner_principal_type
+    if stored_id is None and stored_type is None and owner_principal is None:
+        return
+    if (
+        owner_principal is None
+        or stored_id != owner_principal.principal_id
+        or stored_type != owner_principal.principal_type.value
+    ):
+        raise ReservationOwnerMismatchError(
+            "Reservation owner principal does not match.",
+            reservation_id=str(reservation.reservation.id),
+        )
 
 
 def _derived_key(kind: str, raw_key: str, *parts: str) -> str:

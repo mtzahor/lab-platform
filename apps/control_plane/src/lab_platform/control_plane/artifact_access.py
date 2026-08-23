@@ -369,11 +369,16 @@ class ProtectedArtifactService:
         )
         if (owner_type is None) != (owner_id is None):
             raise ValueError("owner_type and owner_id must be supplied together")
-        platform = (
-            await self._platform.list_for_owner(owner_type, owner_id, organisation_id=scope)
-            if owner_type is not None and owner_id is not None
-            else []
-        )
+        if owner_type is not None and owner_id is not None:
+            platform = await self._platform.list_for_owner(
+                owner_type,
+                owner_id,
+                organisation_id=scope,
+            )
+        elif agent_id is None and command_id is None:
+            platform = await self._platform.list_all(organisation_id=scope, limit=limit)
+        else:
+            platform = []
         remote = (
             await self._remote.list(
                 organisation_id=scope,
@@ -507,7 +512,7 @@ class ProtectedArtifactService:
             await self._require_parent(
                 authentication_context,
                 parent,
-                "artifacts:write",
+                "artifacts:read",
                 artifact_id=artifact_id,
             )
         # Validate the target Agent against the same trusted tenant before issuing

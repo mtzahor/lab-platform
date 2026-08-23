@@ -70,6 +70,23 @@ security:
     attempts: 10
     window_minutes: 15
 
+web:
+  # Integrated serving is the canonical self-hosted layout; use HTTPS in production.
+  enabled: true
+  public_url: https://lab-control.internal:8443
+  api_base_url: /api/v1
+  live_updates:
+    sse_enabled: true
+    polling_fallback_seconds: 5
+  uploads:
+    maximum_firmware_size_mb: 100
+  features:
+    identity_admin: true
+    audit_viewer: true
+    ci_sessions: true
+  branding:
+    product_name: Lab Platform
+
 development:
   enabled: false
   allow_insecure_agent_transport: false

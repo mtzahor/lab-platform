@@ -186,6 +186,23 @@ def test_identity_administration_end_to_end(tmp_path: Path) -> None:
             password="alice password is long enough",
         )
         alice_context = await authentication.authenticate_session(alice_login.access_token)
+        assert await administration.list_user_team_memberships(owner_context, alice.id) == [
+            (team, membership)
+        ]
+        team_members = await administration.list_team_members(owner_context, team.id)
+        assert len(team_members) == 1
+        assert team_members[0][0] == membership
+        assert team_members[0][1].id == alice.id
+        user_sessions = await administration.list_user_sessions(owner_context, alice.id)
+        assert len(user_sessions) == 1
+        assert user_sessions[0].user_id == alice.id
+        assert await administration.list_role_assignments(
+            owner_context,
+            subject_type=RoleSubjectType.TEAM,
+            subject_id=team.id,
+            resource_type=ResourceType.BENCH,
+            resource_id="home-lab/esp32-01",
+        ) == (assignment,)
         bench = AuthorisationResource(
             type=ResourceType.BENCH,
             id="home-lab/esp32-01",
@@ -295,10 +312,14 @@ def test_identity_administration_end_to_end(tmp_path: Path) -> None:
         )
         assert filtered_view_event.metadata == {
             "result_count": 0,
+            "actor_filter_applied": False,
             "action_filter_applied": True,
+            "resource_filter_applied": False,
             "outcome_filter_applied": False,
+            "correlation_filter_applied": False,
             "after_filter_applied": False,
             "before_filter_applied": False,
+            "cursor_applied": False,
             "requested_limit": 7,
         }
         assert secret_shaped_filter not in filtered_view_event.model_dump_json()

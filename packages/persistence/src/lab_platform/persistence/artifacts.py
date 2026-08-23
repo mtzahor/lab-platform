@@ -111,6 +111,26 @@ class SQLiteGenericArtifactRepository:
             ).fetchall()
         return [_artifact_from_row(row) for row in rows]
 
+    async def list_all(
+        self,
+        *,
+        organisation_id: UUID | None = None,
+        limit: int = 500,
+    ) -> list[ArtifactRecord]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        scope = "WHERE organisation_id = ? " if organisation_id is not None else ""
+        values: tuple[object, ...] = (
+            (str(organisation_id), limit) if organisation_id is not None else (limit,)
+        )
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM artifacts {scope}"  # noqa: S608
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [_artifact_from_row(row) for row in rows]
+
     async def list_expired(
         self,
         *,

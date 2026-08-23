@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -58,6 +59,7 @@ from lab_platform.control_plane_core.errors import (
     ArtifactTransferFailedError,
     RemoteCommandRejectedError,
 )
+from lab_platform.core import ArtifactService
 from lab_platform.core.bench_catalog import BenchRecord
 from lab_platform.core.errors import (
     BenchNotFoundError,
@@ -76,8 +78,13 @@ from lab_platform.models import (
     RemoteCommand,
     RemoteCommandType,
     ReservationLease,
+    SerialLine,
 )
-from lab_platform.persistence import SQLiteDatabase, SQLiteOperationLockRepository
+from lab_platform.persistence import (
+    SQLiteDatabase,
+    SQLiteGenericArtifactRepository,
+    SQLiteOperationLockRepository,
+)
 from pydantic import SecretStr, ValidationError
 
 AGENT_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -169,6 +176,74 @@ class _Handler:
 
     def set_draining(self, value: bool) -> None:
         self.draining = value
+
+
+class _StaticSerialRegistry:
+    def __init__(self, backend: object) -> None:
+        self._backend = backend
+
+    async def get_backend_for_bench(self, bench_id: str) -> object:
+        assert bench_id == "bench-01"
+        return self._backend
+
+
+class _GatedSerialBackend:
+    def __init__(self, lines: int, *, padding_characters: int = 0) -> None:
+        self._line_count = lines
+        self._padding = " " + "x" * padding_characters if padding_characters else ""
+        self.release = asyncio.Event()
+
+    async def read_serial(
+        self,
+        bench_id: str,
+        _request: object,
+    ) -> Any:
+        assert bench_id == "bench-01"
+        for index in range(self._line_count):
+            yield SerialLine(text=f"line-{index:04d} token=serial-secret{self._padding}")
+            if index == 0:
+                await self.release.wait()
+
+
+def _serial_executor(
+    tmp_path: Path,
+    backend: object,
+    *,
+    tail_lines: int,
+    artifact_bytes: int,
+) -> tuple[LocalAgentCommandExecutor, ArtifactService, SQLiteAgentEventBuffer, SQLiteDatabase]:
+    database = SQLiteDatabase(tmp_path / "serial.db")
+    database.initialize()
+    artifact_service = ArtifactService(
+        SQLiteGenericArtifactRepository(database),
+        tmp_path / "serial-artifacts",
+        maximum_size_bytes=artifact_bytes,
+    )
+    fake_agent = cast(
+        LabAgent,
+        SimpleNamespace(
+            backend_registry=_StaticSerialRegistry(backend),
+            artifact_service=artifact_service,
+        ),
+    )
+    event_buffer = SQLiteAgentEventBuffer(database, AGENT_ID)
+    executor = LocalAgentCommandExecutor(
+        fake_agent,
+        locks=SQLiteOperationLockRepository(database),
+        workflows=cast(Any, object()),
+        workflow_runner=cast(Any, object()),
+        artifacts=AgentArtifactCache(
+            tmp_path / "cache",
+            "https://control.example",
+            maximum_size_bytes=1024,
+            transport=_ArtifactTransport(),
+        ),
+        events=event_buffer,
+        serial_buffer_lines=tail_lines,
+        serial_artifact_max_bytes=artifact_bytes,
+        serial_redact_patterns=(r"token=[^ ]+",),
+    )
+    return executor, artifact_service, event_buffer, database
 
 
 def _record(*, online: bool = True, health: HealthStatus = HealthStatus.HEALTHY) -> BenchRecord:
@@ -342,6 +417,131 @@ async def test_direct_remote_executor_runs_every_local_command(tmp_path: Path) -
     finally:
         agent.distributed_runtime = None
         await agent.shutdown()
+
+
+@pytest.mark.anyio
+async def test_distributed_serial_publishes_live_progress_before_completion(
+    tmp_path: Path,
+) -> None:
+    backend = _GatedSerialBackend(2)
+    executor, artifacts, events, database = _serial_executor(
+        tmp_path,
+        backend,
+        tail_lines=10,
+        artifact_bytes=1024,
+    )
+    progress_results: list[dict[str, Any]] = []
+    progress_visible = asyncio.Event()
+
+    async def report_progress(
+        *,
+        progress: int | None = None,
+        message: str | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
+        del progress, message
+        assert result is not None
+        progress_results.append(dict(result))
+        progress_visible.set()
+
+    command = _command(
+        RemoteCommandType.READ_SERIAL,
+        {"request": {"max_lines": 2, "timeout_seconds": 1}},
+    )
+    task = asyncio.create_task(
+        executor.execute(
+            command,
+            local_operation_id=uuid4(),
+            report_progress=report_progress,
+        )
+    )
+    try:
+        await asyncio.wait_for(progress_visible.wait(), timeout=1)
+        assert not task.done()
+        assert progress_results[0]["line_count"] == 1
+        assert progress_results[0]["line_offset"] == 0
+        assert len(progress_results[0]["lines"]) == 1
+
+        backend.release.set()
+        result = await asyncio.wait_for(task, timeout=1)
+        assert result is not None
+        assert result["line_count"] == 2
+        assert result["line_offset"] == 0
+        assert result["truncated"] is False
+
+        artifact_id = UUID(str(result["artifact_id"]))
+        artifact = await artifacts.get(artifact_id)
+        content = (await artifacts.content_path(artifact_id)).read_text(encoding="utf-8")
+        assert artifact.artifact_type == "serial_log"
+        assert "serial-secret" not in content
+        assert content.count("[REDACTED]") == 2
+
+        buffered = await events.peek(limit=10)
+        created = next(
+            event for event in buffered if event.event_type == MessageType.ARTIFACT_CREATED.value
+        )
+        assert created.payload["artifact"]["local_artifact_id"] == str(artifact_id)
+        assert created.payload["artifact"]["operation_id"] == str(command.operation_id)
+    finally:
+        backend.release.set()
+        if not task.done():
+            await task
+        database.close()
+
+
+@pytest.mark.anyio
+async def test_distributed_serial_keeps_bounded_tail_and_total_beyond_two_thousand_lines(
+    tmp_path: Path,
+) -> None:
+    backend = _GatedSerialBackend(2_505, padding_characters=2_100)
+    backend.release.set()
+    executor, artifacts, _events, database = _serial_executor(
+        tmp_path,
+        backend,
+        tail_lines=100_000,
+        artifact_bytes=256,
+    )
+    totals: list[int] = []
+
+    async def report_progress(
+        *,
+        progress: int | None = None,
+        message: str | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
+        del progress, message
+        assert result is not None
+        totals.append(int(result["line_count"]))
+
+    try:
+        result = await executor.execute(
+            _command(
+                RemoteCommandType.READ_SERIAL,
+                {"request": {"max_lines": 3_000, "timeout_seconds": 10}},
+            ),
+            local_operation_id=uuid4(),
+            report_progress=report_progress,
+        )
+        assert result is not None
+        assert totals == sorted(totals)
+        assert totals[0] == 1
+        assert totals[-1] == 2_505
+        assert result["line_count"] == 2_505
+        assert result["line_offset"] == result["line_count"] - len(result["lines"])
+        assert 0 < len(result["lines"]) < 2_505
+        assert result["truncated"] is True
+        assert len(json.dumps(result).encode("utf-8")) < 256 * 1024
+        assert all("serial-secret" not in item["text"] for item in result["lines"])
+
+        artifact_id = UUID(str(result["artifact_id"]))
+        artifact = await artifacts.get(artifact_id)
+        content = (await artifacts.content_path(artifact_id)).read_bytes()
+        assert artifact.size_bytes <= 256
+        assert artifact.metadata["line_count"] == "2505"
+        assert artifact.metadata["truncated"] == "true"
+        assert b"serial-secret" not in content
+    finally:
+        database.close()
 
 
 @pytest.mark.anyio

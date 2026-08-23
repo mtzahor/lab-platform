@@ -237,6 +237,8 @@ async def _workflow_ci_and_artifact_queries_are_tenant_scoped(tmp_path: Path) ->
         artifact.owner_id,
         organisation_id=SECOND_ORGANISATION_ID,
     ) == [artifact]
+    assert await artifacts.list_all(organisation_id=SECOND_ORGANISATION_ID) == [artifact]
+    assert await artifacts.list_all(organisation_id=LEGACY_ORGANISATION_ID) == []
 
     session = CiSession(
         provider=CiProvider.LOCAL,
