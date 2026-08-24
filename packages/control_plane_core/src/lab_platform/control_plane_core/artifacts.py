@@ -3,9 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import os
 import secrets
-import tempfile
 from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,7 +15,17 @@ from lab_platform.control_plane_core.errors import (
     ArtifactTransferFailedError,
     ArtifactTransferTokenExpiredError,
 )
-from lab_platform.core.errors import ArtifactChecksumMismatchError, ArtifactTooLargeError
+from lab_platform.core.artifact_storage import (
+    ArtifactStorage,
+    LocalArtifactStorage,
+    LocalPathArtifactStorage,
+    StoredArtifact,
+)
+from lab_platform.core.errors import (
+    ArtifactChecksumMismatchError,
+    ArtifactTooLargeError,
+    InvalidArtifactError,
+)
 from lab_platform.models import (
     ArtifactTransferAttempt,
     ArtifactTransferDirection,
@@ -162,13 +170,36 @@ class InMemoryArtifactTransferRepository:
 
 
 class FilesystemTransferStore:
-    """Immutable artifact content store addressed only by server-issued UUID and digest."""
+    """Compatibility facade over backend-neutral immutable artifact storage.
 
-    def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
+    The historical name and Path-returning methods remain available for local
+    deployments. New code can use the object/stream methods with S3-compatible
+    storage without assuming a filesystem path.
+    """
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        storage: ArtifactStorage | None = None,
+    ) -> None:
+        if storage is None:
+            if root is None:
+                raise ValueError("Transfer storage or a local storage root is required")
+            storage = LocalArtifactStorage(root)
+        elif root is not None:
+            raise ValueError("Configure either transfer storage or a local root, not both")
+        self.storage = storage
+        self.root = storage.root if isinstance(storage, LocalArtifactStorage) else None
 
     def path_for(self, artifact_id: UUID, sha256: str) -> Path:
+        if self.root is None:
+            raise RuntimeError("Transfer content does not have a local filesystem path")
         return self.root / sha256[:2] / str(artifact_id)
+
+    @staticmethod
+    def key_for(artifact_id: UUID, sha256: str) -> str:
+        return f"{sha256[:2]}/{artifact_id}"
 
     async def stage_verified_file(
         self,
@@ -179,6 +210,24 @@ class FilesystemTransferStore:
         *,
         maximum_size_bytes: int,
     ) -> Path:
+        await self.stage_verified_object(
+            artifact_id,
+            expected_sha256,
+            expected_size_bytes,
+            source,
+            maximum_size_bytes=maximum_size_bytes,
+        )
+        return self._require_local().local_path(self.key_for(artifact_id, expected_sha256))
+
+    async def stage_verified_object(
+        self,
+        artifact_id: UUID,
+        expected_sha256: str,
+        expected_size_bytes: int,
+        source: Path,
+        *,
+        maximum_size_bytes: int,
+    ) -> StoredArtifact:
         resolved = source.resolve(strict=True)
         if not resolved.is_file():
             raise ArtifactTransferFailedError("Artifact source is not a regular file.")
@@ -191,14 +240,13 @@ class FilesystemTransferStore:
                         break
                     yield chunk
 
-        path, _, _ = await self.write_verified(
+        return await self.write_verified_object(
             artifact_id,
             expected_sha256,
             expected_size_bytes,
             chunks(),
             maximum_size_bytes=maximum_size_bytes,
         )
-        return path
 
     async def write_verified(
         self,
@@ -209,61 +257,45 @@ class FilesystemTransferStore:
         *,
         maximum_size_bytes: int,
     ) -> tuple[Path, int, str]:
-        if expected_size_bytes > maximum_size_bytes:
-            raise ArtifactTooLargeError(
-                "Artifact exceeds the configured transfer limit.",
-                maximum_size_bytes=maximum_size_bytes,
-            )
-        destination = self.path_for(artifact_id, expected_sha256)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            size, existing_digest = _hash_file(destination)
-            if size == expected_size_bytes and hmac.compare_digest(
-                existing_digest, expected_sha256
-            ):
-                return destination, size, existing_digest
-
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{artifact_id}.",
-            suffix=".part",
-            dir=destination.parent,
+        stored = await self.write_verified_object(
+            artifact_id,
+            expected_sha256,
+            expected_size_bytes,
+            chunks,
+            maximum_size_bytes=maximum_size_bytes,
         )
-        temporary_path = Path(temporary_name)
-        hasher = hashlib.sha256()
-        received = 0
+        path = self._require_local().local_path(stored.key)
+        return path, stored.size_bytes, stored.sha256
+
+    async def write_verified_object(
+        self,
+        artifact_id: UUID,
+        expected_sha256: str,
+        expected_size_bytes: int,
+        chunks: AsyncIterable[bytes],
+        *,
+        maximum_size_bytes: int,
+    ) -> StoredArtifact:
         try:
-            with os.fdopen(descriptor, "wb") as stream:
-                async for chunk in chunks:
-                    if not isinstance(chunk, bytes):
-                        raise ArtifactTransferFailedError("Artifact stream yielded non-byte data.")
-                    received += len(chunk)
-                    if received > maximum_size_bytes or received > expected_size_bytes:
-                        raise ArtifactTooLargeError(
-                            "Artifact upload exceeded its declared size.",
-                            maximum_size_bytes=min(maximum_size_bytes, expected_size_bytes),
-                        )
-                    hasher.update(chunk)
-                    stream.write(chunk)
-                stream.flush()
-                os.fsync(stream.fileno())
-            actual_sha256 = hasher.hexdigest()
-            if received != expected_size_bytes:
-                raise ArtifactTransferFailedError(
-                    "Artifact content length does not match metadata.",
-                    expected_size_bytes=expected_size_bytes,
-                    received_size_bytes=received,
-                )
-            if not hmac.compare_digest(actual_sha256, expected_sha256):
-                raise ArtifactChecksumMismatchError(
-                    "Artifact checksum verification failed.",
-                    expected_sha256=expected_sha256,
-                    actual_sha256=actual_sha256,
-                )
-            os.replace(temporary_path, destination)
-            return destination, received, actual_sha256
-        except BaseException:
-            temporary_path.unlink(missing_ok=True)
+            return await self.storage.put(
+                self.key_for(artifact_id, expected_sha256),
+                chunks,
+                maximum_size_bytes=maximum_size_bytes,
+                expected_size_bytes=expected_size_bytes,
+                expected_sha256=expected_sha256,
+            )
+        except ArtifactTooLargeError:
             raise
+        except ArtifactChecksumMismatchError:
+            raise
+        except InvalidArtifactError as exc:
+            if "chunks must be bytes" in str(exc):
+                raise ArtifactTransferFailedError("Artifact stream yielded non-byte data.") from exc
+            raise ArtifactTransferFailedError(str(exc)) from exc
+        except Exception as exc:
+            if isinstance(exc, ArtifactTransferFailedError):
+                raise
+            raise ArtifactTransferFailedError(str(exc)) from exc
 
     def open_verified(self, artifact_id: UUID, expected_sha256: str) -> Path:
         path = self.path_for(artifact_id, expected_sha256)
@@ -271,12 +303,37 @@ class FilesystemTransferStore:
             resolved = path.resolve(strict=True)
         except FileNotFoundError as exc:
             raise ArtifactTransferFailedError("Artifact content is unavailable.") from exc
-        if not resolved.is_relative_to(self.root):
+        if self.root is None or not resolved.is_relative_to(self.root):
             raise ArtifactTransferFailedError("Artifact content path escaped its storage root.")
         _, digest = _hash_file(resolved)
         if not hmac.compare_digest(digest, expected_sha256):
             raise ArtifactChecksumMismatchError("Stored artifact checksum verification failed.")
         return resolved
+
+    async def open_verified_object(
+        self,
+        artifact_id: UUID,
+        expected_sha256: str,
+    ) -> StoredArtifact:
+        stored = await self.storage.stat(self.key_for(artifact_id, expected_sha256))
+        if not hmac.compare_digest(stored.sha256, expected_sha256):
+            raise ArtifactChecksumMismatchError("Stored artifact checksum verification failed.")
+        return stored
+
+    async def open_verified_stream(
+        self,
+        artifact_id: UUID,
+        expected_sha256: str,
+    ) -> AsyncIterable[bytes]:
+        stored = await self.open_verified_object(artifact_id, expected_sha256)
+        return await self.storage.get(stored.key)
+
+    def _require_local(self) -> LocalPathArtifactStorage:
+        if not isinstance(self.storage, LocalPathArtifactStorage):
+            raise RuntimeError(
+                "This operation requires local artifact storage; use the object/stream API"
+            )
+        return self.storage
 
 
 class DistributedArtifactService:
@@ -338,13 +395,12 @@ class DistributedArtifactService:
         size_bytes: int,
     ) -> IssuedArtifactTransfer:
         # Input content must have been staged into this service's immutable store.
-        staged = self._store.open_verified(artifact_id, sha256)
-        staged_size, _ = _hash_file(staged)
-        if staged_size != size_bytes:
+        staged = await self._store.open_verified_object(artifact_id, sha256)
+        if staged.size_bytes != size_bytes:
             raise ArtifactTransferFailedError(
                 "Staged artifact size does not match its metadata.",
                 expected_size_bytes=size_bytes,
-                actual_size_bytes=staged_size,
+                actual_size_bytes=staged.size_bytes,
             )
         return await self._issue(
             agent_id=agent_id,
@@ -430,13 +486,15 @@ class DistributedArtifactService:
         transfer = persisted or await self._require_transfer(transfer.id)
         started = now
         try:
-            _, received, digest = await self._store.write_verified(
+            stored = await self._store.write_verified_object(
                 artifact.id,
                 transfer.expected_sha256,
                 transfer.expected_size_bytes,
                 chunks,
                 maximum_size_bytes=self._maximum_upload_size_bytes,
             )
+            received = stored.size_bytes
+            digest = stored.sha256
         except Exception as exc:
             failed_at = _utc(self._clock())
             await self._repository.add_attempt(
@@ -500,6 +558,31 @@ class DistributedArtifactService:
             agent_id=agent_id,
         )
         path = self._store.open_verified(transfer.artifact_id, transfer.expected_sha256)
+        await self._complete_download(transfer)
+        return path
+
+    async def download_stream(
+        self,
+        transfer_id: UUID,
+        plaintext_token: str,
+        *,
+        agent_id: UUID | None = None,
+    ) -> AsyncIterable[bytes]:
+        """Authorize a transfer and return content for non-filesystem HTTP serving."""
+
+        transfer = await self.authorize(
+            transfer_id,
+            plaintext_token,
+            direction=ArtifactTransferDirection.CONTROL_PLANE_TO_AGENT,
+            agent_id=agent_id,
+        )
+        stream = await self._store.open_verified_stream(
+            transfer.artifact_id, transfer.expected_sha256
+        )
+        await self._complete_download(transfer)
+        return stream
+
+    async def _complete_download(self, transfer: ArtifactTransferRecord) -> None:
         if transfer.status is not ArtifactTransferStatus.COMPLETED:
             now = _utc(self._clock())
             attempt_number = transfer.attempt_count + 1
@@ -535,7 +618,6 @@ class DistributedArtifactService:
                 ),
                 expected_statuses={ArtifactTransferStatus.IN_PROGRESS},
             )
-        return path
 
     async def _issue(
         self,

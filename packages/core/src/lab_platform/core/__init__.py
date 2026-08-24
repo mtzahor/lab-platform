@@ -1,4 +1,10 @@
 from lab_platform.core.agent import AgentCore
+from lab_platform.core.artifact_storage import (
+    ArtifactStorage,
+    LocalArtifactStorage,
+    S3CompatibleArtifactStorage,
+    StoredArtifact,
+)
 from lab_platform.core.artifacts import ArtifactService, normalize_artifact_name
 from lab_platform.core.auth import ApiTokenService, IssuedApiToken
 from lab_platform.core.authorisation import (
@@ -59,11 +65,13 @@ from lab_platform.core.errors import (
     ReservationNotFoundError,
     ReservationOwnerMismatchError,
     ReservationTimeConflictError,
+    ResourceLimitExceededError,
     SchedulerFailureError,
     SimulationFailureError,
     StaleOperationLockError,
 )
 from lab_platform.core.events import EventBus, EventHandler
+from lab_platform.core.features import CommunityFeatureProvider, Feature, FeatureProvider
 from lab_platform.core.health import HealthMonitor
 from lab_platform.core.identity import (
     IdentityAuthenticationRepository,
@@ -90,8 +98,23 @@ from lab_platform.core.oidc import (
 from lab_platform.core.operation_locks import OperationLockService
 from lab_platform.core.queueing import FifoQueuePolicy, QueuePolicy
 from lab_platform.core.recovery import RecoveryService
+from lab_platform.core.release import (
+    API_VERSION,
+    PLUGIN_API_VERSION,
+    BuildMetadata,
+    ReleaseChannel,
+    build_metadata,
+    release_channel,
+)
 from lab_platform.core.reservations import ReservationService as TimedReservationService
 from lab_platform.core.results import build_test_results, render_junit_xml
+from lab_platform.core.retention import (
+    RetentionClass,
+    RetentionPolicy,
+    RetentionRunResult,
+    RetentionWorker,
+    retention_class_for_artifact_type,
+)
 from lab_platform.core.scheduler import Scheduler
 from lab_platform.core.scheduling import SchedulingService
 from lab_platform.core.services import (
@@ -117,6 +140,10 @@ from lab_platform.core.workflows import (
 
 __all__ = [
     "ALL_PERMISSIONS",
+    "API_VERSION",
+    "PLUGIN_API_VERSION",
+    "BuildMetadata",
+    "CommunityFeatureProvider",
     "ORGANISATION_ROLE_PERMISSIONS",
     "ROLE_PERMISSIONS",
     "AgentCore",
@@ -124,6 +151,7 @@ __all__ = [
     "ArtifactChecksumMismatchError",
     "ArtifactNotFoundError",
     "ArtifactService",
+    "ArtifactStorage",
     "ArtifactTooLargeError",
     "AuthorisationDecision",
     "AuthorisationPolicyRepository",
@@ -158,6 +186,8 @@ __all__ = [
     "EventBus",
     "EventHandler",
     "FakeClock",
+    "Feature",
+    "FeatureProvider",
     "FifoQueuePolicy",
     "FirmwareFileTooLargeError",
     "HealthMonitor",
@@ -179,6 +209,7 @@ __all__ = [
     "IssuedApiCredential",
     "IssuedSession",
     "LabBackend",
+    "LocalArtifactStorage",
     "OperationNotCancellableError",
     "OperationArtifactNotFoundError",
     "OperationNotFoundError",
@@ -200,7 +231,13 @@ __all__ = [
     "QueueOwnerMismatchError",
     "QueuePolicy",
     "RecoveryFailureError",
+    "ReleaseChannel",
+    "RetentionClass",
+    "RetentionPolicy",
+    "RetentionRunResult",
+    "RetentionWorker",
     "RequestBodyTooLargeError",
+    "ResourceLimitExceededError",
     "RecoveryService",
     "ReservationService",
     "RegistryRefreshResult",
@@ -209,9 +246,11 @@ __all__ = [
     "ScryptPasswordHasher",
     "SchedulingService",
     "SimulationFailureError",
+    "S3CompatibleArtifactStorage",
     "StateMachine",
     "StateTransitionError",
     "StaleOperationLockError",
+    "StoredArtifact",
     "TimedReservationService",
     "UtcClock",
     "VERSION",
@@ -223,11 +262,14 @@ __all__ = [
     "WorkflowRunner",
     "WorkflowService",
     "build_test_results",
+    "build_metadata",
     "normalize_artifact_name",
     "render_junit_xml",
     "sanitize_audit_metadata",
     "validate_oidc_id_token",
     "recover_interrupted_operations",
+    "release_channel",
+    "retention_class_for_artifact_type",
     "as_utc",
     "parse_workflow_yaml",
 ]

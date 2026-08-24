@@ -212,12 +212,14 @@ class AgentEnrollmentService:
         token_factory: Callable[[], str] = lambda: f"lpe_{secrets.token_urlsafe(32)}",
         credential_factory: Callable[[], str] = lambda: f"lpa_{secrets.token_urlsafe(32)}",
         id_factory: Callable[[], UUID] = uuid4,
+        compatibility_validator: Callable[[str, str], None] | None = None,
     ) -> None:
         self._repository = repository
         self._clock = clock
         self._token_factory = token_factory
         self._credential_factory = credential_factory
         self._id_factory = id_factory
+        self._compatibility_validator = compatibility_validator
         self._authorisation: AuthorisationService | None = None
 
     def set_authorisation_service(self, authorisation: AuthorisationService) -> None:
@@ -345,6 +347,8 @@ class AgentEnrollmentService:
                 "The Agent protocol version is incompatible.",
                 protocol_version=protocol_version,
             ) from exc
+        if self._compatibility_validator is not None:
+            self._compatibility_validator(agent_version, negotiated_protocol_version)
 
         now = self._now()
         token_hash = self.hash_secret(plaintext_token)

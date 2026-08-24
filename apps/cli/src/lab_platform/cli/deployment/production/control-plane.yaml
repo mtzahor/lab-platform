@@ -1,0 +1,126 @@
+profile: production
+
+control_plane:
+  host: 0.0.0.0
+  port: 8443
+  public_url: https://lab.example.com
+  log_level: INFO
+  max_request_body_size_mb: 512
+
+database:
+  # LAB_DATABASE_URL_FILE supplies the secret production DSN.
+  url: postgresql://lab_platform@postgres:5432/lab_platform
+  pool_size: 10
+
+agent_gateway:
+  heartbeat_interval_seconds: 15
+  heartbeat_timeout_seconds: 45
+  offline_timeout_seconds: 90
+  handshake_timeout_seconds: 10
+  maximum_message_size_mb: 2
+  outgoing_queue_size: 256
+  sequence_window_size: 4096
+  monitor_interval_seconds: 1.0
+
+distributed:
+  maximum_clock_skew_seconds: 30
+  offline_reservation_grace_seconds: 300
+  operation_reconciliation_timeout_seconds: 600
+  queue_commands_for_offline_agents: false
+  scheduled_protection_window_seconds: 300
+
+artifacts:
+  storage_backend: local
+  directory: /var/lib/lab-platform/artifacts
+  maximum_upload_size_mb: 500
+  transfer_token_ttl_seconds: 300
+  finalization_timeout_seconds: 300
+
+retention:
+  artifacts:
+    enabled: true
+    default_days: 30
+    failed_workflow_days: 90
+    firmware_days: 180
+    serial_log_days: 30
+    junit_report_days: 90
+    workflow_log_days: 30
+    diagnostic_bundle_days: 14
+    worker_interval_seconds: 3600
+    batch_size: 100
+
+compatibility:
+  agents:
+    minimum_supported_version: 0.8.0
+    minimum_recommended_version: 0.8.0
+    target_version: 0.9.0-beta
+    maximum_supported_version: 0.9.999
+
+identity:
+  enabled: true
+  default_organisation_slug: default
+  default_organisation_name: Default Organisation
+  local_auth:
+    enabled: true
+    minimum_password_length: 12
+  oidc:
+    enabled: false
+    scopes: [openid, profile, email]
+  sessions:
+    access_token_minutes: 15
+    session_hours: 12
+    maximum_session_days: 7
+
+authorisation:
+  default_bench_visibility: organisation
+  hide_unauthorised_resources: true
+  legacy_token_compatibility_enabled: false
+
+audit:
+  enabled: true
+  retention_days: 365
+
+security:
+  # LAB_SECRET_KEY_FILE supplies the secret. Secrets are rejected in ordinary YAML.
+  login_rate_limit:
+    attempts: 10
+    window_minutes: 15
+  api_rate_limits:
+    artifact_upload: {requests: 60, window_seconds: 60}
+    workflow_creation: {requests: 120, window_seconds: 60}
+    agent_enrollment: {requests: 20, window_seconds: 300}
+    expensive_search: {requests: 120, window_seconds: 60}
+
+resource_limits:
+  maximum_concurrent_workflows: 20
+  maximum_active_ci_sessions: 50
+  maximum_sse_streams: 200
+  maximum_artifact_size_mb: 500
+  maximum_log_artifact_size_mb: 100
+  maximum_reservation_duration_minutes: 1440
+
+web:
+  enabled: true
+  public_url: https://lab.example.com
+  api_base_url: /api/v1
+  live_updates:
+    sse_enabled: true
+    polling_fallback_seconds: 5
+  uploads:
+    maximum_firmware_size_mb: 100
+  features:
+    identity_admin: true
+    audit_viewer: true
+    ci_sessions: true
+  branding:
+    product_name: Lab Platform
+
+proxy:
+  enabled: true
+  trusted_networks: [172.30.0.5/32]
+
+development:
+  enabled: false
+  auto_login_user: null
+  allow_insecure_agent_transport: false
+  allow_tls_termination_proxy: false

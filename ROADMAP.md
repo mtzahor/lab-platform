@@ -160,13 +160,44 @@ Implemented in the 0.8.0-alpha release:
 See [Phase 7 status](docs/PHASE_7.md) and the
 [browser demonstration](docs/PHASE_7_BROWSER_DEMO.md).
 
+## Phase 8 — open-core product and deployment (beta implementation in progress)
+
+The `0.9.0-beta` preview line productizes the existing lab capabilities rather than adding hardware
+families:
+
+- Apache-2.0 community licensing, NOTICE/trademark/security policy, an explicit open-core
+  feature-provider seam, and a release gate that keeps commercial modules out of the community
+  wheel.
+- Inspectable production and disposable demo Compose templates plus packaged `lab-platform init`
+  and `lab-platform dev` commands.
+- Non-root control-plane and Agent container definitions, amd64/arm64 release builds, immutable
+  version metadata, checksums, SPDX SBOMs, provenance/signatures, security scanning, and dependency
+  update automation.
+- Development/test/production profiles, mounted secret files, strict precedence/validation,
+  reverse-proxy trust, HTTPS/PostgreSQL production requirements, resource limits, API category rate
+  limits, structured/redacted logs, metrics, graceful shutdown, and live/ready endpoints.
+- Read-only schema status/check plus explicit forward migration; the current schema-12 target,
+  minimum schema-11 source policy declares restore-backup-required rollback.
+- Versioned backup create/verify/restore, local/S3 artifact storage interfaces, class-based artifact
+  retention, bounded audit retention, and auditable deletion.
+- Control-plane/Agent/API/protocol/plugin version reporting, Agent upgrade statuses/enforcement,
+  `labctl version --all`, `upgrade check`, deployment diagnostics, and production preflight.
+- Self-hosting, Docker, upgrading, storage, retention, backup/restore, release-channel,
+  compatibility, licensing/open-core, managed-boundary, disaster-recovery, and security runbooks.
+
+Phase 8 is complete only after the hardware-free published-artifact deployment gate proves a fresh
+production deployment, owner bootstrap, Agent enrollment, SimLab workflow/artifacts, complete
+backup and isolated restore, previous-minor migration, post-upgrade readiness/history, and Agent
+reconnect. Documentation and unit components are not substitutes for that acceptance run. See
+[the Phase 8 contract](docs/PHASE_8.md).
+
 ## Later phases
 
-Deferred work beyond the compact Phase 6 model includes SAML/SCIM/LDAP, external group-role
-mapping, custom policy languages, secret-vault integration, relays, hosted control plane, high
-availability, arbitrary pipeline graphs, advanced analytics, billing, and production deployment
-hardening.
+Deferred work includes SAML/SCIM/LDAP, external group-role mapping, custom policy languages,
+secret-vault integration, relays, active-active/HA coordination, a Kubernetes operator, arbitrary
+pipeline graphs, advanced analytics, mature public multi-tenant managed-service hardening, billing,
+payment processing, and a customer portal.
 
-The `0.8.0-alpha` reference control plane supports PostgreSQL, the integrated browser dashboard,
-and development-mode per-Agent bearer credentials. mTLS, active-active/HA coordination, and broader
-production hardening remain later deployment work rather than hidden claims of this alpha.
+The Phase 8 self-hosted target remains one control plane. A hosted design-partner deployment is
+technically possible with the same Agent, but it does not imply an SLA, completed public
+multi-tenant certification, automatic remote Agent installation, or `1.0` stability.

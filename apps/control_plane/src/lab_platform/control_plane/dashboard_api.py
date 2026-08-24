@@ -909,8 +909,13 @@ def create_dashboard_router(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Server-sent events are disabled; use polling.",
             )
+        if not await runtime.acquire_sse_stream():
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="The configured server-sent event stream limit has been reached.",
+            )
 
-        async def stream() -> AsyncIterator[str]:
+        async def stream_body() -> AsyncIterator[str]:
             current_actor = token
             previous_digest: str | None = None
             previous_views: dict[str, dict[str, object]] | None = None
@@ -971,6 +976,13 @@ def create_dashboard_router(
                     return
                 await _sse_pause(runtime.config.web.live_updates.polling_fallback_seconds)
             yield ": reconnect to refresh authentication\n\n"
+
+        async def stream() -> AsyncIterator[str]:
+            try:
+                async for frame in stream_body():
+                    yield frame
+            finally:
+                await runtime.release_sse_stream()
 
         return StreamingResponse(
             stream(),

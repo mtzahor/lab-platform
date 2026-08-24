@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -147,7 +146,7 @@ class ArtifactCollection:
 @dataclass(frozen=True, slots=True)
 class ArtifactContent:
     record: ArtifactRecord | RemoteArtifactMetadata
-    path: Path
+    stream: AsyncIterable[bytes]
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,11 +333,11 @@ class ProtectedArtifactService:
             idempotency_key=idempotency_key,
             organisation_id=organisation_id,
         )
-        source = await self._platform.content_path(
+        source = await self._platform.content_stream(
             record.id,
             organisation_id=organisation_id,
         )
-        await self._transfer_store.stage_verified_file(
+        await self._transfer_store.write_verified_object(
             record.id,
             record.sha256,
             record.size_bytes,
@@ -457,12 +456,12 @@ class ProtectedArtifactService:
             allow_internal_authorisation=allow_internal_authorisation,
             organisation_id=scope,
         )
-        path = (
-            self._transfer_store.open_verified(record.id, record.sha256)
+        stream = (
+            await self._transfer_store.open_verified_stream(record.id, record.sha256)
             if isinstance(record, RemoteArtifactMetadata)
-            else await self._platform.content_path(record.id, organisation_id=scope)
+            else await self._platform.content_stream(record.id, organisation_id=scope)
         )
-        return ArtifactContent(record, path)
+        return ArtifactContent(record, stream)
 
     async def delete(
         self,

@@ -14,6 +14,11 @@ import pytest
 from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime
 from lab_platform.core.errors import ConfigurationError
 from lab_platform.persistence.database import SCHEMA_VERSION, SQLiteDatabase
+from lab_platform.persistence.database_management import (
+    MINIMUM_SUPPORTED_SCHEMA_VERSION,
+    inspect_database_schema,
+    migrate_database,
+)
 from lab_platform.persistence.distributed_adapters import SQLiteRemoteCommandServiceRepository
 from lab_platform.persistence.postgresql import (
     PostgreSQLDatabase,
@@ -542,3 +547,79 @@ def test_postgresql_optional_live_smoke(tmp_path: Path) -> None:
             await runtime.stop()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LAB_PLATFORM_TEST_POSTGRESQL_URL"),
+    reason="requires an isolated PostgreSQL test database",
+)
+def test_postgresql_live_previous_minor_migration_preserves_artifact_data() -> None:
+    """Exercise the supported schema-11 to schema-12 path on an actual PostgreSQL server."""
+
+    assert MINIMUM_SUPPORTED_SCHEMA_VERSION == SCHEMA_VERSION - 1
+    url = os.environ["LAB_PLATFORM_TEST_POSTGRESQL_URL"]
+    artifact_id = f"migration-artifact-{uuid4().hex}"
+    database = PostgreSQLDatabase(url)
+    database.initialize()
+    try:
+        with database.transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO artifacts "
+                "(id, owner_type, owner_id, name, artifact_type, content_type, path, "
+                "size_bytes, sha256, created_at, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    artifact_id,
+                    "operation",
+                    f"migration-owner-{uuid4().hex}",
+                    "migration-marker.txt",
+                    "diagnostic_bundle",
+                    "text/plain",
+                    f"objects/{artifact_id}/content",
+                    7,
+                    "0" * 64,
+                    "2026-08-24T00:00:00+00:00",
+                    "{}",
+                ),
+            )
+            connection.execute("DROP INDEX IF EXISTS artifacts_retention_due")
+            for column in (
+                "retention_claim_token",
+                "retention_claimed_at",
+                "retention_attempt_count",
+                "retention_last_error",
+                "retention_deleted_at",
+                "retention_state",
+            ):
+                connection.execute(f"ALTER TABLE artifacts DROP COLUMN IF EXISTS {column}")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE version = ?",
+                (SCHEMA_VERSION,),
+            )
+    finally:
+        database.close()
+
+    before = inspect_database_schema(url)
+    assert before.state == "upgrade_required"
+    assert before.current_version == MINIMUM_SUPPORTED_SCHEMA_VERSION
+
+    migrated = migrate_database(url)
+    assert migrated.state == "current"
+    assert migrated.current_version == SCHEMA_VERSION
+
+    reopened = PostgreSQLDatabase(url)
+    reopened.initialize()
+    try:
+        with reopened.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT name, retention_state, retention_attempt_count FROM artifacts WHERE id = ?",
+                (artifact_id,),
+            ).fetchone()
+            assert row is not None
+            artifact = cast(Mapping[str, object], row)
+            assert artifact["name"] == "migration-marker.txt"
+            assert artifact["retention_state"] == "active"
+            assert artifact["retention_attempt_count"] == 0
+            connection.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+    finally:
+        reopened.close()

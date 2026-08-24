@@ -22,8 +22,8 @@ Additional operational access comes from resource-scoped role assignments.
 
 ## Transitional default organisation
 
-The v9 identity migration, retained in the current upgrade chain (latest schema v11), seeds this fixed row
-when missing:
+The v9 identity migration, retained in the current upgrade chain (latest schema v12), seeds this
+fixed row when missing:
 
 ```text
 id:   00000000-0000-0000-0000-000000000001
@@ -80,6 +80,7 @@ explicitly recover the first owner with `lab-control-plane bootstrap-admin`, des
 [Local authentication](LOCAL_AUTH.md#bootstrap-administrator).
 
 Before a production upgrade, back up the database, stop concurrent writers, run
-`lab-control-plane migrate`, verify schema version 11 plus tenant/foreign-key counts, bootstrap an
-owner, and keep legacy-token compatibility enabled until every consumer has an identity-bound
-replacement. Follow the complete [authentication upgrade checklist](AUTH_MIGRATION.md#upgrade-checklist).
+`lab-control-plane db migrate`, verify schema version 12 plus tenant/foreign-key counts, bootstrap
+an owner, and keep legacy-token compatibility enabled until every consumer has an identity-bound
+replacement. Follow the complete
+[authentication upgrade checklist](AUTH_MIGRATION.md#upgrade-checklist).

@@ -721,7 +721,7 @@
   "info": {
     "description": "Versioned local API for reserving and controlling lab benches.",
     "title": "Lab Platform Agent API",
-    "version": "0.8.0-alpha"
+    "version": "0.9.0-beta"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3417,9 +3417,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
+                  "additionalProperties": true,
                   "title": "Response Version Api V1 Version Get",
                   "type": "object"
                 }

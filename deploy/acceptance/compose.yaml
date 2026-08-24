@@ -1,0 +1,143 @@
+name: ${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}
+
+# CI-only, hardware-free recovery deployment. It consumes tagged runtime images and never builds
+# or mounts application source. The Agent shares the control-plane network namespace so its
+# intentionally insecure loopback WebSocket cannot escape this isolated Compose network.
+x-control-plane: &control-plane
+  image: ${LAB_CONTROL_PLANE_IMAGE:?Set LAB_CONTROL_PLANE_IMAGE to a tagged image or digest}
+  environment:
+    LAB_PROFILE: development
+    LAB_DATABASE_URL: postgresql://lab_platform_acceptance@postgres:5432/lab_platform_acceptance
+    LAB_HEALTHCHECK_URL: http://127.0.0.1:8443/health/ready
+  volumes:
+    - ./control-plane.yaml:/etc/lab-platform/control-plane.yaml:ro
+    - artifact-data:/var/lib/lab-platform/artifacts
+    - backup-data:/var/lib/lab-platform/backups
+  networks: [acceptance]
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+
+services:
+  postgres:
+    image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_DB: lab_platform_acceptance
+      POSTGRES_USER: lab_platform_acceptance
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U lab_platform_acceptance -d lab_platform_acceptance"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [acceptance]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+
+  migrate:
+    <<: *control-plane
+    command: ["db", "migrate", "--config", "/etc/lab-platform/control-plane.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  bootstrap:
+    <<: *control-plane
+    entrypoint: ["python", "/usr/local/libexec/lab-platform/demo-bootstrap.py"]
+    environment:
+      LAB_PROFILE: development
+      LAB_DATABASE_URL: postgresql://lab_platform_acceptance@postgres:5432/lab_platform_acceptance
+      LAB_DEMO_CONTROL_PLANE_CONFIG: /etc/lab-platform/control-plane.yaml
+      LAB_DEMO_STATE_DIR: /run/lab-platform-demo
+    volumes:
+      - ./control-plane.yaml:/etc/lab-platform/control-plane.yaml:ro
+      - bootstrap-state:/run/lab-platform-demo
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  control-plane:
+    <<: *control-plane
+    command: ["serve", "--config", "/etc/lab-platform/control-plane.yaml"]
+    ports:
+      - "127.0.0.1:${LAB_ACCEPTANCE_PORT:-18090}:8080"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "lab-healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    stop_grace_period: 30s
+
+  web:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    network_mode: service:control-plane
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /config:size=16m,mode=0700
+      - /data:size=16m,mode=0700
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+
+  agent:
+    image: ${LAB_AGENT_IMAGE:?Set LAB_AGENT_IMAGE to a tagged image or digest}
+    command: ["--config", "/run/lab-platform-demo/agent.yaml"]
+    environment:
+      LAB_AGENT_CREDENTIAL_FILE: /run/lab-platform-demo/agent-credential
+      LAB_AGENT_CREDENTIAL_ENV: LAB_DEMO_AGENT_CREDENTIAL
+      LAB_HEALTHCHECK_URL: http://127.0.0.1:8081/api/v1/health
+    volumes:
+      - bootstrap-state:/run/lab-platform-demo:ro
+      - agent-data:/var/lib/lab-platform/data
+      - agent-artifacts:/var/lib/lab-platform/artifacts
+    network_mode: service:control-plane
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 15s
+
+networks:
+  acceptance:
+
+volumes:
+  postgres-data:
+    name: ${LAB_ACCEPTANCE_VOLUME_PREFIX:?Set LAB_ACCEPTANCE_VOLUME_PREFIX}-postgres-data
+  artifact-data:
+    name: ${LAB_ACCEPTANCE_VOLUME_PREFIX:?Set LAB_ACCEPTANCE_VOLUME_PREFIX}-artifact-data
+  backup-data:
+    name: ${LAB_ACCEPTANCE_VOLUME_PREFIX:?Set LAB_ACCEPTANCE_VOLUME_PREFIX}-backup-data
+  bootstrap-state:
+    name: ${LAB_ACCEPTANCE_VOLUME_PREFIX:?Set LAB_ACCEPTANCE_VOLUME_PREFIX}-bootstrap-state
+  agent-data:
+    name: ${LAB_ACCEPTANCE_VOLUME_PREFIX:?Set LAB_ACCEPTANCE_VOLUME_PREFIX}-agent-data
+  agent-artifacts:
+    name: ${LAB_ACCEPTANCE_VOLUME_PREFIX:?Set LAB_ACCEPTANCE_VOLUME_PREFIX}-agent-artifacts

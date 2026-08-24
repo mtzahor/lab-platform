@@ -9,6 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  deployment-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production, demo, and acceptance Compose manifests
+        shell: bash
+        env:
+          COMPOSE_PROJECT_NAME: lab-platform-acceptance-manifest
+          LAB_ACCEPTANCE_VOLUME_PREFIX: lab-platform-acceptance-manifest
+          LAB_CONTROL_PLANE_IMAGE: lab-platform-control-plane:manifest
+          LAB_AGENT_IMAGE: lab-platform-agent:manifest
+        run: |
+          deployment_dir="${RUNNER_TEMP}/lab-platform-production"
+          cp -R deploy/production "${deployment_dir}"
+          cp "${deployment_dir}/.env.example" "${deployment_dir}/.env"
+          mkdir -p "${deployment_dir}/secrets"
+          touch "${deployment_dir}/secrets/postgres-password"
+          touch "${deployment_dir}/secrets/database-url"
+          touch "${deployment_dir}/secrets/control-plane-secret-key"
+          docker compose --env-file "${deployment_dir}/.env" \
+            -f "${deployment_dir}/compose.yaml" config --quiet
+          docker compose -f deploy/demo/compose.yaml config --quiet
+          docker compose -f deploy/acceptance/compose.yaml config --quiet
+
   quality:
     runs-on: ubuntu-latest
     services:
@@ -29,6 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.12.5"
           enable-cache: true
       - uses: actions/setup-python@v5
         with:
@@ -75,7 +100,7 @@ jobs:
       - name: Real control-plane and SimLab browser tests
         run: npm run e2e:integration
         working-directory: apps/web
-      - name: Python and SimLab tests
+      - name: Python, SimLab, and real PostgreSQL migration tests
         run: uv run pytest -m "not hardware"
         env:
           LAB_PLATFORM_TEST_POSTGRESQL_URL: >-
@@ -101,3 +126,42 @@ jobs:
         run: uv build
       - name: Inspect dashboard in wheel
         run: uv run python scripts/verify_web_wheel.py dist/*.whl
+
+  published-artifact-acceptance:
+    needs: [quality, deployment-manifests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build tagged control-plane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/control-plane/Dockerfile
+          load: true
+          tags: lab-platform-control-plane:deployment-acceptance
+          cache-from: type=gha,scope=deployment-acceptance-control-plane
+          cache-to: type=gha,mode=max,scope=deployment-acceptance-control-plane
+      - name: Build tagged Agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/agent/Dockerfile
+          load: true
+          tags: lab-platform-agent:deployment-acceptance
+          cache-from: type=gha,scope=deployment-acceptance-agent
+          cache-to: type=gha,mode=max,scope=deployment-acceptance-agent
+      - name: Exercise deployment, migration, backup, and isolated restore
+        run: >-
+          python scripts/deployment_acceptance.py
+          --control-plane-image lab-platform-control-plane:deployment-acceptance
+          --agent-image lab-platform-agent:deployment-acceptance
+          --work-directory "${RUNNER_TEMP}/deployment-acceptance"
+      - name: Upload deployment acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-acceptance-evidence
+          path: ${{ runner.temp }}/deployment-acceptance/
+          if-no-files-found: warn

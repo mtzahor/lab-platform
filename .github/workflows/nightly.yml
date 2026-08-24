@@ -1,0 +1,67 @@
+name: Nightly images
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-images
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+
+jobs:
+  images:
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [control-plane, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: names
+        name: Derive immutable nightly name
+        run: |
+          echo "date=$(date -u +%Y%m%d)" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=${GITHUB_SHA::12}" >> "${GITHUB_OUTPUT}"
+          echo "build_date=$(git show -s --format=%cI HEAD | sed 's/+00:00$/Z/')" >> "${GITHUB_OUTPUT}"
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            LAB_VERSION=nightly-${{ steps.names.outputs.date }}-${{ steps.names.outputs.short_sha }}
+            LAB_REVISION=${{ github.sha }}
+            LAB_BUILD_DATE=${{ steps.names.outputs.build_date }}
+            LAB_RELEASE_CHANNEL=nightly
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}:nightly
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}:nightly-${{ steps.names.outputs.date }}-${{ steps.names.outputs.short_sha }}
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign nightly image digest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

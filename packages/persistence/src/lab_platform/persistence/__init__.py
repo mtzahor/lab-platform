@@ -19,6 +19,15 @@ from lab_platform.persistence.database import (
     SQLiteOperationRepository,
     SQLiteReservationRepository,
 )
+from lab_platform.persistence.database_management import (
+    MINIMUM_SUPPORTED_SCHEMA_VERSION,
+    ROLLBACK_COMPATIBILITY,
+    SchemaCompatibilityError,
+    SchemaStatus,
+    inspect_database_schema,
+    migrate_database,
+    require_current_schema,
+)
 from lab_platform.persistence.distributed_reservations import (
     SQLiteCentralReservationLeaseRepository,
 )
@@ -40,8 +49,12 @@ from lab_platform.persistence.workflows import SQLiteWorkflowRepository
 __all__ = [
     "BackendRegistration",
     "DEFAULT_ORGANISATION_ID",
+    "MINIMUM_SUPPORTED_SCHEMA_VERSION",
     "PostgreSQLDatabase",
+    "ROLLBACK_COMPATIBILITY",
     "SCHEMA_VERSION",
+    "SchemaCompatibilityError",
+    "SchemaStatus",
     "SQLiteAgentEnrollmentRepository",
     "SQLiteApiTokenRepository",
     "SQLiteArtifactRepository",
@@ -64,4 +77,7 @@ __all__ = [
     "SQLiteTimedReservationRepository",
     "SQLiteWorkflowRepository",
     "create_control_plane_database",
+    "inspect_database_schema",
+    "migrate_database",
+    "require_current_schema",
 ]

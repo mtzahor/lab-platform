@@ -1,3 +1,15 @@
-from lab_platform.logging.structured import StructuredFormatter, get_logger
+from lab_platform.logging.structured import (
+    HumanFormatter,
+    StructuredFormatter,
+    configure_logging,
+    get_logger,
+    redact_log_text,
+)
 
-__all__ = ["StructuredFormatter", "get_logger"]
+__all__ = [
+    "HumanFormatter",
+    "StructuredFormatter",
+    "configure_logging",
+    "get_logger",
+    "redact_log_text",
+]

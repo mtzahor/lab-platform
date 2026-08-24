@@ -1,0 +1,104 @@
+name: lab-platform-demo
+
+# NOT FOR PRODUCTION: disposable credentials, plaintext loopback transport, and PostgreSQL trust.
+services:
+  postgres:
+    image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_DB: lab_platform_demo
+      POSTGRES_USER: lab_platform_demo
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - demo-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab_platform_demo -d lab_platform_demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [demo]
+
+  bootstrap:
+    image: ${LAB_CONTROL_PLANE_IMAGE:-ghcr.io/mtzahor/lab-platform-control-plane}:${LAB_VERSION:-preview}
+    build:
+      context: ../..
+      dockerfile: docker/control-plane/Dockerfile
+    entrypoint: ["python", "/usr/local/libexec/lab-platform/demo-bootstrap.py"]
+    environment:
+      LAB_PROFILE: development
+      LAB_DATABASE_URL: postgresql://lab_platform_demo@postgres:5432/lab_platform_demo
+      LAB_DEMO_CONTROL_PLANE_CONFIG: /etc/lab-platform/control-plane.yaml
+      LAB_DEMO_STATE_DIR: /run/lab-platform-demo
+    volumes:
+      - ./control-plane.yaml:/etc/lab-platform/control-plane.yaml:ro
+      - demo-state:/run/lab-platform-demo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [demo]
+    restart: "no"
+
+  control-plane:
+    image: ${LAB_CONTROL_PLANE_IMAGE:-ghcr.io/mtzahor/lab-platform-control-plane}:${LAB_VERSION:-preview}
+    build:
+      context: ../..
+      dockerfile: docker/control-plane/Dockerfile
+    command: ["serve", "--config", "/etc/lab-platform/control-plane.yaml"]
+    environment:
+      LAB_PROFILE: development
+      LAB_DATABASE_URL: postgresql://lab_platform_demo@postgres:5432/lab_platform_demo
+      LAB_HEALTHCHECK_URL: http://127.0.0.1:8443/health/live
+    volumes:
+      - ./control-plane.yaml:/etc/lab-platform/control-plane.yaml:ro
+      - demo-artifacts:/var/lib/lab-platform/artifacts
+    ports:
+      - "127.0.0.1:${LAB_DEMO_PORT:-8080}:8080"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "lab-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    networks: [demo]
+
+  reverse-proxy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    network_mode: service:control-plane
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+  agent:
+    image: ${LAB_AGENT_IMAGE:-ghcr.io/mtzahor/lab-platform-agent}:${LAB_VERSION:-preview}
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    command: ["--config", "/run/lab-platform-demo/agent.yaml"]
+    environment:
+      LAB_AGENT_CREDENTIAL_FILE: /run/lab-platform-demo/agent-credential
+      LAB_AGENT_CREDENTIAL_ENV: LAB_DEMO_AGENT_CREDENTIAL
+      LAB_HEALTHCHECK_URL: http://127.0.0.1:8081/api/v1/health
+    volumes:
+      - demo-state:/run/lab-platform-demo:ro
+      - demo-agent-data:/var/lib/lab-platform/data
+      - demo-agent-artifacts:/var/lib/lab-platform/artifacts
+    network_mode: service:control-plane
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+
+networks:
+  demo:
+
+volumes:
+  demo-postgres:
+  demo-state:
+  demo-artifacts:
+  demo-agent-data:
+  demo-agent-artifacts:

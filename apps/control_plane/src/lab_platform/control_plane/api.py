@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -20,8 +23,10 @@ from fastapi import (
     status,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from lab_platform.agent_protocol import PROTOCOL_VERSION
+from lab_platform.control_plane.artifact_access import ArtifactContent
 from lab_platform.control_plane.dashboard_api import (
     create_dashboard_router,
     enrich_benches,
@@ -33,6 +38,11 @@ from lab_platform.control_plane.identity_api import (
     create_identity_router,
     extract_bearer_or_cookie_token,
     is_phase6_identity_token,
+)
+from lab_platform.control_plane.rate_limits import (
+    InMemoryRateLimiter,
+    RateLimitDecision,
+    RateLimitPolicy,
 )
 from lab_platform.control_plane.runtime import ControlPlaneRuntime
 from lab_platform.control_plane.web import create_web_router
@@ -53,7 +63,14 @@ from lab_platform.control_plane_core.reservations import (
 from lab_platform.control_plane_core.workflows import (
     DistributedWorkflowRequest,
 )
-from lab_platform.core import VERSION, build_test_results, render_junit_xml
+from lab_platform.core import (
+    API_VERSION,
+    PLUGIN_API_VERSION,
+    VERSION,
+    build_metadata,
+    build_test_results,
+    render_junit_xml,
+)
 from lab_platform.core.errors import (
     ArtifactNotFoundError,
     ArtifactTooLargeError,
@@ -111,6 +128,72 @@ from starlette.types import Message
 
 _BEARER = HTTPBearer(auto_error=False, scheme_name="BearerAuth")
 
+
+def _artifact_content_response(content: ArtifactContent) -> StreamingResponse:
+    return StreamingResponse(
+        content.stream,
+        media_type=content.record.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(content.record.name)}",
+            "Content-Length": str(content.record.size_bytes),
+        },
+    )
+
+
+def _request_rate_limit(
+    runtime: ControlPlaneRuntime,
+    request: Request,
+    limiter: InMemoryRateLimiter,
+) -> RateLimitDecision | None:
+    configured = runtime.config.security.api_rate_limits
+    path = request.url.path
+    method = request.method
+    category: str | None = None
+    policy = None
+    if method in {"POST", "PUT"} and (
+        path == "/api/v1/artifacts"
+        or path.startswith("/api/v1/artifact-transfers/")
+        and path.endswith("/content")
+    ):
+        category, policy = "artifact_upload", configured.artifact_upload
+    elif method == "POST" and (path == "/api/v1/workflows" or path.endswith("/runs")):
+        category, policy = "workflow_creation", configured.workflow_creation
+    elif method == "POST" and path == "/api/v1/agents/enroll":
+        category, policy = "agent_enrollment", configured.agent_enrollment
+    elif method == "GET" and path in {
+        "/api/v1/agents",
+        "/api/v1/artifacts",
+        "/api/v1/audit-events",
+        "/api/v1/benches",
+        "/api/v1/operations",
+    }:
+        category, policy = "expensive_search", configured.expensive_search
+    if category is None or policy is None:
+        return None
+    authorization = request.headers.get("Authorization")
+    if authorization:
+        client_key = "credential:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()
+    else:
+        client_key = "client:" + (request.client.host if request.client is not None else "unknown")
+    return limiter.check(
+        category,
+        client_key,
+        RateLimitPolicy(
+            requests=policy.requests,
+            window_seconds=policy.window_seconds,
+        ),
+    )
+
+
+def _apply_rate_limit_headers(response: Response, decision: RateLimitDecision) -> None:
+    response.headers["X-RateLimit-Limit"] = str(decision.limit)
+    response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+    if not decision.allowed:
+        response.headers["Retry-After"] = str(decision.retry_after_seconds)
+
+
+_LOGGER = logging.getLogger("lab-platform.control-plane.http")
+
 AuthenticatedActor = ApiToken | AuthenticationContext
 Phase6ResourceKind = Literal[
     "organisation",
@@ -156,7 +239,7 @@ class AgentEnrollmentRequest(ApiModel):
     enrollment_token: str = Field(min_length=1, max_length=512)
     request_id: UUID = Field(default_factory=uuid4)
     agent_version: str = Field(min_length=1, max_length=100)
-    protocol_version: str = Field(default="1.0", min_length=1, max_length=100)
+    protocol_version: str = Field(default=PROTOCOL_VERSION, min_length=1, max_length=100)
     location: str | None = Field(default=None, min_length=1, max_length=200)
 
 
@@ -282,6 +365,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         description="Central API and authenticated Agent gateway for distributed lab benches.",
         lifespan=lifespan,
     )
+    rate_limiter = InMemoryRateLimiter()
 
     @app.middleware("http")
     async def request_context(
@@ -290,11 +374,34 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
     ) -> Response:
         request.state.request_id = request.headers.get("X-Request-ID", str(uuid4()))
         started = time.perf_counter()
+        rate_limit = _request_rate_limit(runtime, request, rate_limiter)
+        if rate_limit is not None and not rate_limit.allowed:
+            limited_response = _error_response(
+                request,
+                code="API_RATE_LIMIT_EXCEEDED",
+                message="The request rate limit was exceeded.",
+                details={"retry_after_seconds": rate_limit.retry_after_seconds},
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+            _apply_rate_limit_headers(limited_response, rate_limit)
+            limited_response.headers["X-Request-ID"] = request.state.request_id
+            limited_response.headers["X-Response-Time-Ms"] = (
+                f"{(time.perf_counter() - started) * 1000:.3f}"
+            )
+            _apply_security_headers(request, limited_response)
+            _observe_request(
+                runtime,
+                request,
+                limited_response,
+                started,
+                route="/__rate_limited__",
+            )
+            return limited_response
         maximum_bytes = runtime.config.control_plane.max_request_body_size_mb * 1024 * 1024
         if request.method == "POST" and request.url.path == "/api/v1/artifacts":
             # Multipart framing and metadata have their own small overhead beyond
             # the configured immutable artifact byte limit.
-            maximum_bytes = runtime.config.artifacts.max_upload_size_mb * 1024 * 1024 + 1024 * 1024
+            maximum_bytes = runtime.maximum_artifact_size_bytes + 1024 * 1024
         elif (
             request.method == "POST"
             and request.url.path.startswith("/api/v1/benches/")
@@ -304,7 +411,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             # Keep a bounded allowance here for multipart framing and form fields.
             firmware_limit_mb = min(
                 runtime.config.web.uploads.maximum_firmware_size_mb,
-                runtime.config.artifacts.max_upload_size_mb,
+                runtime.maximum_artifact_size_bytes // (1024 * 1024),
             )
             maximum_bytes = firmware_limit_mb * 1024 * 1024 + 1024 * 1024
         elif (
@@ -312,7 +419,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             and request.url.path.startswith("/api/v1/artifact-transfers/")
             and request.url.path.endswith("/content")
         ):
-            maximum_bytes = runtime.config.artifacts.max_upload_size_mb * 1024 * 1024
+            maximum_bytes = runtime.maximum_artifact_size_bytes
 
         raw_length = request.headers.get("Content-Length")
         if raw_length is not None and raw_length.isdecimal() and int(raw_length) > maximum_bytes:
@@ -328,6 +435,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
                 f"{(time.perf_counter() - started) * 1000:.3f}"
             )
             _apply_security_headers(request, error_response)
+            _observe_request(runtime, request, error_response, started, route="/__rejected__")
             return error_response
 
         original_receive = request.receive
@@ -360,7 +468,10 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             )
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Response-Time-Ms"] = f"{(time.perf_counter() - started) * 1000:.3f}"
+        if rate_limit is not None:
+            _apply_rate_limit_headers(response, rate_limit)
         _apply_security_headers(request, response)
+        _observe_request(runtime, request, response, started)
         return response
 
     app.add_exception_handler(PlatformError, _platform_error_handler)
@@ -575,19 +686,62 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
     )
 
     @app.get("/api/v1/version")
-    async def version() -> dict[str, str]:
-        return {"version": VERSION, "protocol_version": "1.0"}
+    async def version() -> dict[str, object]:
+        build = build_metadata()
+        return {
+            "version": VERSION,
+            "api_version": API_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "plugin_api_version": PLUGIN_API_VERSION,
+            "release_channel": build.release_channel,
+            "edition": runtime.feature_provider.edition,
+            "build": build.as_dict(),
+        }
+
+    @app.get("/health/live")
+    async def liveness() -> dict[str, object]:
+        return {"status": "live", "version": VERSION}
+
+    @app.get("/health/ready")
+    async def readiness() -> Response:
+        report = await runtime.readiness()
+        return JSONResponse(
+            report,
+            status_code=(
+                status.HTTP_200_OK
+                if report["ready"] is True
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            ),
+        )
 
     @app.get("/api/v1/health")
-    async def health() -> dict[str, object]:
-        return {
-            "status": "healthy" if runtime.started else "starting",
-            "version": VERSION,
-            "components": {
-                "database": "healthy" if runtime.started else "starting",
-                "agent_gateway": "healthy" if runtime.started else "starting",
-            },
+    async def health() -> Response:
+        """Compatibility alias for dependency-aware readiness."""
+
+        report = await runtime.readiness()
+        raw_checks = report.get("checks")
+        checks = raw_checks if isinstance(raw_checks, dict) else {}
+        component_states = {
+            name: (
+                "healthy" if isinstance(value, dict) and value.get("ready") is True else "unhealthy"
+            )
+            for name, value in checks.items()
+            if name != "runtime"
         }
+        return JSONResponse(
+            {
+                "status": "healthy" if report["ready"] is True else "starting",
+                "ready": report["ready"],
+                "version": VERSION,
+                "components": component_states,
+                "checks": checks,
+            },
+            status_code=(
+                status.HTTP_200_OK
+                if report["ready"] is True
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            ),
+        )
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics(
@@ -597,7 +751,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
             allow_legacy_authorisation=isinstance(token, ApiToken),
         )
-        return "".join(f"{name} {value}\n" for name, value in sorted(values.items()))
+        return runtime.observability.render_prometheus(values)
 
     @app.post("/api/v1/tokens", status_code=status.HTTP_201_CREATED)
     async def create_api_token(
@@ -667,12 +821,21 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         counts: dict[UUID, int] = {}
         for bench in benches:
             counts[bench.agent_id] = counts.get(bench.agent_id, 0) + 1
-        return {
-            "items": [
-                {**agent.model_dump(mode="json"), "bench_count": counts.get(agent.id, 0)}
-                for agent in agents
-            ]
-        }
+        items: list[dict[str, object]] = []
+        for agent in agents:
+            upgrade = runtime.assess_agent_compatibility(
+                agent.version,
+                agent.protocol_version,
+            )
+            items.append(
+                {
+                    **agent.model_dump(mode="json"),
+                    "bench_count": counts.get(agent.id, 0),
+                    "upgrade_status": upgrade.status.value,
+                    "upgrade": upgrade.as_dict(),
+                }
+            )
+        return {"items": items}
 
     @app.get("/api/v1/agents/{agent_id:uuid}")
     async def get_agent(
@@ -732,8 +895,14 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             ReservationLeaseState.RENEWING,
             ReservationLeaseState.UNKNOWN,
         }
+        upgrade = runtime.assess_agent_compatibility(
+            agent.version,
+            agent.protocol_version,
+        )
         return {
             **agent.model_dump(mode="json"),
+            "upgrade_status": upgrade.status.value,
+            "upgrade": upgrade.as_dict(),
             "connection": (
                 connection.connection.model_dump(mode="json") if connection is not None else None
             ),
@@ -1635,6 +1804,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         body: WorkflowRunRequest,
         token: Annotated[AuthenticatedActor | None, Depends(workflow_run)],
     ) -> dict[str, object]:
+        runtime.require_workflow_capacity()
         if (
             isinstance(token, ApiToken)
             and body.release_reservation_after is True
@@ -1781,6 +1951,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             Header(alias="Idempotency-Key", min_length=1, max_length=500),
         ] = None,
     ) -> dict[str, object]:
+        runtime.require_ci_capacity()
         owner_principal: ReservationOwner | None = None
         actor_context: ActorContext | None = None
         requested_by: str | None
@@ -2183,7 +2354,20 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         idempotency_key: Annotated[str | None, Form(max_length=500)] = None,
     ) -> object:
         async def chunks() -> AsyncIterator[bytes]:
+            received = 0
+            log_limit_mb = runtime.config.resource_limits.maximum_log_artifact_size_mb
+            log_limit_bytes = log_limit_mb * 1024 * 1024 if log_limit_mb is not None else None
             while chunk := await file.read(1024 * 1024):
+                received += len(chunk)
+                if (
+                    log_limit_bytes is not None
+                    and "log" in artifact_type.casefold().replace("-", "_")
+                    and received > log_limit_bytes
+                ):
+                    raise ArtifactTooLargeError(
+                        "Log artifact exceeds the configured upload limit.",
+                        maximum_size_bytes=log_limit_bytes,
+                    )
                 yield chunk
 
         record = await runtime.artifact_access.upload(
@@ -2262,18 +2446,14 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
                 resource_type="ARTIFACT",
                 resource_id=str(record.id),
             )
-            return FileResponse(
-                content.path,
-                media_type=content.record.content_type,
-                filename=content.record.name,
-            )
+            return _artifact_content_response(content)
         return record.model_dump(mode="json", exclude={"path"})
 
     @app.get("/api/v1/artifacts/{artifact_id}/content")
     async def download_artifact_content(
         artifact_id: UUID,
         token: Annotated[AuthenticatedActor | None, Depends(artifacts_read)],
-    ) -> FileResponse:
+    ) -> StreamingResponse:
         content = await runtime.artifact_access.content(
             artifact_id,
             authentication_context=(token if isinstance(token, AuthenticationContext) else None),
@@ -2286,11 +2466,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             resource_type="ARTIFACT",
             resource_id=str(content.record.id),
         )
-        return FileResponse(
-            content.path,
-            media_type=content.record.content_type,
-            filename=content.record.name,
-        )
+        return _artifact_content_response(content)
 
     @app.post("/api/v1/artifacts/{artifact_id}/transfers", status_code=201)
     async def issue_artifact_download(
@@ -2367,10 +2543,16 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
     async def download_transfer_content(
         transfer_id: UUID,
         request: Request,
-    ) -> FileResponse:
+    ) -> StreamingResponse:
         token = _bearer_value(request.headers.get("Authorization"))
-        path = await runtime.artifacts.download_path(transfer_id, token)
-        return FileResponse(path, filename=str(transfer_id))
+        stream = await runtime.artifacts.download_stream(transfer_id, token)
+        return StreamingResponse(
+            stream,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{transfer_id}"',
+            },
+        )
 
     # The SPA fallback must be the final router so it can never shadow API,
     # documentation, metrics, health, or Agent gateway paths.
@@ -3405,6 +3587,37 @@ def _require_active_reservation(value: CoordinatedReservationLease) -> None:
         )
 
 
+def _observe_request(
+    runtime: ControlPlaneRuntime,
+    request: Request,
+    response: Response,
+    started: float,
+    *,
+    route: str | None = None,
+) -> None:
+    duration_seconds = max(0.0, time.perf_counter() - started)
+    route_object = request.scope.get("route")
+    route_template = route or getattr(route_object, "path", None)
+    if not isinstance(route_template, str) or not route_template.startswith("/"):
+        route_template = "/__unmatched__"
+    runtime.observability.observe_http(
+        method=request.method,
+        route=route_template,
+        status_code=response.status_code,
+        duration_seconds=duration_seconds,
+    )
+    _LOGGER.info(
+        "HTTP request completed",
+        extra={
+            "request_id": request.state.request_id,
+            "method": request.method,
+            "path": route_template,
+            "status_code": response.status_code,
+            "duration_ms": round(duration_seconds * 1000, 3),
+        },
+    )
+
+
 _ERROR_STATUS = {
     "AUTHENTICATION_REQUIRED": 401,
     "AUTHENTICATION_FAILED": 401,
@@ -3476,6 +3689,7 @@ _ERROR_STATUS = {
     "ARTIFACT_NOT_FOUND": 404,
     "ARTIFACT_TOO_LARGE": 413,
     "REQUEST_BODY_TOO_LARGE": 413,
+    "RESOURCE_LIMIT_EXCEEDED": 429,
     "ARTIFACT_CHECKSUM_MISMATCH": 400,
     "ARTIFACT_TRANSFER_FAILED": 400,
     "ARTIFACT_TRANSFER_TOKEN_EXPIRED": 401,
