@@ -13,12 +13,13 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import unquote
 
 from lab_platform.control_plane.compatibility import ApplicationVersion
 from lab_platform.core import VERSION
 from lab_platform.persistence import SCHEMA_VERSION, inspect_database_schema
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 BACKUP_FORMAT_VERSION = 1
 _MANIFEST_NAME = "manifest.json"
@@ -255,7 +256,8 @@ class DatabaseBackupAdapter:
                 source.close()
             return
         self._postgres_command(
-            ["pg_dump", "--format=custom", "--no-owner", "--file", str(destination)]
+            ["pg_dump", "--format=custom", "--no-owner", "--file", str(destination)],
+            connect=True,
         )
 
     def verify_dump(self, source: Path) -> None:
@@ -305,15 +307,23 @@ class DatabaseBackupAdapter:
         if overwrite:
             command.extend(["--clean", "--if-exists"])
         command.append(str(source))
-        self._postgres_command(command)
+        self._postgres_command(command, connect=True)
 
-    def _postgres_command(self, command: list[str]) -> None:
+    def _postgres_command(self, command: list[str], *, connect: bool = False) -> None:
         environment = dict(os.environ)
-        environment["PGDATABASE"] = self._normalized_postgresql_url()
+        environment.pop("PGDATABASE", None)
         environment.setdefault("PGCONNECT_TIMEOUT", "10")
+        invoked_command = list(command)
+        if connect:
+            parameters = conninfo_to_dict(self._normalized_postgresql_url())
+            password = parameters.pop("password", None)
+            safe_parameters = cast(dict[str, Any], parameters)
+            invoked_command[1:1] = ["--dbname", make_conninfo(**safe_parameters)]
+            if password is not None:
+                environment["PGPASSWORD"] = str(password)
         try:
             self._run(
-                command,
+                invoked_command,
                 env=environment,
                 check=True,
                 text=True,

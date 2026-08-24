@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 
@@ -57,6 +58,17 @@ def test_acceptance_schema_constants_and_non_root_backup_mount_cannot_drift() ->
     assert acceptance.BACKUP_PATH.startswith("/var/lib/lab-platform/backups/")
     dockerfile = (ROOT / "docker/control-plane/Dockerfile").read_text(encoding="utf-8")
     assert "/var/lib/lab-platform/backups" in dockerfile
+
+
+def test_control_plane_postgresql_client_matches_the_pinned_server() -> None:
+    compose = yaml.safe_load((ROOT / "deploy/acceptance/compose.yaml").read_text(encoding="utf-8"))
+    dockerfile = (ROOT / "docker/control-plane/Dockerfile").read_text(encoding="utf-8")
+
+    server = re.search(r"postgres:(\d+)[.]", compose["services"]["postgres"]["image"])
+    client = re.search(r"postgresql-client-(\d+)", dockerfile)
+    assert server is not None
+    assert client is not None
+    assert client.group(1) == server.group(1)
 
 
 def test_previous_schema_fixture_is_exact_and_role_evidence_uses_membership() -> None:

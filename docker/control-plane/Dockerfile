@@ -44,9 +44,18 @@ ENV PATH="/opt/lab-platform/bin:${PATH}" \
     LAB_RELEASE_CHANNEL="${LAB_RELEASE_CHANNEL}" \
     LAB_HEALTHCHECK_URL="http://127.0.0.1:8443/health/ready"
 
+ADD --checksum=sha256:0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76 \
+    https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    /usr/local/share/keyrings/postgres.gpg.asc
+
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates postgresql-client \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && echo "deb [ signed-by=/usr/local/share/keyrings/postgres.gpg.asc ] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends postgresql-client-16 \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/pgdg.list \
+        /usr/local/share/keyrings/postgres.gpg.asc
 
 RUN groupadd --gid 10001 lab-platform \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/lab-platform \

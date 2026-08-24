@@ -27,6 +27,7 @@ from lab_platform.control_plane.backup import (
 )
 from lab_platform.core import VERSION
 from lab_platform.persistence import SCHEMA_VERSION, SQLiteDatabase
+from psycopg.conninfo import conninfo_to_dict
 
 _SHA256 = hashlib.sha256(b"database").hexdigest()
 _CREATED_AT = datetime(2026, 8, 24, tzinfo=UTC)
@@ -157,7 +158,12 @@ def test_postgresql_adapter_builds_safe_commands_and_normalizes_driver_url(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
-    adapter = DatabaseBackupAdapter("postgresql+psycopg://user:pass@db/lab", run=run)
+    monkeypatch.delenv("PGDATABASE", raising=False)
+    monkeypatch.delenv("PGPASSWORD", raising=False)
+    adapter = DatabaseBackupAdapter(
+        "postgresql+psycopg://user:s3cr%40t@db/lab?sslmode=require",
+        run=run,
+    )
 
     adapter.create_dump(tmp_path / "backup.dump")
     adapter.verify_dump(tmp_path / "backup.dump")
@@ -171,9 +177,21 @@ def test_postgresql_adapter_builds_safe_commands_and_normalizes_driver_url(
         "pg_restore",
         "pg_restore",
     ]
+    connected_calls = [calls[index] for index in (0, 2, 3)]
+    for command, environment in connected_calls:
+        database_option = command.index("--dbname")
+        assert conninfo_to_dict(command[database_option + 1]) == {
+            "dbname": "lab",
+            "host": "db",
+            "sslmode": "require",
+            "user": "user",
+        }
+        assert environment["PGPASSWORD"] == "s3cr@t"
+    assert "--dbname" not in calls[1][0]
+    assert all("s3cr" not in argument for command, _ in calls for argument in command)
     assert "--clean" not in calls[2][0]
     assert calls[3][0][-3:-1] == ["--clean", "--if-exists"]
-    assert calls[0][1]["PGDATABASE"] == "postgresql://user:pass@db/lab"
+    assert all("PGDATABASE" not in environment for _, environment in calls)
     assert calls[0][1]["PGCONNECT_TIMEOUT"] == "10"
 
 
