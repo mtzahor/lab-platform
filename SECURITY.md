@@ -28,3 +28,12 @@ Security depends on production configuration. Internet-facing deployments must u
 development identities and legacy compatibility, isolate PostgreSQL and object storage, protect
 Agent credentials, and test backup restoration. Run `lab-control-plane production-check` before
 exposure and follow `docs/PRODUCTION_SECURITY.md`.
+
+## Repository security gates
+
+The supply-chain workflow always audits the complete Python and frontend lockfiles and scans the
+source tree and runtime images with Trivy. GitHub dependency review additionally requires the
+repository Dependency graph. After enabling that feature under **Settings → Advanced Security**,
+set the repository Actions variable `DEPENDENCY_REVIEW_ENABLED=true`; the workflow then treats
+high-severity dependency changes as a required failure. Until both settings are present, the job
+emits a warning instead of invoking an API that GitHub reports as unsupported.

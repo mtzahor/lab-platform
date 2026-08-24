@@ -38,7 +38,7 @@ jobs:
       - name: Verify community source boundary
         run: python scripts/release/check_oss_boundary.py
       - name: Scan repository for vulnerabilities, secrets, and misconfiguration
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -54,7 +54,13 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+      - name: Explain unavailable dependency review
+        if: vars.DEPENDENCY_REVIEW_ENABLED != 'true'
+        run: |
+          echo "::warning title=Dependency review unavailable::Enable GitHub Dependency graph, then set the repository Actions variable DEPENDENCY_REVIEW_ENABLED=true to activate this gate."
+      - name: Review dependency changes
+        if: vars.DEPENDENCY_REVIEW_ENABLED == 'true'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
 
@@ -76,7 +82,7 @@ jobs:
           tags: lab-platform-${{ matrix.service }}:security-gate
           provenance: false
       - name: Scan runtime image
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lab-platform-${{ matrix.service }}:security-gate
           scanners: vuln,secret,misconfig
