@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -335,14 +336,14 @@ def test_local_artifact_restore_refuses_nonempty_target_and_stages_inside_mount(
     with pytest.raises(FileExistsError, match="explicit overwrite"):
         adapter.restore(source, [entry], overwrite=False)
 
-    original_mkdtemp = backup_module.tempfile.mkdtemp
+    original_mkdtemp = tempfile.mkdtemp
     original_mkdir = Path.mkdir
     original_replace = os.replace
     staging_parents: list[Path] = []
 
-    def mounted_mkdtemp(*args: Any, **kwargs: Any) -> str:
-        staging_parents.append(Path(kwargs["dir"]))
-        return original_mkdtemp(*args, **kwargs)
+    def mounted_mkdtemp(*, prefix: str, dir: Path) -> str:
+        staging_parents.append(dir)
+        return original_mkdtemp(prefix=prefix, dir=dir)
 
     def reject_parent_write(path: Path, *args: Any, **kwargs: Any) -> None:
         if path == root.parent:
@@ -354,7 +355,7 @@ def test_local_artifact_restore_refuses_nonempty_target_and_stages_inside_mount(
             raise OSError("simulated volume mount replacement")
         original_replace(source_path, destination_path)
 
-    monkeypatch.setattr(backup_module.tempfile, "mkdtemp", mounted_mkdtemp)
+    monkeypatch.setattr(tempfile, "mkdtemp", mounted_mkdtemp)
     monkeypatch.setattr(Path, "mkdir", reject_parent_write)
     monkeypatch.setattr(os, "replace", reject_mount_replacement)
 
