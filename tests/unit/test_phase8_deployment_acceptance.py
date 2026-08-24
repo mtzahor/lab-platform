@@ -25,6 +25,8 @@ def test_acceptance_compose_consumes_images_without_building_source() -> None:
     assert services["web"]["image"].startswith("caddy:2.11.4-alpine@sha256:")
     assert services["agent"]["network_mode"] == "service:control-plane"
     assert services["web"]["network_mode"] == "service:control-plane"
+    assert services["web"]["cap_drop"] == ["ALL"]
+    assert services["web"]["cap_add"] == ["NET_BIND_SERVICE"]
     assert services["control-plane"]["ports"] == ["127.0.0.1:${LAB_ACCEPTANCE_PORT:-18090}:8080"]
     assert all(
         mount.split(":", 1)[0] in {"./control-plane.yaml", "./Caddyfile"}
