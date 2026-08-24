@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ BACKUP_FORMAT_VERSION = 1
 _MANIFEST_NAME = "manifest.json"
 _DATABASE_DUMP_NAME = "database.dump"
 _READ_SIZE = 1024 * 1024
+_LOCAL_ARTIFACT_RESTORE_PREFIX = ".lab-platform-restore-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,7 +346,7 @@ class DatabaseBackupAdapter:
 
 
 class LocalArtifactBackupAdapter:
-    """Checksum-stable local artifact snapshots with staged restore replacement."""
+    """Checksum-stable local artifact snapshots with volume-local staged restore."""
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
@@ -354,13 +356,15 @@ class LocalArtifactBackupAdapter:
             return ()
         entries: list[BackupFileEntry] = []
         for source in sorted(self.root.rglob("*")):
-            if ".incoming" in source.relative_to(self.root).parts:
+            relative = source.relative_to(self.root)
+            if ".incoming" in relative.parts or relative.parts[0].startswith(
+                _LOCAL_ARTIFACT_RESTORE_PREFIX
+            ):
                 continue
             if source.is_symlink():
                 raise ValueError(f"artifact backup refuses symbolic links: {source}")
             if not source.is_file():
                 continue
-            relative = source.relative_to(self.root)
             archive_path = PurePosixPath("artifacts", *relative.parts).as_posix()
             target = destination.joinpath(*relative.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -394,30 +398,50 @@ class LocalArtifactBackupAdapter:
             return 0
         if not overwrite and not self.target_is_empty():
             raise FileExistsError("restore artifact target is not empty; use explicit overwrite")
-        self.root.parent.mkdir(parents=True, exist_ok=True)
-        stage = Path(tempfile.mkdtemp(prefix=f".{self.root.name}.restore-", dir=self.root.parent))
-        previous: Path | None = None
+        root_existed = self.root.exists()
+        self.root.mkdir(parents=True, exist_ok=True)
+        transaction = Path(tempfile.mkdtemp(prefix=_LOCAL_ARTIFACT_RESTORE_PREFIX, dir=self.root))
+        stage = transaction / "incoming"
+        previous = transaction / "previous"
+        installed: list[tuple[Path, Path]] = []
+        displaced: list[tuple[Path, Path]] = []
         try:
+            stage.mkdir()
+            previous.mkdir()
             for entry in entries:
                 relative = PurePosixPath(entry.path).relative_to("artifacts")
                 source_path = source.joinpath(*relative.parts)
                 destination = stage.joinpath(*relative.parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source_path, destination)
-            if self.root.exists():
-                previous = self.root.with_name(f".{self.root.name}.previous-{os.getpid()}")
-                if previous.exists():
-                    raise FileExistsError(f"restore staging path already exists: {previous}")
-                os.replace(self.root, previous)
-            os.replace(stage, self.root)
-            if previous is not None:
-                shutil.rmtree(previous)
-            return len(entries)
-        except BaseException:
-            if previous is not None and previous.exists() and not self.root.exists():
-                os.replace(previous, self.root)
-            shutil.rmtree(stage, ignore_errors=True)
+            for current in sorted(self.root.iterdir(), key=lambda path: path.name):
+                if current == transaction:
+                    continue
+                saved = previous / current.name
+                os.replace(current, saved)
+                displaced.append((current, saved))
+            for staged in sorted(stage.iterdir(), key=lambda path: path.name):
+                destination = self.root / staged.name
+                os.replace(staged, destination)
+                installed.append((destination, staged))
+        except BaseException as restore_error:
+            try:
+                for destination, staged in reversed(installed):
+                    os.replace(destination, staged)
+                for destination, saved in reversed(displaced):
+                    os.replace(saved, destination)
+            except BaseException as rollback_error:
+                restore_error.add_note(
+                    f"artifact restore rollback failed; recovery data remains at {transaction}"
+                )
+                raise restore_error from rollback_error
+            shutil.rmtree(transaction, ignore_errors=True)
+            if not root_existed:
+                with suppress(OSError):
+                    self.root.rmdir()
             raise
+        shutil.rmtree(transaction)
+        return len(entries)
 
 
 class S3ArtifactBackupAdapter:

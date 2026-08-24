@@ -282,6 +282,8 @@ def test_local_artifact_snapshot_skips_incoming_and_rejects_symlinks(tmp_path: P
     root = tmp_path / "artifacts"
     (root / ".incoming").mkdir(parents=True)
     (root / ".incoming" / "partial").write_bytes(b"partial")
+    (root / ".lab-platform-restore-orphan" / "previous").mkdir(parents=True)
+    (root / ".lab-platform-restore-orphan" / "previous" / "old").write_bytes(b"old")
     (root / "content").write_bytes(b"content")
     destination = tmp_path / "snapshot"
 
@@ -317,8 +319,9 @@ def test_local_artifact_snapshot_detects_concurrent_change(
         LocalArtifactBackupAdapter(root).snapshot(tmp_path / "snapshot")
 
 
-def test_local_artifact_restore_refuses_nonempty_target_and_staging_collision(
+def test_local_artifact_restore_refuses_nonempty_target_and_stages_inside_mount(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -332,11 +335,33 @@ def test_local_artifact_restore_refuses_nonempty_target_and_staging_collision(
     with pytest.raises(FileExistsError, match="explicit overwrite"):
         adapter.restore(source, [entry], overwrite=False)
 
-    previous = root.with_name(f".{root.name}.previous-{os.getpid()}")
-    previous.mkdir()
-    with pytest.raises(FileExistsError, match="staging path"):
-        adapter.restore(source, [entry], overwrite=True)
-    assert (root / "old").read_bytes() == b"old"
+    original_mkdtemp = backup_module.tempfile.mkdtemp
+    original_mkdir = Path.mkdir
+    original_replace = os.replace
+    staging_parents: list[Path] = []
+
+    def mounted_mkdtemp(*args: Any, **kwargs: Any) -> str:
+        staging_parents.append(Path(kwargs["dir"]))
+        return original_mkdtemp(*args, **kwargs)
+
+    def reject_parent_write(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == root.parent:
+            raise PermissionError("simulated read-only container filesystem")
+        original_mkdir(path, *args, **kwargs)
+
+    def reject_mount_replacement(source_path: Path, destination_path: Path) -> None:
+        if source_path == root or destination_path == root:
+            raise OSError("simulated volume mount replacement")
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(backup_module.tempfile, "mkdtemp", mounted_mkdtemp)
+    monkeypatch.setattr(Path, "mkdir", reject_parent_write)
+    monkeypatch.setattr(os, "replace", reject_mount_replacement)
+
+    assert adapter.restore(source, [entry], overwrite=True) == 1
+    assert staging_parents == [root]
+    assert not (root / "old").exists()
+    assert (root / "content").read_bytes() == b"new"
 
 
 def test_local_artifact_restore_rolls_back_after_replacement_failure(
@@ -345,8 +370,12 @@ def test_local_artifact_restore_rolls_back_after_replacement_failure(
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
-    (source / "content").write_bytes(b"new")
-    entry = BackupFileEntry("artifacts/content", 3, hashlib.sha256(b"new").hexdigest())
+    (source / "a-installed").write_bytes(b"new-a")
+    (source / "z-failure").write_bytes(b"new-z")
+    entries = [
+        BackupFileEntry("artifacts/a-installed", 5, hashlib.sha256(b"new-a").hexdigest()),
+        BackupFileEntry("artifacts/z-failure", 5, hashlib.sha256(b"new-z").hexdigest()),
+    ]
     root = tmp_path / "artifacts"
     root.mkdir()
     (root / "old").write_bytes(b"old")
@@ -356,17 +385,20 @@ def test_local_artifact_restore_rolls_back_after_replacement_failure(
 
     def fail_stage_replace(source_path: Path, destination_path: Path) -> None:
         nonlocal replacement_failed
-        if destination_path == root and ".restore-" in source_path.name:
+        if destination_path == root / "z-failure" and source_path.parent.name == "incoming":
             replacement_failed = True
             raise OSError("simulated replacement failure")
         original_replace(source_path, destination_path)
 
     monkeypatch.setattr(os, "replace", fail_stage_replace)
     with pytest.raises(OSError, match="simulated"):
-        adapter.restore(source, [entry], overwrite=True)
+        adapter.restore(source, entries, overwrite=True)
 
     assert replacement_failed is True
     assert (root / "old").read_bytes() == b"old"
+    assert not (root / "a-installed").exists()
+    assert not (root / "z-failure").exists()
+    assert not any(path.name.startswith(".lab-platform-restore-") for path in root.iterdir())
 
 
 class _ScriptedBody:
