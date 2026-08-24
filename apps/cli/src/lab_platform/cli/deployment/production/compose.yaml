@@ -1,0 +1,153 @@
+name: lab-platform
+
+x-control-plane-environment: &control-plane-environment
+  LAB_PROFILE: production
+  LAB_CONTROL_PLANE_HOST: 0.0.0.0
+  LAB_CONTROL_PLANE_PORT: 8443
+  LAB_PUBLIC_URL: ${LAB_PUBLIC_URL:?Set LAB_PUBLIC_URL to the external HTTPS URL}
+  LAB_LOG_LEVEL: ${LAB_LOG_LEVEL:-INFO}
+  LAB_DATABASE_URL_FILE: /run/secrets/database-url
+  LAB_DATABASE_POOL_SIZE: ${LAB_DATABASE_POOL_SIZE:-10}
+  LAB_ARTIFACT_DIR: /var/lib/lab-platform/artifacts
+  LAB_SECRET_KEY_FILE: /run/secrets/control-plane-secret-key
+  LAB_REVERSE_PROXY_ENABLED: "true"
+  LAB_TRUSTED_PROXY_NETWORKS: 172.30.0.5/32
+  LAB_MAX_CONCURRENT_WORKFLOWS: ${LAB_MAX_CONCURRENT_WORKFLOWS:-20}
+  LAB_MAX_ACTIVE_CI_SESSIONS: ${LAB_MAX_ACTIVE_CI_SESSIONS:-50}
+  LAB_MAX_SSE_STREAMS: ${LAB_MAX_SSE_STREAMS:-200}
+  LAB_MAX_ARTIFACT_SIZE_MB: ${LAB_MAX_ARTIFACT_SIZE_MB:-500}
+  LAB_MAX_LOG_ARTIFACT_SIZE_MB: ${LAB_MAX_LOG_ARTIFACT_SIZE_MB:-100}
+  LAB_MAX_RESERVATION_DURATION_MINUTES: ${LAB_MAX_RESERVATION_DURATION_MINUTES:-1440}
+
+services:
+  postgres:
+    image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${LAB_POSTGRES_DB:-lab_platform}
+      POSTGRES_USER: ${LAB_POSTGRES_USER:-lab_platform}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      backend:
+        ipv4_address: 172.30.0.20
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+
+  migrate:
+    image: ${LAB_CONTROL_PLANE_IMAGE:-ghcr.io/mtzahor/lab-platform-control-plane}:${LAB_VERSION:-0.9.0-beta}
+    command: ["db", "migrate", "--config", "/etc/lab-platform/control-plane.yaml"]
+    env_file: [.env]
+    environment: *control-plane-environment
+    secrets:
+      - database-url
+      - control-plane-secret-key
+    volumes:
+      - ./control-plane.yaml:/etc/lab-platform/control-plane.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    restart: "no"
+
+  control-plane:
+    image: ${LAB_CONTROL_PLANE_IMAGE:-ghcr.io/mtzahor/lab-platform-control-plane}:${LAB_VERSION:-0.9.0-beta}
+    restart: unless-stopped
+    command: ["serve", "--config", "/etc/lab-platform/control-plane.yaml"]
+    env_file: [.env]
+    environment:
+      <<: *control-plane-environment
+      LAB_HEALTHCHECK_URL: http://127.0.0.1:8443/health/ready
+    secrets:
+      - database-url
+      - control-plane-secret-key
+    volumes:
+      - ./control-plane.yaml:/etc/lab-platform/control-plane.yaml:ro
+      - artifact-data:/var/lib/lab-platform/artifacts
+    expose:
+      - "8443"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "lab-healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    networks:
+      backend:
+        ipv4_address: 172.30.0.10
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 45s
+
+  reverse-proxy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    environment:
+      LAB_PUBLIC_HOST: ${LAB_PUBLIC_HOST:?Set LAB_PUBLIC_HOST to the public DNS name}
+      LAB_ACME_EMAIL: ${LAB_ACME_EMAIL:?Set LAB_ACME_EMAIL for certificate notices}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    networks:
+      backend:
+        ipv4_address: 172.30.0.5
+    cap_drop: [ALL]
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    stop_grace_period: 15s
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  postgres-data:
+  artifact-data:
+  caddy-data:
+  caddy-config:
+
+secrets:
+  postgres-password:
+    file: ./secrets/postgres-password
+  database-url:
+    file: ./secrets/database-url
+  control-plane-secret-key:
+    file: ./secrets/control-plane-secret-key

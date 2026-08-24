@@ -428,9 +428,9 @@ def test_schema_v11_upgrades_existing_queue_rows_without_changing_ownership(
     upgraded.initialize()
     try:
         with upgraded.transaction() as connection:
-            assert SCHEMA_VERSION == 11
+            assert SCHEMA_VERSION == 12
             assert (
-                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 11
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
             )
             columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(reservation_queue)")

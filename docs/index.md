@@ -1,5 +1,25 @@
 # Lab Platform documentation
 
+## Phase 8 product and deployment
+
+- [Phase 8 objective, product boundary, evidence, and cut line](PHASE_8.md)
+- [Self-hosted installation and day-two operations](SELF_HOSTING.md)
+- [Production architecture, TLS proxy, secrets, and startup](PRODUCTION_DEPLOYMENT.md)
+- [Official container images, tags, verification, and runtime boundaries](DOCKER.md)
+- [Safe upgrade, migration, verification, and rollback workflow](UPGRADING.md)
+- [Complete backup, verification, restore, and recovery testing](BACKUP_RESTORE.md)
+- [Local and S3-compatible artifact storage](ARTIFACT_STORAGE.md)
+- [Artifact and audit retention policy](RETENTION.md)
+- [Stable, preview, and nightly release channels](RELEASE_CHANNELS.md)
+- [Application, Agent, API, protocol, plugin, schema, and backup compatibility](VERSION_COMPATIBILITY.md)
+- [Managed-service responsibility and tenant-isolation boundary](MANAGED_SERVICE.md)
+- [Community/commercial feature and dependency boundary](OPEN_CORE_MODEL.md)
+- [Apache-2.0, contributions, commercial components, and trademarks](LICENSING.md)
+- [Control-plane, database, storage, host, upgrade, and reconnect disaster recovery](DISASTER_RECOVERY.md)
+- [Machine-assisted and manual production security checklist](PRODUCTION_SECURITY.md)
+- [Project security reporting policy](../SECURITY.md)
+- [Roadmap and Phase 8 acceptance status](../ROADMAP.md)
+
 ## Phase 7 web dashboard
 
 - [Phase 7 status, architecture, security, and cut line](PHASE_7.md)

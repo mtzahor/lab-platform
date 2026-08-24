@@ -268,6 +268,10 @@ class RequestBodyTooLargeError(PlatformError):
     code = "REQUEST_BODY_TOO_LARGE"
 
 
+class ResourceLimitExceededError(PlatformError):
+    code = "RESOURCE_LIMIT_EXCEEDED"
+
+
 class ArtifactChecksumMismatchError(PlatformError):
     code = "ARTIFACT_CHECKSUM_MISMATCH"
 

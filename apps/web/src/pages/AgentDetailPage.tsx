@@ -40,6 +40,7 @@ import {
   Panel,
   StatusBadge,
 } from "../components/ui";
+import { agentUpgradeAssessment, agentUpgradeBadgeStatus } from "../features/agents/upgrade";
 import { useApiDetail, useApiList, useApiMutation } from "../hooks/useApi";
 import { copyText, formatDate, formatRelative, titleCase } from "../lib/format";
 
@@ -149,6 +150,15 @@ export function AgentDetailPage() {
   const timeline = records(timelineQuery.data);
   const workload = nested(agent, "workload");
   const status = stringValue(agent, "status") ?? "UNKNOWN";
+  const upgrade = agentUpgradeAssessment(agent);
+  const compatibilityStatus =
+    upgrade.workAllowed === undefined
+      ? status === "INCOMPATIBLE"
+        ? "INCOMPATIBLE"
+        : "COMPATIBLE"
+      : upgrade.workAllowed
+        ? "COMPATIBLE"
+        : "INCOMPATIBLE";
   return (
     <div className="page-stack">
       <Link className="back-link" to="/agents">
@@ -195,6 +205,18 @@ export function AgentDetailPage() {
             <p>
               Owned benches show their last known state. New operations cannot start until the
               connection returns.
+            </p>
+          </div>
+        </div>
+      )}
+      {upgrade.status && upgrade.status !== "up_to_date" && (
+        <div className={upgrade.workAllowed === false ? "warning-callout" : "info-callout"}>
+          <FileWarning size={20} />
+          <div>
+            <strong>{titleCase(upgrade.status)}</strong>
+            <p>
+              {upgrade.reason ?? "Review this Agent before the next control-plane upgrade."}
+              {upgrade.targetVersion ? ` Target version: ${upgrade.targetVersion}.` : ""}
             </p>
           </div>
         </div>
@@ -315,9 +337,29 @@ export function AgentDetailPage() {
                   label: "Compatibility",
                   value: (
                     <StatusBadge
-                      status={status === "INCOMPATIBLE" ? "INCOMPATIBLE" : "HEALTHY"}
-                      label={status === "INCOMPATIBLE" ? "Incompatible" : "Compatible"}
+                      status={compatibilityStatus}
+                      label={compatibilityStatus === "INCOMPATIBLE" ? "Incompatible" : "Compatible"}
                     />
+                  ),
+                },
+                {
+                  label: "Upgrade state",
+                  value: upgrade.status ? (
+                    <StatusBadge status={agentUpgradeBadgeStatus(upgrade.status)} />
+                  ) : (
+                    "—"
+                  ),
+                },
+                {
+                  label: "Target version",
+                  value: upgrade.targetVersion ? <code>{upgrade.targetVersion}</code> : "—",
+                },
+                {
+                  label: "Minimum supported",
+                  value: upgrade.minimumSupportedVersion ? (
+                    <code>{upgrade.minimumSupportedVersion}</code>
+                  ) : (
+                    "—"
                   ),
                 },
                 {

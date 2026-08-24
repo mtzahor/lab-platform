@@ -75,6 +75,11 @@ describe("Phase 7 frontend scale acceptance", () => {
         bench_count: 10,
         last_seen_at: "2026-08-23T09:15:00Z",
         last_connected_at: "2026-08-23T09:00:00Z",
+        upgrade_status: index % 3 === 0 ? "upgrade_available" : "up_to_date",
+        upgrade: {
+          status: index % 3 === 0 ? "upgrade_available" : "up_to_date",
+          work_allowed: true,
+        },
       };
     });
     const client = testClient();
@@ -91,6 +96,8 @@ describe("Phase 7 frontend scale acceptance", () => {
     expect(screen.getByRole("combobox", { name: "Status" })).toBeVisible();
     expect(screen.getByRole("combobox", { name: "Location" })).toBeVisible();
     expect(screen.getByRole("combobox", { name: "Version" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "Upgrade" })).toBeVisible();
+    expect(screen.getAllByText("Upgrade Available").length).toBeGreaterThan(0);
 
     await userEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(screen.getByRole("row", { name: "Open Agent 025" })).toBeVisible();

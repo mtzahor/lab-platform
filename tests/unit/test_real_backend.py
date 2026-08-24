@@ -104,8 +104,8 @@ class RoutingRunner(ProcessRunner):
     ) -> ProcessResult:
         values = list(args)
         self.calls.append(values)
-        if values[-1] == "chip_id":
-            output = (f"Chip is {self.chip} (revision 1)\nMAC: AA:BB:CC:DD:EE:FF",)
+        if values[-1] == "read-mac":
+            output = (f"Chip type: {self.chip} (revision 1)\nMAC: AA:BB:CC:DD:EE:FF",)
             return ProcessResult(self.returncode, output, ())
         if on_output is not None:
             for text in (
@@ -130,8 +130,8 @@ class CancellableRoutingRunner(ProcessRunner):
         timeout_seconds: float,
         on_output: OutputCallback | None = None,
     ) -> ProcessResult:
-        if list(args)[-1] == "chip_id":
-            return ProcessResult(0, ("Chip is ESP32-D0WD\nMAC: AA:BB:CC:DD:EE:FF",), ())
+        if list(args)[-1] == "read-mac":
+            return ProcessResult(0, ("Chip type: ESP32-D0WD\nMAC: AA:BB:CC:DD:EE:FF",), ())
         self.flash_started.set()
         try:
             await asyncio.Event().wait()
@@ -273,17 +273,36 @@ def test_esptool_parsers_and_argument_builders(tmp_path: Path) -> None:
     config = _bench()
     flash_args = build_flash_args(config, "/dev/ttyUSB0", firmware)
     assert flash_args[:3] == [sys.executable, "-m", "esptool"]
-    assert flash_args[-3:] == ["write_flash", "0x10000", str(firmware.local_path)]
-    assert build_probe_args(config, "/dev/ttyUSB0")[-1] == "chip_id"
+    assert flash_args[-3:] == ["write-flash", "0x10000", str(firmware.local_path)]
+    assert build_probe_args(config, "/dev/ttyUSB0")[-1] == "read-mac"
+    assert "default-reset" in flash_args
+    assert "hard-reset" in flash_args
+
+    legacy_config = _bench(flash={"reset_mode": "default_reset", "after": "hard_reset"})
+    legacy_args = build_flash_args(legacy_config, "/dev/ttyUSB0", firmware)
+    assert "default-reset" in legacy_args
+    assert "hard-reset" in legacy_args
 
     assert parse_esptool_progress("Connecting...") == (20, "Connecting to bootloader")
     assert parse_esptool_progress("Erasing flash...") == (30, "Erasing flash region")
     assert parse_esptool_progress("Writing at 0x1 (50 %)") == (62, "Writing firmware")
+    assert parse_esptool_progress("Flash will be erased from 0x1 to 0x2...") == (
+        30,
+        "Erasing flash region",
+    )
+    assert parse_esptool_progress("Writing at 0x1 [==============] 50.0%") == (
+        62,
+        "Writing firmware",
+    )
     assert parse_esptool_progress("Hash of data verified.") == (90, "Verifying firmware")
     assert parse_esptool_progress("noise") is None
     assert parse_chip_info("Chip is ESP32-D0WD (revision 1)\nMAC: aa:bb:cc:dd:ee:ff") == (
         "ESP32-D0WD",
         "AA:BB:CC:DD:EE:FF",
+    )
+    assert parse_chip_info("Chip type: ESP32-S3 (revision v0.2)\nMAC: 11:22:33:44:55:66") == (
+        "ESP32-S3",
+        "11:22:33:44:55:66",
     )
     assert parse_wrong_chip("A fatal error occurred: This chip is ESP32-S3, not ESP32") == (
         "ESP32-S3"

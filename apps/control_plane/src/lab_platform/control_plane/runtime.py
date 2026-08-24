@@ -16,6 +16,11 @@ from lab_platform.agent_protocol.commands import (
     ReconciliationRequestPayload,
 )
 from lab_platform.control_plane.artifact_access import ProtectedArtifactService
+from lab_platform.control_plane.compatibility import (
+    AgentUpgradeAssessment,
+    AgentUpgradeStatus,
+    VersionCompatibilityPolicy,
+)
 from lab_platform.control_plane.config import ControlPlaneConfig
 from lab_platform.control_plane.gateway import (
     WS_AUTHENTICATION_FAILED,
@@ -23,8 +28,13 @@ from lab_platform.control_plane.gateway import (
     AgentGateway,
     AgentMessageRouter,
 )
+from lab_platform.control_plane.observability import OperationalMetrics
 from lab_platform.control_plane.oidc_provider import HttpOidcProvider
 from lab_platform.control_plane.operational_access import OperationalAccessService
+from lab_platform.control_plane.operational_events import (
+    RetentionOperationalEventSink,
+    StructuredOperationalEventSink,
+)
 from lab_platform.control_plane.reservation_queue import CentralReservationQueueService
 from lab_platform.control_plane.reservations import (
     CoordinatedReconciliationHandler,
@@ -43,6 +53,7 @@ from lab_platform.control_plane_core.enrollment import (
     AgentEnrollmentService,
     IssuedAgentCredential,
 )
+from lab_platform.control_plane_core.errors import AgentIncompatibleError
 from lab_platform.control_plane_core.inventory import InventoryService
 from lab_platform.control_plane_core.presence import AgentPresenceService
 from lab_platform.control_plane_core.reconciliation import (
@@ -57,13 +68,25 @@ from lab_platform.control_plane_core.workflows import (
     DistributedWorkflowCoordinator,
     DistributedWorkflowReservationLifecycle,
 )
+from lab_platform.core.artifact_storage import (
+    ArtifactStorage,
+    LocalArtifactStorage,
+    S3CompatibleArtifactStorage,
+)
 from lab_platform.core.artifacts import ArtifactService
 from lab_platform.core.auth import ApiTokenService
 from lab_platform.core.authorisation import AuthorisationService
-from lab_platform.core.errors import AuthenticationRequiredError, ConfigurationError
+from lab_platform.core.errors import (
+    AuthenticationRequiredError,
+    ConfigurationError,
+    ResourceLimitExceededError,
+)
+from lab_platform.core.features import CommunityFeatureProvider, FeatureProvider
 from lab_platform.core.identity import IdentityAuthenticationService
 from lab_platform.core.identity_admin import IdentityAdministrationService
 from lab_platform.core.oidc import OidcAuthenticationService, OidcProvider
+from lab_platform.core.release import build_metadata
+from lab_platform.core.retention import RetentionClass, RetentionPolicy, RetentionWorker
 from lab_platform.models import (
     ActorContext,
     AgentRecord,
@@ -90,6 +113,10 @@ from lab_platform.persistence import (
     SQLiteWorkflowRepository,
 )
 from lab_platform.persistence.agents import SQLiteAgentEnrollmentRepository
+from lab_platform.persistence.database_management import (
+    inspect_database_schema,
+    require_current_schema,
+)
 from lab_platform.persistence.distributed import (
     SQLiteAgentTimelineRepository,
     SQLiteArtifactTransferRepository,
@@ -114,6 +141,7 @@ from lab_platform.persistence.distributed_adapters import (
     SQLiteRemoteCommandServiceRepository,
 )
 from lab_platform.persistence.identity import SQLiteIdentityRepository
+from lab_platform.persistence.migrations import SCHEMA_VERSION
 from lab_platform.persistence.postgresql import create_control_plane_database
 
 _LOGGER = logging.getLogger("lab-platform.control-plane")
@@ -130,12 +158,32 @@ class ControlPlaneRuntime:
         config: ControlPlaneConfig,
         *,
         oidc_provider: OidcProvider | None = None,
+        feature_provider: FeatureProvider | None = None,
     ) -> None:
         self.config = config
+        self.feature_provider = feature_provider or CommunityFeatureProvider()
+        self.observability = OperationalMetrics()
+        self.operational_events = StructuredOperationalEventSink()
+        self._storage_unavailable_reported = False
         self.database = create_control_plane_database(config.database.url)
+        self.audit_events = SQLiteEventRepository(self.database)
+        compatibility = config.compatibility.agents
+        minimum_agent = compatibility.minimum_supported_version or (
+            "0.8.0" if config.profile == "production" else "0.6.0-alpha"
+        )
+        self.compatibility_policy = VersionCompatibilityPolicy.from_strings(
+            minimum_supported_agent=minimum_agent,
+            minimum_recommended_agent=compatibility.minimum_recommended_version,
+            target_agent=compatibility.target_version,
+            maximum_supported_agent=compatibility.maximum_supported_version,
+            release_channel=build_metadata().release_channel,
+        )
 
         self.agent_repository = SQLiteAgentEnrollmentRepository(self.database)
-        self.enrollment = AgentEnrollmentService(self.agent_repository)
+        self.enrollment = AgentEnrollmentService(
+            self.agent_repository,
+            compatibility_validator=self.ensure_agent_compatible,
+        )
         self.presence_repository = SQLiteAgentPresenceAdapter(self.database)
         self.inventory_repository = SQLiteInventoryAdapter(self.database)
         self.inventory = InventoryService(self.inventory_repository)
@@ -165,6 +213,19 @@ class ControlPlaneRuntime:
             self.directory,
             self.lease_synchronizer,
             scheduled_repository=self.scheduled_reservation_repository,
+            default_reservation_duration_seconds=min(
+                3_600,
+                (
+                    config.resource_limits.maximum_reservation_duration_minutes * 60
+                    if config.resource_limits.maximum_reservation_duration_minutes is not None
+                    else 86_400
+                ),
+            ),
+            maximum_reservation_duration_seconds=(
+                config.resource_limits.maximum_reservation_duration_minutes * 60
+                if config.resource_limits.maximum_reservation_duration_minutes is not None
+                else 86_400
+            ),
             maximum_clock_skew_seconds=(config.distributed.maximum_clock_skew_seconds),
             offline_reservation_grace_seconds=(
                 config.distributed.offline_reservation_grace_seconds
@@ -180,23 +241,54 @@ class ControlPlaneRuntime:
             ),
         )
 
+        maximum_artifact_size_mb = (
+            config.resource_limits.maximum_artifact_size_mb or config.artifacts.max_upload_size_mb
+        )
+        self.maximum_artifact_size_bytes = maximum_artifact_size_mb * 1024 * 1024
+        self.artifact_storage = _build_artifact_storage(config)
         self.artifact_transfer_repository = SQLiteArtifactTransferServiceRepository(self.database)
-        self.artifact_store = FilesystemTransferStore(config.artifacts.directory)
+        self.artifact_store = FilesystemTransferStore(storage=self.artifact_storage)
         self.artifacts = DistributedArtifactService(
             self.artifact_transfer_repository,
             self.artifact_store,
-            maximum_upload_size_bytes=config.artifacts.max_upload_size_mb * 1024 * 1024,
+            maximum_upload_size_bytes=self.maximum_artifact_size_bytes,
             token_ttl_seconds=config.artifacts.transfer_token_ttl_seconds,
         )
         self._artifact_upload_capabilities: dict[UUID, IssuedArtifactTransfer] = {}
         self._artifact_upload_requested_at: dict[UUID, datetime] = {}
         self._artifact_upload_lock = asyncio.Lock()
         self.remote_artifacts = SQLiteRemoteArtifactRepository(self.database)
-        self.platform_artifact_repository = SQLiteGenericArtifactRepository(self.database)
+        self.platform_artifact_repository = SQLiteGenericArtifactRepository(
+            self.database,
+            retention_storage=self.artifact_storage,
+        )
+        retention = config.retention.artifacts
+        retention_policy = (
+            RetentionPolicy(
+                default_days=retention.default_days,
+                failed_workflow_days=retention.failed_workflow_days,
+                firmware_days=retention.firmware_days,
+                class_days={
+                    RetentionClass.SERIAL_LOG: retention.serial_log_days,
+                    RetentionClass.JUNIT_REPORT: retention.junit_report_days,
+                    RetentionClass.WORKFLOW_LOG: retention.workflow_log_days,
+                    RetentionClass.DIAGNOSTIC_BUNDLE: retention.diagnostic_bundle_days,
+                },
+            )
+            if retention.enabled
+            else None
+        )
         self.platform_artifacts = ArtifactService(
             self.platform_artifact_repository,
-            config.artifacts.directory,
-            maximum_size_bytes=config.artifacts.max_upload_size_mb * 1024 * 1024,
+            maximum_size_bytes=self.maximum_artifact_size_bytes,
+            events=self.audit_events,
+            retention_policy=retention_policy,
+            storage=self.artifact_storage,
+        )
+        self.artifact_retention = RetentionWorker(
+            self.platform_artifact_repository,
+            self.artifact_storage,
+            events=RetentionOperationalEventSink(self.operational_events),
         )
         self.workflow_repository = SQLiteWorkflowRepository(
             self.database,
@@ -207,7 +299,7 @@ class ControlPlaneRuntime:
             self.artifacts,
             self.artifact_store,
             public_url=config.control_plane.public_url,
-            maximum_size_bytes=config.artifacts.max_upload_size_mb * 1024 * 1024,
+            maximum_size_bytes=self.maximum_artifact_size_bytes,
         )
         self.commands = RemoteCommandService(
             self.command_repository,
@@ -290,13 +382,13 @@ class ControlPlaneRuntime:
             distributed_settings=config.distributed,
             protocol_journal=self.protocol_journal,
             timeline=self.timeline,
+            compatibility_validator=self.ensure_agent_compatible,
         )
 
         self.benches = SQLiteGlobalBenchRepository(self.database)
         self.artifact_transfers = SQLiteArtifactTransferRepository(self.database)
         self.raw_protocol_messages = SQLiteProtocolMessageJournalRepository(self.database)
         self.api_tokens = SQLiteApiTokenRepository(self.database)
-        self.audit_events = SQLiteEventRepository(self.database)
         self.token_service = ApiTokenService(self.api_tokens, self.audit_events)
         self.identity_repository = SQLiteIdentityRepository(self.database)
         self.identity = IdentityAuthenticationService(
@@ -356,7 +448,7 @@ class ControlPlaneRuntime:
             self.authorisation,
             self.artifacts,
             self.artifact_store,
-            maximum_transfer_size_bytes=config.artifacts.max_upload_size_mb * 1024 * 1024,
+            maximum_transfer_size_bytes=self.maximum_artifact_size_bytes,
             hide_unauthorised_resources=(config.authorisation.hide_unauthorised_resources),
         )
         self.operational_access = OperationalAccessService(
@@ -391,11 +483,52 @@ class ControlPlaneRuntime:
         )
         self._monitor_task: asyncio.Task[None] | None = None
         self._next_identity_maintenance_at: datetime | None = None
+        self._next_artifact_retention_at: datetime | None = None
+        self._active_sse_streams = 0
+        self._sse_stream_lock = asyncio.Lock()
         self._started = False
 
     @property
     def started(self) -> bool:
         return self._started
+
+    def assess_agent_compatibility(
+        self,
+        agent_version: str,
+        protocol_version: str,
+    ) -> AgentUpgradeAssessment:
+        return self.compatibility_policy.evaluate_agent(agent_version, protocol_version)
+
+    def ensure_agent_compatible(self, agent_version: str, protocol_version: str) -> None:
+        assessment = self.assess_agent_compatibility(agent_version, protocol_version)
+        payload = {
+            "agent_version": assessment.agent_version,
+            "protocol_version": assessment.protocol_version,
+            "upgrade_status": assessment.status.value,
+            "minimum_supported_version": assessment.minimum_supported_version,
+            "target_version": assessment.target_version,
+            "release_channel": assessment.release_channel,
+        }
+        if assessment.status in {
+            AgentUpgradeStatus.UPGRADE_AVAILABLE,
+            AgentUpgradeStatus.UPGRADE_RECOMMENDED,
+            AgentUpgradeStatus.UPGRADE_REQUIRED,
+        }:
+            self.operational_events.emit("AGENT_UPGRADE_AVAILABLE", payload)
+        if assessment.work_allowed:
+            return
+        self.operational_events.emit(
+            "VERSION_INCOMPATIBLE",
+            {**payload, "reason": assessment.reason},
+        )
+        raise AgentIncompatibleError(
+            assessment.reason,
+            agent_version=assessment.agent_version,
+            protocol_version=assessment.protocol_version,
+            upgrade_status=assessment.status.value,
+            minimum_supported_version=assessment.minimum_supported_version,
+            target_version=assessment.target_version,
+        )
 
     async def start(self) -> None:
         if self._started:
@@ -407,38 +540,167 @@ class ControlPlaneRuntime:
                 self.config.development.auto_login_user,
             )
         try:
+            # Production startup is deliberately non-migrating: an operator must run
+            # ``lab-platform-control-plane db migrate`` before replacing the process.
+            # The initialize call below can therefore only reopen an already-current
+            # schema; it cannot bridge an old or empty production database.
+            if self.config.profile == "production":
+                require_current_schema(inspect_database_schema(self.config.database.url))
             self.database.initialize()
             if self.config.identity.enabled:
                 await self.identity_repository.ensure_default_organisation(
                     slug=self.config.identity.default_organisation_slug,
                     name=self.config.identity.default_organisation_name,
                 )
-            self.config.artifacts.directory.mkdir(parents=True, exist_ok=True)
+            if isinstance(self.artifact_storage, LocalArtifactStorage):
+                self.config.artifacts.directory.mkdir(parents=True, exist_ok=True)
             await self.ci.recover_incomplete()
-            self._next_identity_maintenance_at = datetime.now(UTC)
+            now = datetime.now(UTC)
+            self._next_identity_maintenance_at = now
+            self._next_artifact_retention_at = now
+            self._started = True
             self._monitor_task = asyncio.create_task(
                 self._monitor_loop(),
                 name="control-plane-monitor",
             )
-            self._started = True
         except Exception:
             if self._monitor_task is not None:
                 self._monitor_task.cancel()
                 await asyncio.gather(self._monitor_task, return_exceptions=True)
                 self._monitor_task = None
             self._next_identity_maintenance_at = None
+            self._next_artifact_retention_at = None
             self.database.close()
             self._started = False
             raise
 
     async def stop(self) -> None:
+        # Readiness is withdrawn before workers and Agent transports are drained.
+        self._started = False
         if self._monitor_task is not None:
             self._monitor_task.cancel()
             await asyncio.gather(self._monitor_task, return_exceptions=True)
             self._monitor_task = None
+        await self.hub.close_all()
         self._next_identity_maintenance_at = None
+        self._next_artifact_retention_at = None
         self.database.close()
-        self._started = False
+
+    async def readiness(self) -> dict[str, object]:
+        """Return dependency-aware readiness without exposing credentials or paths."""
+
+        checks: dict[str, object] = {
+            "runtime": {"ready": self._started},
+        }
+        ready = self._started
+        try:
+            with self.database.transaction() as connection:
+                connection.execute("SELECT 1").fetchone()
+                row = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+                schema_version = int(row[0]) if row is not None and row[0] is not None else 0
+            schema_ready = schema_version == SCHEMA_VERSION
+            checks["database"] = {
+                "ready": schema_ready,
+                "schema_version": schema_version,
+                "target_schema_version": SCHEMA_VERSION,
+            }
+            ready = ready and schema_ready
+        except Exception as exc:
+            checks["database"] = {
+                "ready": False,
+                "error": type(exc).__name__,
+            }
+            ready = False
+        try:
+            # A missing reserved probe object is healthy; the metadata request itself
+            # verifies that the configured backend can be reached.
+            await self.artifact_storage.exists("health/readiness-probe")
+            checks["artifact_storage"] = {"ready": True}
+            self._storage_unavailable_reported = False
+        except Exception as exc:
+            checks["artifact_storage"] = {
+                "ready": False,
+                "error": type(exc).__name__,
+            }
+            ready = False
+            if not self._storage_unavailable_reported:
+                self.operational_events.emit(
+                    "STORAGE_UNAVAILABLE",
+                    {
+                        "backend_type": self.config.artifacts.storage_backend,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                self._storage_unavailable_reported = True
+        try:
+            gateway_metrics = await self.hub.metrics()
+            checks["agent_gateway"] = {
+                "ready": True,
+                "connections": gateway_metrics.get("connected_agents", 0),
+            }
+        except Exception as exc:
+            checks["agent_gateway"] = {
+                "ready": False,
+                "error": type(exc).__name__,
+            }
+            ready = False
+        return {
+            "status": "ready" if ready else "not_ready",
+            "ready": ready,
+            "checks": checks,
+        }
+
+    def require_workflow_capacity(self) -> None:
+        limit = self.config.resource_limits.maximum_concurrent_workflows
+        if limit is None:
+            return
+        self._require_database_capacity(
+            name="concurrent workflows",
+            limit=limit,
+            query=(
+                "SELECT COUNT(*) FROM distributed_operations "
+                "WHERE operation_type = 'RUN_WORKFLOW' AND status IN "
+                "('CREATED', 'DISPATCHED', 'ACCEPTED', 'RUNNING', 'UNKNOWN', 'RECONCILING')"
+            ),
+        )
+
+    def require_ci_capacity(self) -> None:
+        limit = self.config.resource_limits.maximum_active_ci_sessions
+        if limit is None:
+            return
+        self._require_database_capacity(
+            name="active CI sessions",
+            limit=limit,
+            query=(
+                "SELECT COUNT(*) FROM ci_sessions WHERE status IN "
+                "('created', 'waiting_for_bench', 'reserved', 'running', "
+                "'cancel_requested', 'cleanup_pending')"
+            ),
+        )
+
+    def _require_database_capacity(self, *, name: str, limit: int, query: str) -> None:
+        with self.database.transaction() as connection:
+            row = connection.execute(query).fetchone()
+        active = int(row[0]) if row is not None else 0
+        if active >= limit:
+            raise ResourceLimitExceededError(
+                f"The configured limit for {name} has been reached.",
+                resource=name,
+                limit=limit,
+                active=active,
+            )
+
+    async def acquire_sse_stream(self) -> bool:
+        limit = self.config.resource_limits.maximum_sse_streams
+        async with self._sse_stream_lock:
+            if limit is not None and self._active_sse_streams >= limit:
+                return False
+            self._active_sse_streams += 1
+            return True
+
+    async def release_sse_stream(self) -> None:
+        async with self._sse_stream_lock:
+            self._active_sse_streams = max(0, self._active_sse_streams - 1)
 
     async def refresh_inventory(
         self,
@@ -541,7 +803,7 @@ class ControlPlaneRuntime:
                     upload_url=f"{base}/api/v1/artifact-transfers/{transfer.id}/content",
                     transfer_token=issued.plaintext_token,
                     expires_at=transfer.expires_at,
-                    maximum_size_bytes=(self.config.artifacts.max_upload_size_mb * 1024 * 1024),
+                    maximum_size_bytes=self.maximum_artifact_size_bytes,
                     expected_sha256=transfer.expected_sha256,
                 ),
                 correlation_id=artifact_id,
@@ -964,6 +1226,8 @@ class ControlPlaneRuntime:
             scope_where = " WHERE organisation_id = ?" if organisation_id is not None else ""
             scope_and = " AND organisation_id = ?" if organisation_id is not None else ""
             metrics: dict[str, int | float] = {
+                "database_healthy": 1,
+                "database_schema_version": SCHEMA_VERSION,
                 "agents_online": scalar(
                     "SELECT COUNT(*) FROM agents WHERE status = 'ONLINE'" + scope_and,
                     scope_values,
@@ -998,6 +1262,35 @@ class ControlPlaneRuntime:
                 ),
                 "remote_commands_failed": scalar(
                     "SELECT COUNT(*) FROM remote_commands WHERE status = 'FAILED'" + scope_and,
+                    scope_values,
+                ),
+                "workflows_active": scalar(
+                    "SELECT COUNT(*) FROM distributed_operations "
+                    "WHERE operation_type = 'RUN_WORKFLOW' AND status IN "
+                    "('CREATED', 'DISPATCHED', 'ACCEPTED', 'RUNNING', 'UNKNOWN', "
+                    "'RECONCILING')" + scope_and,
+                    scope_values,
+                ),
+                "workflows_failed": scalar(
+                    "SELECT COUNT(*) FROM distributed_operations "
+                    "WHERE operation_type = 'RUN_WORKFLOW' AND status = 'FAILED'" + scope_and,
+                    scope_values,
+                ),
+                "reservations_active": scalar(
+                    "SELECT COUNT(*) FROM reservations WHERE status = 'active'" + scope_and,
+                    scope_values,
+                ),
+                "reservation_queue_depth": scalar(
+                    "SELECT COUNT(*) FROM reservation_queue WHERE status = 'waiting'" + scope_and,
+                    scope_values,
+                ),
+                "artifact_usage_bytes": scalar(
+                    "SELECT COALESCE(SUM(size_bytes), 0) FROM artifacts "
+                    "WHERE retention_state = 'active'" + scope_and,
+                    scope_values,
+                ),
+                "artifacts_active": scalar(
+                    "SELECT COUNT(*) FROM artifacts WHERE retention_state = 'active'" + scope_and,
                     scope_values,
                 ),
                 "operation_reconciliations_total": scalar(
@@ -1086,7 +1379,35 @@ class ControlPlaneRuntime:
                     agent.id,
                     allow_internal_authorisation=True,
                 )
+        await self._process_artifact_retention(now)
         await self._process_identity_maintenance(now)
+
+    async def _process_artifact_retention(self, now: datetime) -> None:
+        retention = self.config.retention.artifacts
+        due_at = self._next_artifact_retention_at
+        if not retention.enabled or due_at is None or now < due_at:
+            return
+        # Move the deadline before I/O so a transient backend failure cannot turn
+        # the one-second monitor into a destructive tight retry loop.
+        self._next_artifact_retention_at = now + timedelta(
+            seconds=retention.worker_interval_seconds
+        )
+        result = await self.artifact_retention.run_once(
+            now=now,
+            limit=retention.batch_size,
+        )
+        if result.tombstoned:
+            _LOGGER.info(
+                "Expired %d artifacts (%d bytes) under the configured retention policy",
+                result.tombstoned,
+                result.deleted_bytes,
+            )
+        if result.failures:
+            self.observability.record_background_failure("artifact-retention")
+            _LOGGER.warning(
+                "Artifact retention completed with %d recoverable failures",
+                len(result.failures),
+            )
 
     async def _process_identity_maintenance(self, now: datetime) -> None:
         due_at = self._next_identity_maintenance_at
@@ -1108,8 +1429,13 @@ class ControlPlaneRuntime:
         interval = self.config.agent_gateway.monitor_interval_seconds
         while True:
             await asyncio.sleep(interval)
-            with suppress(Exception):
+            try:
                 await self.monitor_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.observability.record_background_failure("control-plane-monitor")
+                _LOGGER.exception("Control-plane monitor iteration failed")
 
 
 def _control_actor_context(
@@ -1155,3 +1481,17 @@ def _sqlite_path(url: str) -> Path:
     if not value:
         raise ConfigurationError("SQLite database URL must include a path.")
     return Path(value).expanduser()
+
+
+def _build_artifact_storage(config: ControlPlaneConfig) -> ArtifactStorage:
+    if config.artifacts.storage_backend == "local":
+        return LocalArtifactStorage(config.artifacts.directory)
+    s3 = config.artifacts.s3
+    if s3.bucket is None:  # Defensive: configuration validation owns this invariant.
+        raise ConfigurationError("S3 artifact storage requires a bucket name.")
+    return S3CompatibleArtifactStorage(
+        bucket=s3.bucket,
+        prefix=s3.prefix,
+        endpoint_url=s3.endpoint_url,
+        region_name=s3.region_name,
+    )

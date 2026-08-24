@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import unicodedata
 from collections.abc import AsyncIterable, Callable, Mapping
@@ -10,12 +9,17 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID, uuid4
 
+from lab_platform.core.artifact_storage import (
+    ArtifactStorage,
+    LocalArtifactStorage,
+    LocalPathArtifactStorage,
+)
 from lab_platform.core.errors import (
     ArtifactChecksumMismatchError,
     ArtifactNotFoundError,
-    ArtifactTooLargeError,
     InvalidArtifactError,
 )
+from lab_platform.core.retention import RetentionPolicy, retention_class_for_artifact_type
 from lab_platform.models import (
     LEGACY_ORGANISATION_ID,
     ArtifactOwnerType,
@@ -77,23 +81,34 @@ class ArtifactService:
     def __init__(
         self,
         repository: GenericArtifactRepository,
-        storage_root: Path,
+        storage_root: Path | None = None,
         *,
         maximum_size_bytes: int,
         events: ArtifactEventRepository | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         retention_seconds: int | None = None,
+        retention_policy: RetentionPolicy | None = None,
+        storage: ArtifactStorage | None = None,
     ) -> None:
         if maximum_size_bytes <= 0:
             raise ValueError("maximum artifact size must be positive")
         if retention_seconds is not None and retention_seconds <= 0:
             raise ValueError("artifact retention must be positive")
+        if retention_seconds is not None and retention_policy is not None:
+            raise ValueError("Configure either retention seconds or a retention policy, not both")
+        if storage is None:
+            if storage_root is None:
+                raise ValueError("Artifact storage or a local storage root is required")
+            storage = LocalArtifactStorage(storage_root)
+        elif storage_root is not None:
+            raise ValueError("Configure either artifact storage or a local storage root, not both")
         self._repository = repository
-        self._storage_root = storage_root
+        self._storage = storage
         self._maximum_size_bytes = maximum_size_bytes
         self._events = events
         self._clock = clock
         self._retention_seconds = retention_seconds
+        self._retention_policy = retention_policy
 
     async def upload(
         self,
@@ -131,45 +146,31 @@ class ArtifactService:
                 raise InvalidArtifactError("Expected SHA-256 must contain 64 hexadecimal digits.")
 
         artifact_id = uuid4()
-        incoming = self._storage_root / ".incoming"
-        incoming.mkdir(parents=True, exist_ok=True)
-        temporary = incoming / str(artifact_id)
-        digest = hashlib.sha256()
-        size = 0
-        directory: Path | None = None
-        destination: Path | None = None
+        storage_key = self._storage_key(artifact_id)
+        stored = None
         try:
-            with temporary.open("xb") as stream:
-                async for chunk in chunks:
-                    if not isinstance(chunk, bytes):
-                        raise InvalidArtifactError("Artifact chunks must be bytes.")
-                    if not chunk:
-                        continue
-                    size += len(chunk)
-                    if size > self._maximum_size_bytes:
-                        raise ArtifactTooLargeError(
-                            "Artifact exceeds the configured upload limit.",
-                            maximum_size_bytes=self._maximum_size_bytes,
-                        )
-                    digest.update(chunk)
-                    stream.write(chunk)
-            if size == 0:
+            stored = await self._storage.put(
+                storage_key,
+                chunks,
+                maximum_size_bytes=self._maximum_size_bytes,
+                expected_sha256=expected_sha256,
+            )
+            if stored.size_bytes == 0:
                 raise InvalidArtifactError("Artifact content cannot be empty.")
-            checksum = digest.hexdigest()
-            if expected_sha256 is not None and not _constant_time_equal(checksum, expected_sha256):
-                raise ArtifactChecksumMismatchError(
-                    "Artifact checksum does not match the supplied SHA-256.",
-                    expected_sha256=expected_sha256,
-                    actual_sha256=checksum,
-                )
-            directory = self._storage_root / "objects" / str(artifact_id)
-            directory.mkdir(parents=True, exist_ok=False)
-            destination = directory / "content"
-            temporary.replace(destination)
             created_at = self._clock()
             effective_expiry = expires_at
             if effective_expiry is None and self._retention_seconds is not None:
                 effective_expiry = created_at + timedelta(seconds=self._retention_seconds)
+            if effective_expiry is None and self._retention_policy is not None:
+                failed_workflow = str((metadata or {}).get("workflow_status", "")).casefold() in {
+                    "failed",
+                    "error",
+                }
+                effective_expiry = self._retention_policy.expires_at(
+                    created_at,
+                    retention_class_for_artifact_type(artifact_type),
+                    failed_workflow=failed_workflow,
+                )
             record = ArtifactRecord(
                 id=artifact_id,
                 organisation_id=organisation_id or LEGACY_ORGANISATION_ID,
@@ -178,25 +179,21 @@ class ArtifactService:
                 name=safe_name,
                 artifact_type=artifact_type,
                 content_type=content_type,
-                path=str(destination),
-                size_bytes=size,
-                sha256=checksum,
+                path=self._storage.reference(storage_key),
+                size_bytes=stored.size_bytes,
+                sha256=stored.sha256,
                 created_at=created_at,
                 expires_at=effective_expiry,
                 metadata=dict(metadata or {}),
             )
             saved = await self._repository.save(record, idempotency_key=idempotency_key)
         except BaseException:
-            temporary.unlink(missing_ok=True)
-            if destination is not None:
-                destination.unlink(missing_ok=True)
-            if directory is not None:
-                with suppress(OSError):
-                    directory.rmdir()
+            if stored is not None:
+                with suppress(Exception):
+                    await self._storage.delete(storage_key)
             raise
         if saved.id != record.id:
-            destination.unlink(missing_ok=True)
-            directory.rmdir()
+            await self._storage.delete(storage_key)
         await self._emit("ARTIFACT_UPLOADED", saved)
         return saved
 
@@ -300,14 +297,42 @@ class ArtifactService:
         organisation_id: UUID | None = None,
     ) -> Path:
         record = await self.get(artifact_id, organisation_id=organisation_id)
-        path = Path(record.path).resolve()
-        root = self._storage_root.resolve()
-        if not path.is_relative_to(root) or not path.is_file():
+        key = self._managed_key(record)
+        if key is None or not isinstance(self._storage, LocalPathArtifactStorage):
             raise ArtifactNotFoundError(
                 "Artifact content is unavailable.", artifact_id=str(artifact_id)
             )
+        path = self._storage.local_path(key)
         await self._emit("ARTIFACT_DOWNLOADED", record)
         return path
+
+    async def content_stream(
+        self,
+        artifact_id: UUID,
+        *,
+        organisation_id: UUID | None = None,
+    ) -> AsyncIterable[bytes]:
+        """Return backend-neutral content for HTTP streaming and backup tooling."""
+
+        record = await self.get(artifact_id, organisation_id=organisation_id)
+        key = self._managed_key(record)
+        if key is None:
+            raise ArtifactNotFoundError(
+                "Artifact content is unavailable.", artifact_id=str(artifact_id)
+            )
+        stored = await self._storage.stat(key)
+        if stored.size_bytes != record.size_bytes or not _constant_time_equal(
+            stored.sha256, record.sha256
+        ):
+            raise ArtifactChecksumMismatchError(
+                "Stored artifact content does not match its metadata.",
+                artifact_id=str(record.id),
+                expected_sha256=record.sha256,
+                actual_sha256=stored.sha256,
+            )
+        stream = await self._storage.get(key)
+        await self._emit("ARTIFACT_DOWNLOADED", record)
+        return stream
 
     async def delete(
         self,
@@ -323,7 +348,7 @@ class ArtifactService:
         """
 
         record = await self.get(artifact_id, organisation_id=organisation_id)
-        self._remove_managed_content(record)
+        await self._remove_managed_content(record)
         repository = cast(ArtifactRetentionRepository, self._repository)
         deleted = await repository.delete(
             artifact_id,
@@ -363,31 +388,26 @@ class ArtifactService:
         )
         expired = 0
         for record in records:
-            self._remove_managed_content(record)
+            await self._remove_managed_content(record)
             if not await repository.delete(record.id):
                 continue
             expired += 1
             await self._emit("ARTIFACT_EXPIRED", record)
+            await self._emit("RETENTION_DELETION", record)
         return expired
 
-    def _remove_managed_content(self, record: ArtifactRecord) -> None:
-        root = self._storage_root.resolve()
-        expected_directory = root / "objects" / str(record.id)
-        candidate = Path(record.path)
-        try:
-            candidate_directory = candidate.parent.resolve()
-        except OSError:
-            return
-        if (
-            candidate.name != "content"
-            or candidate_directory != expected_directory
-            or not candidate_directory.is_relative_to(root)
-        ):
-            return
-        managed_candidate = candidate_directory / "content"
-        managed_candidate.unlink(missing_ok=True)
-        with suppress(OSError):
-            candidate_directory.rmdir()
+    async def _remove_managed_content(self, record: ArtifactRecord) -> None:
+        key = self._managed_key(record)
+        if key is not None:
+            await self._storage.delete(key)
+
+    @staticmethod
+    def _storage_key(artifact_id: UUID) -> str:
+        return f"objects/{artifact_id}/content"
+
+    def _managed_key(self, record: ArtifactRecord) -> str | None:
+        key = self._storage.key_from_reference(record.path)
+        return key if key == self._storage_key(record.id) else None
 
     async def _emit(self, event_type: str, record: ArtifactRecord) -> None:
         if self._events is None:

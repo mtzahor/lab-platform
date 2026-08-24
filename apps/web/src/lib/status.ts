@@ -21,6 +21,8 @@ const POSITIVE = new Set([
   "COMPLETE",
   "COMPLETED",
   "CLEAN",
+  "COMPATIBLE",
+  "UP_TO_DATE",
 ]);
 const WARNING = new Set([
   "DEGRADED",
@@ -31,6 +33,8 @@ const WARNING = new Set([
   "EXPIRING",
   "UNKNOWN",
   "RECONCILING",
+  "UPGRADE_AVAILABLE",
+  "UPGRADE_RECOMMENDED",
 ]);
 const NEGATIVE = new Set([
   "OFFLINE",
@@ -39,6 +43,8 @@ const NEGATIVE = new Set([
   "DENIED",
   "REVOKED",
   "INCOMPATIBLE",
+  "UPGRADE_REQUIRED",
+  "UNSUPPORTED",
   "CANCELLED",
   "EXPIRED",
 ]);

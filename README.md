@@ -5,45 +5,53 @@ central control plane now gives local shells and CI systems one inventory and AP
 independent lab Agents while each Agent remains the final authority for hardware locks, execution,
 and safety.
 
-The current release is **0.8.0-alpha**. It retains the complete Phase 5 distributed software cut
-line—authenticated Agent enrollment, persistent WebSockets, unified inventory, confirmed leases,
-duplicate-safe commands, reconciliation, remote workflows/artifacts, distributed CI, and scale
-coverage—and adds the Phase 6 identity foundation: organisations, users, service accounts, teams,
-fixed RBAC, sessions/credentials, identity and access-policy administration, audit persistence,
-configuration, OIDC, resource-scoped enforcement, decision snapshots, and CLI auth/admin commands.
-Phase 7 adds an integrated React/TypeScript operations dashboard, browser cookie/CSRF and OIDC
-flows, permission-aware inventory and administration, immediate/scheduled reservations and queues,
-workflow/operation progress, bounded serial logs, artifacts, Agent/CI views, live updates with
-polling fallback, and a generated OpenAPI client. GitHub Actions, GitLab CI, Jenkins, and local runs
-still use the same vendor-neutral CLI and REST API.
+The current development line is **0.9.0-beta** on the `preview` channel. It retains the distributed
+Agent, physical-safety, workflow/CI, identity/RBAC, and React dashboard foundations from Phases 5–7
+and adds the Phase 8 product boundary: inspectable production/demo Compose deployments, packaged
+`init`/`dev` commands, non-root multi-architecture images, strict environment profiles and mounted
+secrets, proxy/TLS validation, explicit database checks/migrations, local and S3-compatible artifact
+storage, retention, backup/restore verification, liveness/readiness/diagnostics, release and Agent
+compatibility reporting, supply-chain automation, and an Apache-2.0 open-core boundary.
 
-See [Phase 5](docs/PHASE_5.md) for the authority model, protocol guarantees, complete distributed
-demo, recovery behavior, and early-release limitations.
+Start with [Phase 8](docs/PHASE_8.md), [self-hosting](docs/SELF_HOSTING.md), and the
+[production security checklist](docs/PRODUCTION_SECURITY.md). The distributed authority model and
+protocol guarantees remain documented in [Phase 5](docs/PHASE_5.md).
 
-Phase 6 is deliberately not presented as a hardened public-SaaS boundary in this alpha. Its models,
-schema-v10 identity foundation (with the current schema-v11 durable reservation queue),
-authentication and authorisation services, first-owner bootstrap, auth
-routes, dual Phase 6/legacy bearer handling, identity/access-policy REST and CLI, principal
-ownership, remote actor context, security headers, bounded audit retention, safe loopback
-auto-login, and refreshable native CLI sessions are present. OIDC authorization-code/PKCE login
-maps a configurable username claim to pre-provisioned users. Principal-facing command,
-reservation, workflow, CI, Agent lifecycle/enrollment, runtime lifecycle, and artifact services
-re-authorise trusted resources before side effects. Artifact access inherits its durable parent,
-and named-resource denials can use indistinguishable `404` responses. The main protected identity
-and operational actions append attributable success or denial events. Major distributed records
-carry organisation scope, and the Agent, bench, workflow, operation, reservation, CI, and artifact
-collections enforce their documented per-resource or ownership filters. Remaining work is focused
-on explicit legacy/internal paths, lower-priority storage and globally named Agent/bench keys,
-public-edge throttling/proxy/browser hardening, and legacy-token migration. Automatic/background
-work with no originating Phase 6 decision and legacy work deliberately has no invented initiating
-actor or snapshot; a maintenance retry may reuse evidence already persisted for a
-principal-requested CI cancellation. The durable control-intent records are not a transactional
-replay outbox. See
-[Phase 6 status](docs/PHASE_6.md), the
-[Phase 6 team-access demo](docs/PHASE_6_TEAM_DEMO.md), [Phase 7](docs/PHASE_7.md), the
-[browser demonstration](docs/PHASE_7_BROWSER_DEMO.md), [OIDC](docs/OIDC.md), and the
-[security model](docs/SECURITY_MODEL.md); do not treat the new tables or settings as a completed
-multi-tenant boundary.
+The supported Phase 8 production target is one self-hosted control plane, not active-active HA or
+a Kubernetes operator. The architecture can host customer Agents using the same protocol, but a
+public multi-tenant managed service still requires the explicit isolation gate and current-gap
+review in [the managed-service boundary](docs/MANAGED_SERVICE.md) and
+[security model](docs/SECURITY_MODEL.md). Legacy compatibility and transitional/global identifier
+paths must not be mistaken for a certified SaaS boundary.
+
+## Self-hosted production quick start
+
+Requirements are a current Docker Engine/Compose v2, an `amd64` or `arm64` Linux host, persistent
+storage, and a DNS/TLS plan. Install the matching CLI, then generate an inspectable deployment:
+
+```console
+lab-platform init /opt/lab-platform
+cd /opt/lab-platform
+```
+
+Edit the non-secret values in `.env` (`LAB_VERSION`, `LAB_PUBLIC_HOST`, `LAB_PUBLIC_URL`, and
+`LAB_ACME_EMAIL`). The initializer creates mounted database/application secrets with owner-only
+permissions and refuses to overwrite an existing deployment.
+
+```console
+docker compose run --rm control-plane config validate \
+  --config /etc/lab-platform/control-plane.yaml
+docker compose run --rm control-plane production-check \
+  --config /etc/lab-platform/control-plane.yaml
+docker compose run --rm control-plane db migrate \
+  --config /etc/lab-platform/control-plane.yaml
+docker compose up -d
+curl --fail https://lab.example.com/health/ready
+```
+
+Continue with [production deployment](docs/PRODUCTION_DEPLOYMENT.md), create the first owner through
+`lab-control-plane bootstrap-admin`, enroll a SimLab Agent, run a smoke workflow, and create and
+verify the first off-host backup. Do not expose the disposable demo as production.
 
 ## Distributed quick start
 
@@ -54,15 +62,14 @@ uv sync --all-extras
 uv run lab-control-plane --config config/control-plane.yaml
 ```
 
-The 0.8.0-alpha wheel includes the production dashboard bundle, and the checked-in control-plane
+The 0.9.0-beta wheel includes the production dashboard bundle, and the checked-in control-plane
 config enables it at `http://127.0.0.1:8443/`. For frontend development or deployment layouts, see
 [web deployment](docs/WEB_DEPLOYMENT.md).
 
 The checked-in configuration is a loopback-only development deployment. For a non-loopback
-deployment, start from
-[`config/control-plane.postgresql.yaml`](config/control-plane.postgresql.yaml), inject its real DSN
-and TLS files through deployment-secret/configuration management, and run
-`lab-control-plane migrate --config <path>` before starting the service.
+deployment, generate the supported template with `lab-platform init`, keep secrets in its mounted
+secret files or an external secret manager, and run `lab-control-plane db migrate --config <path>`
+explicitly before starting the service.
 
 The existing loopback demo below retains its Phase 5 legacy scoped client token and one-time Agent
 enrollment token. For a new Phase 6 identity login, first run `lab-control-plane bootstrap-admin`
@@ -212,8 +219,8 @@ The standalone default stores platform-owned state under `.lab-platform/`:
   generated paths.
 
 The production distributed control plane stores coordination metadata in PostgreSQL and keeps
-artifact bytes in its configured artifact directory. The loopback demo instead uses
-`.lab-control-plane/` for a SQLite database and artifact store. Each distributed Agent needs
+artifact bytes in configured local or S3-compatible storage. The loopback demo instead uses
+`.lab-control-plane/` for a SQLite database and local artifact store. Each distributed Agent needs
 separate SQLite-backed local state for its durable command journal, reservation leases, buffered
 events, artifact cache, and existing operation data. SimLab remains the source of truth for current
 simulated device state. Delete local state only when you intentionally want to clear histories and
@@ -221,39 +228,27 @@ identities.
 
 ## Security boundary
 
-The enforced operational boundary combines Phase 5 transport/infrastructure controls with the new
-Phase 6 identity bridge: TLS/WSS configuration, unique hashed Agent
-credentials, hashed legacy and identity-bound client credentials, one-time enrollment, credential
-rotation/revocation, identity-admin permission checks, principal-bound reservation ownership,
-resource-scoped checks on named operational routes, remote actor context and durable decision
-snapshots on identity-backed work and principal-initiated Agent controls, snapshot-safe idempotent
-replay, a conservative HTTP security-header baseline, replay-resistant protocol IDs/sequences,
-short-lived artifact capabilities, upload limits, safe generated paths, and declarative workflows
-without arbitrary shell execution. Plaintext Agent and client credentials belong in protected
-environment/native secret stores, not YAML.
+The operational boundary combines TLS/WSS, narrowly trusted proxy headers, unique hashed Agent and
+identity credentials, one-time enrollment, resource-scoped RBAC, durable actor/decision evidence,
+duplicate-safe protocol handling, short-lived artifact capabilities, checked streaming uploads,
+bounded resources/rate categories, structured redacted logs, explicit migrations, and recoverable
+storage. Agents remain the final authority for local locks and physical safety. Plaintext
+credentials belong in mounted/native/workload secret stores, never ordinary YAML, URLs, logs, or
+workflow definitions.
 
-This alpha release is a single-control-plane reference deployment, not a hardened public SaaS.
-PostgreSQL is the production central store; SQLite remains a developer-demo option. Phase 6 API
-route families pass focused two-tenant isolation tests in both directions, the main operational
-collections apply per-item RBAC, and principal-facing application services recheck command,
-reservation, workflow, CI, drain/enrollment/runtime-lifecycle, and artifact decisions. Artifact
-reads, writes, transfers, and platform-managed deletion inherit trusted parent resources; a
-`WORKFLOW_STEP` artifact cannot yet be resolved safely for a Phase 6 principal, and remote artifact
-deletion is not exposed. Explicit internal/background and legacy compatibility callers,
-lower-priority storage, and some deployment-global human-readable Agent/bench identifiers remain
-transitional. Legacy-token compatibility has no organisation principal and is excluded from tenant
-isolation guarantees. OIDC is implemented for pre-provisioned users, but pending state is
-process-local, mapping is not bound durably to issuer/subject, and JIT provisioning and external
-group mapping are absent. Phase 7 browser sessions use same-origin `HttpOnly` cookies and CSRF;
-arbitrary distinct-origin cookie hosting is intentionally unsupported. mTLS, HA, a secrets vault,
-broad public-API rate limiting, and additional proxy/browser hardening remain incomplete or later
-deployment work.
-Keep the PostgreSQL DSN in deployment-secret storage, require database TLS, and run
-`lab-control-plane migrate --config <path>` before starting the service. Outside the loopback demo,
-either configure an HTTPS public URL with both direct TLS certificate/key paths, or bind the process
-to loopback behind a same-host TLS proxy and explicitly enable
-`development.allow_tls_termination_proxy`. Use a private network and **do not expose the loopback
-development configuration to the untrusted public internet.**
+Production uses PostgreSQL, a strong application secret, HTTPS, disabled development identities,
+configured limits/retention, and private local or S3-compatible artifact storage. Run
+`config validate`, `production-check`, `db check`, and `doctor`; create and restore-test a complete
+backup before exposure. Follow [production security](docs/PRODUCTION_SECURITY.md),
+[backup/restore](docs/BACKUP_RESTORE.md), and [disaster recovery](docs/DISASTER_RECOVERY.md).
+
+The beta remains a single-control-plane baseline, not active-active HA or an automatic public SaaS
+certification. Legacy-token compatibility lacks an organisation principal; lower-priority/internal
+paths and some human-readable Agent/bench identifiers remain transitional; OIDC uses
+pre-provisioned users and has no JIT/external-group provisioning; arbitrary distinct-origin browser
+cookies and arbitrary remote Agent package installation are unsupported. Keep the reference
+deployment on a trusted private network and complete the managed-service tenant-isolation gate
+before serving unrelated organisations.
 
 ## Development
 

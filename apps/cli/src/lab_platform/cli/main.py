@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +38,7 @@ from lab_platform.cli.credentials import (
     StoredCredential,
 )
 from lab_platform.config import validate_config
+from lab_platform.core import VERSION
 from pydantic import ValidationError
 
 DEFAULT_SERVER = "http://127.0.0.1:8080"
@@ -113,6 +114,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _audit_command(client, args)
     if args.command == "version":
         payload = client.get("/api/v1/version")
+        if args.all:
+            return _version_all(client, payload, args.output)
         if args.output == "json":
             _print_json(payload)
         else:
@@ -154,6 +157,72 @@ def _dispatch(args: argparse.Namespace) -> int:
         _print_collection(payload, args.output, _event_table)
         return 0
     raise AssertionError("unreachable command")
+
+
+def _version_all(client: AgentClient, payload: object, output: str) -> int:
+    service = _require_mapping(payload, "version")
+    agent_payload = _require_mapping(client.get("/api/v1/agents"), "Agent versions")
+    raw_agents = agent_payload.get("items", [])
+    if not isinstance(raw_agents, list) or not all(isinstance(item, dict) for item in raw_agents):
+        raise ValueError("Agent version response did not contain an item list")
+    agents = cast(list[dict[str, object]], raw_agents)
+    combined = {
+        "cli": {"version": VERSION},
+        "control_plane": service,
+        "agents": [
+            {
+                "id": agent.get("id"),
+                "name": agent.get("name") or agent.get("slug"),
+                "version": agent.get("version"),
+                "protocol_version": agent.get("protocol_version"),
+                "upgrade_status": _agent_upgrade_status(agent),
+            }
+            for agent in agents
+        ],
+    }
+    if output == "json":
+        _print_json(combined)
+        return 0
+
+    _print_table(
+        ("COMPONENT", "VERSION"),
+        [
+            ("CLI", VERSION),
+            ("Control Plane", str(service.get("version", "unknown"))),
+            ("API", str(service.get("api_version", "v1"))),
+            ("Agent Protocol", str(service.get("protocol_version", "unknown"))),
+            ("Plugin API", str(service.get("plugin_api_version", "unknown"))),
+            ("Release Channel", str(service.get("release_channel", "unknown"))),
+            ("Edition", str(service.get("edition", "community"))),
+        ],
+    )
+    if agents:
+        print()
+        _print_table(
+            ("AGENT", "VERSION", "PROTOCOL", "UPGRADE"),
+            [
+                (
+                    str(agent.get("name") or agent.get("id") or "unknown"),
+                    str(agent.get("version") or "unknown"),
+                    str(agent.get("protocol_version") or "unknown"),
+                    _agent_upgrade_status(agent),
+                )
+                for agent in agents
+            ],
+        )
+    return 0
+
+
+def _agent_upgrade_status(agent: Mapping[str, object]) -> str:
+    status = agent.get("upgrade_status")
+    if isinstance(status, str) and status:
+        return status
+    upgrade = agent.get("upgrade")
+    if isinstance(upgrade, Mapping):
+        nested_status = upgrade.get("status")
+        if isinstance(nested_status, str) and nested_status:
+            return nested_status
+    return "UNKNOWN"
 
 
 def _agent_command(client: AgentClient, args: argparse.Namespace) -> int:
@@ -2837,7 +2906,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    _read_parser(commands.add_parser("version"))
+    version = _read_parser(commands.add_parser("version"))
+    version.add_argument(
+        "--all",
+        action="store_true",
+        help="Include local CLI, API/protocol, release-channel, and Agent fleet versions.",
+    )
     _read_parser(commands.add_parser("health"))
     _read_parser(commands.add_parser("benches", help=argparse.SUPPRESS))
     _read_parser(commands.add_parser("plugins", help=argparse.SUPPRESS))

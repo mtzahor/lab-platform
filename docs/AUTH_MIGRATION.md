@@ -108,8 +108,8 @@ to a same-named user.
 3. Stop the control plane and every concurrent writer. The SQLite v10 workflow-table rebuild must
    run without another process writing; PostgreSQL constraint replacement should also run in a
    controlled maintenance window.
-4. Run `lab-control-plane migrate --config <path>` once with the target release.
-5. Verify schema version 11. For SQLite, also run `PRAGMA foreign_key_check`; for PostgreSQL,
+4. Run `lab-control-plane db migrate --config <path>` once with the target release.
+5. Verify schema version 12. For SQLite, also run `PRAGMA foreign_key_check`; for PostgreSQL,
    inspect the migration result and tenant workflow constraints through normal database operations.
 6. Reconcile counts by organisation for workflows, workflow runs/results, CI sessions, artifacts,
    reservations, and queues. Confirm each run matches its definition tenant and each step matches
@@ -125,7 +125,7 @@ to a same-named user.
 11. Disable legacy compatibility only after telemetry and inventory prove that no legacy request
     remains. Keep the pre-upgrade backup until the observation window closes.
 
-The current alpha has schema v11 (including the earlier v10 identity migration), the
+The current beta has schema v12 (including the earlier v10 identity migration), the
 dual-authentication bridge, first-owner bootstrap, identity
 and access-policy administration, principal ownership/actor context, parent-inherited artifact
 RBAC, and protected operational services. Operators can complete the checklist manually. Automated

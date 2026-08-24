@@ -329,5 +329,5 @@ def test_phase6_version_identifiers_are_consistent() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.8.0a0"
-    assert VERSION == "0.8.0-alpha"
+    assert project["project"]["version"] == "0.9.0b0"
+    assert VERSION == "0.9.0-beta"

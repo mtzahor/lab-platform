@@ -8,6 +8,19 @@ from zipfile import ZipFile
 
 _ASSET_REFERENCE = re.compile(r"(?:src|href)=[\"'](?P<path>/assets/[^\"']+)[\"']")
 _WEB_ROOT = "lab_platform/control_plane/web_dist/"
+_DEPLOYMENT_ROOT = "lab_platform/cli/deployment/"
+_REQUIRED_DEPLOYMENT_FILES = {
+    _DEPLOYMENT_ROOT + "demo/Caddyfile",
+    _DEPLOYMENT_ROOT + "demo/README.md",
+    _DEPLOYMENT_ROOT + "demo/compose.yaml",
+    _DEPLOYMENT_ROOT + "demo/control-plane.yaml",
+    _DEPLOYMENT_ROOT + "production/.env.example",
+    _DEPLOYMENT_ROOT + "production/Caddyfile",
+    _DEPLOYMENT_ROOT + "production/README.md",
+    _DEPLOYMENT_ROOT + "production/compose.yaml",
+    _DEPLOYMENT_ROOT + "production/control-plane.yaml",
+}
+_VERSION_ASSIGNMENT = re.compile(r"^VERSION\s*=\s*[\"\'](?P<version>[^\"\']+)[\"\']", re.MULTILINE)
 
 
 def _select_current_wheel(wheels: list[Path]) -> Path:
@@ -30,7 +43,7 @@ def _select_current_wheel(wheels: list[Path]) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify that a Lab Platform wheel contains a usable dashboard bundle."
+        description="Verify that a Lab Platform wheel contains its deployable product assets."
     )
     parser.add_argument("wheels", nargs="+", type=Path)
     args = parser.parse_args()
@@ -76,7 +89,23 @@ def main() -> int:
                 "The wheel unexpectedly contains frontend source maps: " + ", ".join(source_maps)
             )
 
-    print(f"Verified packaged dashboard in {wheel}")
+        missing_deployment = sorted(_REQUIRED_DEPLOYMENT_FILES - names)
+        if missing_deployment:
+            raise SystemExit(
+                "Deployment templates are missing from the wheel: " + ", ".join(missing_deployment)
+            )
+        if any(name.startswith(_DEPLOYMENT_ROOT) and "/secrets/" in name for name in names):
+            raise SystemExit("The wheel unexpectedly contains generated deployment secrets")
+
+        version_source = archive.read("lab_platform/core/version.py").decode("utf-8")
+        match = _VERSION_ASSIGNMENT.search(version_source)
+        if match is None:
+            raise SystemExit("The wheel does not contain a literal product VERSION")
+        environment = archive.read(_DEPLOYMENT_ROOT + "production/.env.example").decode("utf-8")
+        if f"LAB_VERSION={match.group('version')}" not in environment.splitlines():
+            raise SystemExit("The production deployment template does not pin the wheel version")
+
+    print(f"Verified packaged dashboard and deployment templates in {wheel}")
     return 0
 
 

@@ -1,0 +1,47 @@
+# NOT FOR PRODUCTION. This profile deliberately permits plaintext loopback Agent transport.
+profile: development
+
+control_plane:
+  host: 127.0.0.1
+  port: 8443
+  public_url: http://127.0.0.1:8443
+  log_level: INFO
+  max_request_body_size_mb: 128
+
+database:
+  url: postgresql://lab_platform_demo@postgres:5432/lab_platform_demo
+
+artifacts:
+  directory: /var/lib/lab-platform/artifacts
+  maximum_upload_size_mb: 100
+
+identity:
+  enabled: true
+  default_organisation_slug: demo
+  default_organisation_name: Lab Platform Demo — NOT FOR PRODUCTION
+  local_auth:
+    enabled: true
+    minimum_password_length: 12
+  oidc:
+    enabled: false
+
+authorisation:
+  default_bench_visibility: organisation
+  hide_unauthorised_resources: true
+  legacy_token_compatibility_enabled: false
+
+audit:
+  enabled: true
+  retention_days: 7
+
+web:
+  enabled: true
+  public_url: http://localhost:8080
+  api_base_url: /api/v1
+  branding:
+    product_name: Lab Platform Demo — NOT FOR PRODUCTION
+
+development:
+  enabled: true
+  allow_insecure_agent_transport: true
+  allow_tls_termination_proxy: false

@@ -93,6 +93,7 @@ WS_AGENT_SUPERSEDED = 4409
 WS_MESSAGE_TOO_LARGE = 4403
 WS_BACKPRESSURE = 4429
 WS_INTERNAL_ERROR = 4500
+WS_SERVICE_RESTART = 1012
 
 
 class GatewayMessageTooLargeError(ValueError):
@@ -241,6 +242,23 @@ class AgentConnectionHub(AgentCommandTransport):
             return False
         await _close_socket(session.websocket, code, reason)
         return True
+
+    async def close_all(
+        self,
+        *,
+        code: int = WS_SERVICE_RESTART,
+        reason: str = "Control plane is shutting down",
+    ) -> int:
+        """Close a stable snapshot of Agent sockets during graceful shutdown."""
+
+        async with self._lock:
+            sessions = tuple(self._sessions.values())
+            self._sessions.clear()
+        await asyncio.gather(
+            *(_close_socket(session.websocket, code, reason) for session in sessions),
+            return_exceptions=True,
+        )
+        return len(sessions)
 
     async def send_command(
         self,
@@ -592,6 +610,7 @@ class AgentGateway:
         distributed_settings: DistributedSettings,
         protocol_journal: ProtocolMessageJournal | None = None,
         timeline: AgentTimelineSink | None = None,
+        compatibility_validator: Callable[[str, str], None] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -603,6 +622,7 @@ class AgentGateway:
         self._distributed = distributed_settings
         self._journal = protocol_journal
         self._timeline = timeline
+        self._compatibility_validator = compatibility_validator
         self._clock = clock
         self._monotonic = monotonic
 
@@ -634,6 +654,11 @@ class AgentGateway:
             if hello.agent_id != agent_id or hello.sequence_number != 1:
                 raise ProtocolMessageInvalidError(
                     "AGENT_HELLO identity or initial sequence is invalid."
+                )
+            if self._compatibility_validator is not None:
+                self._compatibility_validator(
+                    hello.payload.agent_version,
+                    hello.protocol_version,
                 )
             boot_id = hello.payload.boot_id
             tracker = IncomingSequenceTracker(

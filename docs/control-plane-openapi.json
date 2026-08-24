@@ -4141,7 +4141,7 @@
   "info": {
     "description": "Central API and authenticated Agent gateway for distributed lab benches.",
     "title": "Lab Platform Control Plane API",
-    "version": "0.8.0-alpha"
+    "version": "0.9.0-beta"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -7334,16 +7334,13 @@
     },
     "/api/v1/health": {
       "get": {
+        "description": "Compatibility alias for dependency-aware readiness.",
         "operationId": "health_api_v1_health_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Health Api V1 Health Get",
-                  "type": "object"
-                }
+                "schema": {}
               }
             },
             "description": "Successful Response"
@@ -9896,9 +9893,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
+                  "additionalProperties": true,
                   "title": "Response Version Api V1 Version Get",
                   "type": "object"
                 }
@@ -10362,6 +10357,42 @@
           }
         ],
         "summary": "Run Workflow"
+      }
+    },
+    "/health/live": {
+      "get": {
+        "operationId": "liveness_health_live_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Liveness Health Live Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Liveness"
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "readiness_health_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readiness"
       }
     },
     "/metrics": {

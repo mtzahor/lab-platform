@@ -24,6 +24,7 @@ from lab_platform.models import (
     RemoteCommandStatus,
     RemoteCommandType,
 )
+from lab_platform.persistence import SCHEMA_VERSION
 
 
 def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
@@ -345,16 +346,27 @@ def test_agent_administration_bootstrap_auth_and_metrics(
         )
         assert listing.status_code == 200
         assert [item["id"] for item in listing.json()["items"]] == [agent_id]
+        listed_agent = listing.json()["items"][0]
+        assert listed_agent["upgrade_status"] == listed_agent["upgrade"]["status"]
+        assert isinstance(listed_agent["upgrade"]["work_allowed"], bool)
 
         details = client.get(f"/api/v1/agents/{agent_id}", headers=headers)
         assert details.status_code == 200
+        assert details.json()["upgrade_status"] == details.json()["upgrade"]["status"]
         assert details.json()["connection"] is None
         assert details.json()["benches"] == []
 
         metrics = client.get("/metrics", headers=headers)
         assert metrics.status_code == 200
+        assert "database_healthy 1" in metrics.text
+        assert f"database_schema_version {SCHEMA_VERSION}" in metrics.text
         assert "agents_offline 1" in metrics.text
         assert "bench_inventory_total 0" in metrics.text
+        assert "workflows_active 0" in metrics.text
+        assert "workflows_failed 0" in metrics.text
+        assert "reservations_active 0" in metrics.text
+        assert "reservation_queue_depth 0" in metrics.text
+        assert "artifact_usage_bytes 0" in metrics.text
 
         close_agent = AsyncMock(return_value=False)
         monkeypatch.setattr(runtime.hub, "close_agent", close_agent)
@@ -376,7 +388,10 @@ def test_agent_administration_bootstrap_auth_and_metrics(
         assert revoked.json()["status"] == "REVOKED"
 
 
-def test_control_plane_artifact_upload_and_scoped_agent_download(tmp_path: Path) -> None:
+def test_control_plane_artifact_upload_and_scoped_agent_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runtime = _runtime(tmp_path)
     content = b"phase-five-firmware"
     checksum = hashlib.sha256(content).hexdigest()
@@ -520,6 +535,11 @@ def test_control_plane_artifact_upload_and_scoped_agent_download(tmp_path: Path)
         transfer_id = body["transfer"]["id"]
         transfer_token = body["token"]
 
+        legacy_path_download = AsyncMock(
+            side_effect=AssertionError("HTTP transfer downloads must use storage-neutral streams")
+        )
+        monkeypatch.setattr(runtime.artifacts, "download_path", legacy_path_download)
+
         # Capabilities stay out of URLs and access logs; transfers accept only
         # the Authorization header.
         query_token = client.get(
@@ -534,6 +554,9 @@ def test_control_plane_artifact_upload_and_scoped_agent_download(tmp_path: Path)
         )
         assert downloaded.status_code == 200
         assert downloaded.content == content
+        assert downloaded.headers["content-type"] == "application/octet-stream"
+        assert transfer_id in downloaded.headers["content-disposition"]
+        legacy_path_download.assert_not_awaited()
 
         wrong = client.get(
             f"/api/v1/artifact-transfers/{transfer_id}/content",

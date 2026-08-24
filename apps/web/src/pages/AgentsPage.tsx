@@ -16,6 +16,7 @@ import {
   SearchField,
   StatusBadge,
 } from "../components/ui";
+import { agentUpgradeAssessment, agentUpgradeBadgeStatus } from "../features/agents/upgrade";
 import { formatRelative } from "../lib/format";
 
 export function AgentsPage() {
@@ -75,6 +76,16 @@ export function AgentsPage() {
             <small>Protocol {stringValue(row.original, "protocol_version") ?? "—"}</small>
           </div>
         ),
+      }),
+      column.accessor((row) => agentUpgradeAssessment(row).status ?? "", {
+        id: "upgrade",
+        header: "Upgrade",
+        cell: ({ getValue }) =>
+          getValue() ? (
+            <StatusBadge status={agentUpgradeBadgeStatus(getValue())} />
+          ) : (
+            <span aria-label="Upgrade status unavailable">—</span>
+          ),
       }),
       column.accessor((row) => stringValue(row, "location") ?? "", {
         id: "location",

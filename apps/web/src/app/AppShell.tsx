@@ -176,7 +176,7 @@ export function AppShell() {
             <span>Collapse sidebar</span>
           </button>
           <div className="version">
-            <span className="pulse-dot" /> v0.8.0-alpha
+            <span className="pulse-dot" /> v0.9.0-beta
           </div>
         </div>
       </aside>

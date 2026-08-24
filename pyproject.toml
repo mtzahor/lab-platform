@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-platform"
-version = "0.8.0a0"
+version = "0.9.0b0"
 description = "Distributed remote hardware bench management platform."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [{ name = "Lab Platform Contributors" }]
 dependencies = [
+    "boto3>=1.35,<2",
     "fastapi>=0.116,<1",
     "pydantic>=2.8,<3",
     "psycopg[binary]>=3.2,<4",
@@ -18,7 +20,10 @@ dependencies = [
     "PyYAML>=6.0.1,<7",
     "uvicorn>=0.35,<1",
     "websockets>=15,<16",
-    "esptool>=4.8,<5",
+    "zstandard>=0.23,<1",
+    "cryptography>=50,<51",
+    # esptool 5.3.1 caps cryptography below 49 on Intel macOS.
+    "esptool>=5.2,<5.3",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +38,7 @@ dev = [
 [project.scripts]
 lab-agent = "lab_platform.agent.cli:main"
 lab-control-plane = "lab_platform.control_plane.cli:main"
+lab-platform = "lab_platform.cli.product:main"
 labctl = "lab_platform.cli.main:main"
 
 [tool.setuptools]
@@ -78,6 +84,11 @@ packages = [
 "lab_platform.simlab_adapter" = "packages/simlab_adapter/src/lab_platform/simlab_adapter"
 
 [tool.setuptools.package-data]
+"lab_platform.cli" = [
+    "deployment/*",
+    "deployment/**/*",
+    "deployment/production/.env.example",
+]
 "lab_platform.control_plane" = [
     "web_dist/*",
     "web_dist/assets/*",
@@ -118,6 +129,7 @@ mypy_path = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "--cov=lab_platform --cov-report=term-missing --cov-fail-under=90"
 markers = [
     "backend_contract: shared behavioral contract for LabBackend implementations",

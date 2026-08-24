@@ -1,0 +1,102 @@
+name: Supply-chain security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "31 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies-and-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Audit locked Python dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/requirements.txt
+          uvx --from pip-audit==2.9.0 pip-audit --requirement /tmp/requirements.txt
+      - name: Audit locked frontend dependencies
+        run: npm audit --audit-level=high
+        working-directory: apps/web
+      - name: Verify community source boundary
+        run: python scripts/release/check_oss_boundary.py
+      - name: Scan repository for vulnerabilities, secrets, and misconfiguration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain unavailable dependency review
+        if: vars.DEPENDENCY_REVIEW_ENABLED != 'true'
+        run: |
+          echo "::warning title=Dependency review unavailable::Enable GitHub Dependency graph, then set the repository Actions variable DEPENDENCY_REVIEW_ENABLED=true to activate this gate."
+      - name: Review dependency changes
+        if: vars.DEPENDENCY_REVIEW_ENABLED == 'true'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
+  containers:
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [control-plane, agent]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build native security-gate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/${{ matrix.service }}/Dockerfile
+          load: true
+          tags: lab-platform-${{ matrix.service }}:security-gate
+          provenance: false
+      - name: Scan runtime image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: lab-platform-${{ matrix.service }}:security-gate
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: anchore/sbom-action@v0
+        with:
+          image: lab-platform-${{ matrix.service }}:security-gate
+          format: spdx-json
+          output-file: ${{ matrix.service }}.spdx.json
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-sbom-${{ matrix.service }}
+          path: ${{ matrix.service }}.spdx.json
+          if-no-files-found: error

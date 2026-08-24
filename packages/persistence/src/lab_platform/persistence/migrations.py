@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 DEFAULT_ORGANISATION_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -86,6 +86,11 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (11, datetime('now'))"
         )
     _create_queue_transition_trigger(connection)
+    _upgrade_phase12_artifact_retention(connection)
+    if 12 not in applied:
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))"
+        )
 
 
 def _create_phase5_agent_tables(connection: sqlite3.Connection) -> None:
@@ -1825,6 +1830,33 @@ def _upgrade_phase11_reservation_queue(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS reservation_queue_waiting_order "
         "ON reservation_queue(organisation_id, bench_id, queue_order) "
         "WHERE status = 'waiting'"
+    )
+
+
+def _upgrade_phase12_artifact_retention(connection: sqlite3.Connection) -> None:
+    """Add durable two-phase claims without rewriting immutable artifact metadata."""
+
+    _add_column(
+        connection,
+        "artifacts",
+        "retention_state",
+        "TEXT NOT NULL DEFAULT 'active' CHECK "
+        "(retention_state IN ('active', 'pending_deletion', 'tombstoned'))",
+    )
+    _add_column(connection, "artifacts", "retention_claim_token", "TEXT")
+    _add_column(connection, "artifacts", "retention_claimed_at", "TEXT")
+    _add_column(
+        connection,
+        "artifacts",
+        "retention_attempt_count",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (retention_attempt_count >= 0)",
+    )
+    _add_column(connection, "artifacts", "retention_last_error", "TEXT")
+    _add_column(connection, "artifacts", "retention_deleted_at", "TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS artifacts_retention_due "
+        "ON artifacts(retention_state, expires_at, retention_claimed_at, id) "
+        "WHERE expires_at IS NOT NULL AND retention_deleted_at IS NULL"
     )
 
 

@@ -88,14 +88,15 @@ class ControlPlaneWorkflowArtifactPort:
             allow_legacy_authorisation=allow_legacy_authorisation,
             allow_internal_authorisation=allow_internal_authorisation,
         )
-        await self._store.stage_verified_file(
+        source = await self._artifacts.content_stream(
+            record.id,
+            organisation_id=record.organisation_id,
+        )
+        await self._store.write_verified_object(
             record.id,
             record.sha256,
             record.size_bytes,
-            await self._artifacts.content_path(
-                record.id,
-                organisation_id=record.organisation_id,
-            ),
+            source,
             maximum_size_bytes=self._maximum_size,
         )
         return WorkflowArtifactTransferDescriptor(

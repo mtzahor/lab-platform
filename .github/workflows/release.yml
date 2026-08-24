@@ -1,0 +1,363 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      python_version: ${{ steps.release.outputs.python_version }}
+      channel: ${{ steps.release.outputs.channel }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      mutable_tag: ${{ steps.release.outputs.mutable_tag }}
+      build_date: ${{ steps.release.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: release
+        name: Validate tag and repository versions
+        run: >-
+          python scripts/release/metadata.py
+          --tag "${GITHUB_REF_NAME}"
+          --github-output "${GITHUB_OUTPUT}"
+
+  packages:
+    needs: metadata
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: lab_platform_test
+          POSTGRES_PASSWORD: lab_test
+          POSTGRES_USER: lab_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lab_test -d lab_platform_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: apps/web
+      - name: Run non-hardware release gate
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run mypy
+          uv run pytest -m "not hardware"
+          npm --prefix apps/web run check
+        env:
+          LAB_PLATFORM_TEST_POSTGRESQL_URL: >-
+            postgresql://lab_test:lab_test@127.0.0.1:5432/lab_platform_test
+      - name: Verify generated API contracts
+        run: |
+          uv run python scripts/export_openapi.py --service agent --check docs/openapi.json
+          uv run python scripts/export_openapi.py --service control-plane --check \
+            docs/control-plane-openapi.json
+      - name: Validate production, demo, and acceptance Compose manifests
+        shell: bash
+        env:
+          COMPOSE_PROJECT_NAME: lab-platform-acceptance-manifest
+          LAB_ACCEPTANCE_VOLUME_PREFIX: lab-platform-acceptance-manifest
+          LAB_CONTROL_PLANE_IMAGE: lab-platform-control-plane:manifest
+          LAB_AGENT_IMAGE: lab-platform-agent:manifest
+        run: |
+          deployment_dir="${RUNNER_TEMP}/lab-platform-production"
+          cp -R deploy/production "${deployment_dir}"
+          cp "${deployment_dir}/.env.example" "${deployment_dir}/.env"
+          mkdir -p "${deployment_dir}/secrets"
+          touch "${deployment_dir}/secrets/postgres-password"
+          touch "${deployment_dir}/secrets/database-url"
+          touch "${deployment_dir}/secrets/control-plane-secret-key"
+          docker compose --env-file "${deployment_dir}/.env" \
+            -f "${deployment_dir}/compose.yaml" config --quiet
+          docker compose -f deploy/demo/compose.yaml config --quiet
+          docker compose -f deploy/acceptance/compose.yaml config --quiet
+      - name: Build dashboard
+        run: npm run build
+        working-directory: apps/web
+      - name: Verify committed dashboard
+        run: git diff --exit-code -- apps/control_plane/src/lab_platform/control_plane/web_dist
+      - name: Build Python distributions
+        run: uv build --out-dir release-assets
+      - name: Verify wheel content and open-core boundary
+        run: |
+          uv run python scripts/verify_web_wheel.py release-assets/*.whl
+          uv run python scripts/release/check_oss_boundary.py --wheel release-assets/*.whl
+      - name: Build static dashboard archive
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: >-
+          tar --sort=name --mtime="@$(git log -1 --format=%ct)" --owner=0 --group=0
+          -C apps/control_plane/src/lab_platform/control_plane/web_dist
+          -czf "release-assets/lab-platform-web-${VERSION}.tar.gz" .
+      - uses: anchore/sbom-action/download-syft@v0
+      - name: Generate source SBOM
+        run: syft dir:. -o spdx-json=release-assets/source.spdx.json
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "release-assets/*"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: release-assets/
+          if-no-files-found: error
+
+  images:
+    needs: [metadata, packages]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [control-plane, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        name: Build and publish signed multi-architecture image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            LAB_VERSION=${{ needs.metadata.outputs.version }}
+            LAB_REVISION=${{ github.sha }}
+            LAB_BUILD_DATE=${{ needs.metadata.outputs.build_date }}
+            LAB_RELEASE_CHANNEL=${{ needs.metadata.outputs.channel }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}:${{ needs.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}:${{ needs.metadata.outputs.mutable_tag }}
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image by digest with GitHub OIDC
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - uses: anchore/sbom-action/download-syft@v0
+      - name: Generate downloadable image SBOM
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: >-
+          syft "${IMAGE}@${DIGEST}"
+          -o "spdx-json=${{ matrix.service }}.spdx.json"
+      - uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/lab-platform-${{ matrix.service }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ matrix.service }}.spdx.json
+          push-to-registry: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-sbom-${{ matrix.service }}
+          path: ${{ matrix.service }}.spdx.json
+          if-no-files-found: error
+
+  deployment-acceptance:
+    needs: [metadata, packages, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull the exact release images
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          docker pull "${REGISTRY}/${IMAGE_NAMESPACE}/lab-platform-control-plane:${VERSION}"
+          docker pull "${REGISTRY}/${IMAGE_NAMESPACE}/lab-platform-agent:${VERSION}"
+      - name: Exercise deployment, migration, backup, and isolated restore
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: >-
+          python scripts/deployment_acceptance.py
+          --control-plane-image "${REGISTRY}/${IMAGE_NAMESPACE}/lab-platform-control-plane:${VERSION}"
+          --agent-image "${REGISTRY}/${IMAGE_NAMESPACE}/lab-platform-agent:${VERSION}"
+          --expected-version "${VERSION}"
+          --work-directory "${RUNNER_TEMP}/deployment-acceptance"
+      - name: Upload release deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-deployment-acceptance-evidence
+          path: ${{ runner.temp }}/deployment-acceptance/
+          if-no-files-found: warn
+
+  github-release:
+    needs: [metadata, packages, images, deployment-acceptance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{release-packages,image-sbom-*}"
+          path: release-assets
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Generate and sign release checksums
+        working-directory: release-assets
+        run: |
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  \./#  #' > SHA256SUMS
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+      - name: Verify release asset set
+        env:
+          PYTHON_VERSION: ${{ needs.metadata.outputs.python_version }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: >-
+          python scripts/release/check_release_assets.py release-assets
+          --version "${VERSION}" --python-version "${PYTHON_VERSION}"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+        run: |
+          arguments=(--repo "${GITHUB_REPOSITORY}" --title "Lab Platform ${GITHUB_REF_NAME}" --generate-notes)
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            arguments+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" release-assets/* "${arguments[@]}"
+
+  pypi:
+    needs: [metadata, packages, images, github-release]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: release-assets
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+      - name: Publish through PyPI trusted publishing
+        env:
+          PYTHON_VERSION: ${{ needs.metadata.outputs.python_version }}
+        run: >-
+          uv publish --trusted-publishing always
+          "release-assets/lab_platform-${PYTHON_VERSION}-py3-none-any.whl"
+          "release-assets/lab_platform-${PYTHON_VERSION}.tar.gz"
+
+  verify-published:
+    needs: [metadata, github-release, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download and verify published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHON_VERSION: ${{ needs.metadata.outputs.python_version }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          mkdir published
+          gh release download "${GITHUB_REF_NAME}" --dir published
+          (cd published && sha256sum --check SHA256SUMS)
+          cosign verify-blob \
+            --bundle published/SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+            published/SHA256SUMS
+          uv venv /tmp/lab-platform-release
+          uv pip install --python /tmp/lab-platform-release/bin/python published/*.whl
+          /tmp/lab-platform-release/bin/lab-control-plane --help
+          /tmp/lab-platform-release/bin/lab-agent --help
+          /tmp/lab-platform-release/bin/labctl --help
+          uv venv /tmp/lab-platform-pypi
+          uv pip install --python /tmp/lab-platform-pypi/bin/python \
+            "lab-platform==${PYTHON_VERSION}"
+          /tmp/lab-platform-pypi/bin/lab-platform --help
+      - name: Verify published image signatures and non-root runtime
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          for service in control-plane agent; do
+            image="${REGISTRY}/${IMAGE_NAMESPACE}/lab-platform-${service}:${VERSION}"
+            cosign verify \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+              "${image}" >/dev/null
+            docker pull "${image}" >/dev/null
+            test "$(docker image inspect --format '{{.Config.User}}' "${image}")" = "10001:10001"
+            docker run --rm "${image}" --help
+          done

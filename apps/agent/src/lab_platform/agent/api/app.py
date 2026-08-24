@@ -24,7 +24,9 @@ from lab_platform.agent.api.phase3 import create_phase3_router
 from lab_platform.agent.api.results import create_results_router
 from lab_platform.agent.api.tokens import create_token_router
 from lab_platform.agent.runtime import LabAgent
+from lab_platform.agent_protocol import PROTOCOL_VERSION
 from lab_platform.core import (
+    API_VERSION,
     VERSION,
     ArtifactTooLargeError,
     BenchNotReservedError,
@@ -34,6 +36,7 @@ from lab_platform.core import (
     PermissionDeniedError,
     PlatformError,
     RequestBodyTooLargeError,
+    build_metadata,
 )
 from lab_platform.core.bench_catalog import BenchRecord
 from lab_platform.models import (
@@ -232,8 +235,15 @@ def create_app(agent: LabAgent, *, manage_lifecycle: bool = True) -> FastAPI:
         return agent.health_payload()
 
     @router.get("/version")
-    async def version() -> dict[str, str]:
-        return {"version": VERSION}
+    async def version() -> dict[str, object]:
+        build = build_metadata()
+        return {
+            "version": VERSION,
+            "api_version": API_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "release_channel": build.release_channel,
+            "build": build.as_dict(),
+        }
 
     @router.get("/agent/status")
     async def local_agent_status(
@@ -600,8 +610,8 @@ def create_app(agent: LabAgent, *, manage_lifecycle: bool = True) -> FastAPI:
         return agent.health_payload()
 
     @app.get("/version", include_in_schema=False)
-    async def legacy_version() -> dict[str, str]:
-        return {"version": VERSION}
+    async def legacy_version() -> dict[str, object]:
+        return await version()
 
     @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
     async def legacy_metrics(

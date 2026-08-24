@@ -38,6 +38,12 @@ class ControlPlaneHttpServer:
                 if settings.tls_private_key_path is not None
                 else None
             ),
+            proxy_headers=runtime.config.proxy.enabled,
+            forwarded_allow_ips=(
+                ",".join(runtime.config.proxy.trusted_networks)
+                if runtime.config.proxy.enabled
+                else ""
+            ),
         )
         self._server = uvicorn.Server(self._config)
         self._socket = self._config.bind_socket()
