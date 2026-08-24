@@ -44,7 +44,8 @@ ENV PATH="/opt/lab-platform/bin:${PATH}" \
     LAB_RELEASE_CHANNEL="${LAB_RELEASE_CHANNEL}" \
     LAB_HEALTHCHECK_URL="http://127.0.0.1:8443/health/ready"
 
-ADD --checksum=sha256:0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76 \
+ADD --chmod=0644 \
+    --checksum=sha256:0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76 \
     https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     /usr/local/share/keyrings/postgres.gpg.asc
 
