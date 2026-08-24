@@ -21,7 +21,9 @@ dependencies = [
     "uvicorn>=0.35,<1",
     "websockets>=15,<16",
     "zstandard>=0.23,<1",
-    "esptool>=4.8,<5",
+    "cryptography>=50,<51",
+    # esptool 5.3.1 caps cryptography below 49 on Intel macOS.
+    "esptool>=5.2,<5.3",
 ]
 
 [project.optional-dependencies]

@@ -110,9 +110,16 @@ class Esp32FlashSettings(ConfigModel):
     chip: str = "esp32"
     baud_rate: int = Field(default=460800, ge=300, le=4_000_000)
     flash_address: str = "0x10000"
-    reset_mode: str = "default_reset"
-    after: str = "hard_reset"
+    reset_mode: str = "default-reset"
+    after: str = "hard-reset"
     timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+    @field_validator("reset_mode", "after", mode="before")
+    @classmethod
+    def normalise_legacy_reset_modes(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace("_", "-")
+        return value
 
     @field_validator("flash_address")
     @classmethod

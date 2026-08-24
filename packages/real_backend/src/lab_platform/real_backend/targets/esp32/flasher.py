@@ -36,7 +36,7 @@ def build_flash_args(
         config.flash.reset_mode,
         "--after",
         config.flash.after,
-        "write_flash",
+        "write-flash",
         config.flash_address,
         str(firmware.local_path),
     ]

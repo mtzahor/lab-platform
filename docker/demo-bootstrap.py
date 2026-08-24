@@ -26,12 +26,17 @@ async def bootstrap() -> None:
     )
     output = Path(os.environ.get("LAB_DEMO_STATE_DIR", "/run/lab-platform-demo"))
     output.mkdir(parents=True, exist_ok=True)
-    runtime = ControlPlaneRuntime(load_control_plane_config(config_path))
+    config = load_control_plane_config(config_path)
+    runtime = ControlPlaneRuntime(config)
     runtime.database.initialize()
     try:
+        default_organisation = await runtime.identity_repository.ensure_default_organisation(
+            slug=config.identity.default_organisation_slug,
+            name=config.identity.default_organisation_name,
+        )
         organisation, _owner = await runtime.identity_administration.bootstrap_admin(
-            organisation_slug="demo",
-            organisation_name="Lab Platform Demo — NOT FOR PRODUCTION",
+            organisation_slug=default_organisation.slug,
+            organisation_name=default_organisation.name,
             username="demo-admin",
             display_name="Demo Administrator",
             password="LabPlatform-Demo-Only!",

@@ -58,7 +58,7 @@ def build_probe_args(config: HardwareBenchSettings, port: str) -> list[str]:
         config.flash.reset_mode,
         "--after",
         config.flash.after,
-        "chip_id",
+        "read-mac",
     ]
 
 
@@ -161,7 +161,7 @@ class Esp32Target:
             chip_type=chip or self._config.flash.chip.upper(),
             mac_address=mac,
             serial_port=port,
-            details={"probe": "esptool chip_id succeeded"},
+            details={"probe": "esptool read-mac succeeded"},
         )
         return self._health
 

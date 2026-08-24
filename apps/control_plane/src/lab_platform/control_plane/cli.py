@@ -487,6 +487,10 @@ def _run_bootstrap_admin(runtime: ControlPlaneRuntime, args: argparse.Namespace)
             require_current_schema(inspect_database_schema(runtime.config.database.url))
         runtime.database.initialize()
         try:
+            await runtime.identity_repository.ensure_default_organisation(
+                slug=runtime.config.identity.default_organisation_slug,
+                name=runtime.config.identity.default_organisation_name,
+            )
             organisation, user = await runtime.identity_administration.bootstrap_admin(
                 organisation_slug=(
                     args.organisation_slug or runtime.config.identity.default_organisation_slug

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 
-_WRITE_PROGRESS = re.compile(r"\((?P<percent>\d{1,3})\s*%\)")
+_WRITE_PROGRESS = re.compile(r"(?P<percent>\d{1,3})(?:\.\d+)?\s*%")
 _CHIP_PATTERNS = (
+    re.compile(r"Chip type:\s*(?P<chip>[^\r\n(]+)", re.IGNORECASE),
     re.compile(r"Chip is\s+(?P<chip>[^\r\n(]+)", re.IGNORECASE),
     re.compile(r"Detecting chip type\.\.\.\s*(?P<chip>[^\r\n]+)", re.IGNORECASE),
 )
@@ -21,7 +22,7 @@ def parse_esptool_progress(line: str) -> tuple[int, str] | None:
     normalized = line.lower()
     if "connecting" in normalized:
         return 20, "Connecting to bootloader"
-    if "erasing" in normalized:
+    if "eras" in normalized:
         return 30, "Erasing flash region"
     if "writing at" in normalized:
         match = _WRITE_PROGRESS.search(line)

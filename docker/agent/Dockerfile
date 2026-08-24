@@ -48,7 +48,9 @@ RUN groupadd --gid 10001 lab-platform \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/lab-platform \
         --shell /usr/sbin/nologin lab-platform \
     && install -d -o 10001 -g 10001 /etc/lab-platform /var/lib/lab-platform \
-        /var/lib/lab-platform/artifacts /var/lib/lab-platform/data
+        /var/lib/lab-platform/artifacts /var/lib/lab-platform/data \
+    && /usr/local/bin/python -m pip uninstall --yes setuptools wheel pip \
+    && rm -f /usr/local/bin/pip
 
 COPY --from=build /opt/lab-platform /opt/lab-platform
 COPY --chmod=0555 docker/healthcheck.py /usr/local/bin/lab-healthcheck

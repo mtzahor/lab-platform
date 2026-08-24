@@ -28,7 +28,7 @@ exposing raw pySerial or subprocess exceptions.
 
 ```console
 .venv/bin/python -m serial.tools.list_ports -v
-.venv/bin/python -m esptool --chip esp32 --port /dev/ttyUSB0 chip_id
+.venv/bin/python -m esptool --chip esp32 --port /dev/ttyUSB0 read-mac
 ```
 
 On macOS, prefer `/dev/cu.*` for initiating outbound serial sessions. On Linux, confirm the Agent

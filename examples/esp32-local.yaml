@@ -28,8 +28,8 @@ hardware:
         chip: esp32
         baud_rate: 460800
         flash_address: "0x10000"
-        reset_mode: default_reset
-        after: hard_reset
+        reset_mode: default-reset
+        after: hard-reset
         timeout_seconds: 120
       firmware:
         format: raw_bin

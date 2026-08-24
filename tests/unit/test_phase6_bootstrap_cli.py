@@ -5,13 +5,21 @@ from pathlib import Path
 
 import pytest
 from lab_platform.control_plane.cli import main
+from lab_platform.control_plane.config import load_control_plane_config
+from lab_platform.control_plane.runtime import ControlPlaneRuntime
 from lab_platform.core.errors import RoleNotAllowedError
 from lab_platform.core.identity import IdentityAuthenticationService
 from lab_platform.persistence.database import SQLiteDatabase
 from lab_platform.persistence.identity import SQLiteIdentityRepository
+from lab_platform.persistence.migrations import DEFAULT_ORGANISATION_ID
 
 
-def _config(tmp_path: Path) -> tuple[Path, Path]:
+def _config(
+    tmp_path: Path,
+    *,
+    organisation_slug: str = "default",
+    organisation_name: str = "Default Organisation",
+) -> tuple[Path, Path]:
     database_path = tmp_path / "control-plane.db"
     config_path = tmp_path / "control-plane.yaml"
     config_path.write_text(
@@ -24,6 +32,9 @@ def _config(tmp_path: Path) -> tuple[Path, Path]:
                 f"  url: sqlite:///{database_path}",
                 "artifacts:",
                 f"  directory: {tmp_path / 'artifacts'}",
+                "identity:",
+                f"  default_organisation_slug: {organisation_slug}",
+                f"  default_organisation_name: {organisation_name}",
                 "development:",
                 "  enabled: true",
                 "  allow_insecure_agent_transport: true",
@@ -34,7 +45,7 @@ def _config(tmp_path: Path) -> tuple[Path, Path]:
     return config_path, database_path
 
 
-def _login(database_path: Path, password: str) -> str:
+def _login(database_path: Path, password: str, *, organisation_slug: str = "default") -> str:
     async def scenario() -> str:
         database = SQLiteDatabase(database_path)
         database.initialize()
@@ -42,7 +53,7 @@ def _login(database_path: Path, password: str) -> str:
         service = IdentityAuthenticationService(repository)
         try:
             issued = await service.login(
-                organisation_slug="default",
+                organisation_slug=organisation_slug,
                 username="michael",
                 password=password,
             )
@@ -133,3 +144,54 @@ def test_bootstrap_does_not_accept_plaintext_password_argument(
             ]
         )
     assert "unrecognized arguments: --password" in capsys.readouterr().err
+
+
+def test_bootstrap_reuses_configured_default_organisation_on_runtime_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, database_path = _config(
+        tmp_path,
+        organisation_slug="demo",
+        organisation_name="Deployment acceptance",
+    )
+    monkeypatch.setenv("BOOTSTRAP_PASSWORD", "correct horse battery staple")
+
+    assert (
+        main(
+            [
+                "bootstrap-admin",
+                "--config",
+                str(config_path),
+                "--username",
+                "michael",
+                "--display-name",
+                "Michael Example",
+                "--password-env",
+                "BOOTSTRAP_PASSWORD",
+            ]
+        )
+        == 0
+    )
+
+    async def scenario() -> None:
+        runtime = ControlPlaneRuntime(load_control_plane_config(config_path))
+        await runtime.start()
+        try:
+            with runtime.database.transaction() as connection:
+                rows = connection.execute("SELECT id, slug, name FROM organisations").fetchall()
+            assert [tuple(row) for row in rows] == [
+                (DEFAULT_ORGANISATION_ID, "demo", "Deployment acceptance")
+            ]
+        finally:
+            await runtime.stop()
+
+    asyncio.run(scenario())
+    assert (
+        _login(
+            database_path,
+            "correct horse battery staple",
+            organisation_slug="demo",
+        )
+        == "Michael Example"
+    )

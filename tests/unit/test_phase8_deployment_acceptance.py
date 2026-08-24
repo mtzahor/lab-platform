@@ -179,3 +179,13 @@ def test_acceptance_evidence_names_previous_schema_without_claiming_prior_image(
 
     assert "previous_schema_migrated_with_data" in source
     assert "previous_minor_migrated_with_data" not in source
+
+
+def test_demo_bootstrap_reuses_the_configured_default_organisation() -> None:
+    source = (ROOT / "docker/demo-bootstrap.py").read_text(encoding="utf-8")
+
+    ensure = source.index("ensure_default_organisation")
+    bootstrap = source.index("bootstrap_admin")
+    assert ensure < bootstrap
+    assert "slug=config.identity.default_organisation_slug" in source
+    assert "name=config.identity.default_organisation_name" in source

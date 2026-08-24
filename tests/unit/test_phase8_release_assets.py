@@ -199,6 +199,13 @@ def test_demo_container_prepares_shared_non_root_state_directory() -> None:
     for dockerfile in (control_plane, agent):
         assert "USER 10001:10001" in dockerfile
         assert "COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./" in dockerfile
+        uninstall = "/usr/local/bin/python -m pip uninstall --yes setuptools wheel pip"
+        assert uninstall in dockerfile
+        assert "rm -f /usr/local/bin/pip" in dockerfile
+        runtime = dockerfile.index(" AS runtime")
+        uninstall_at = dockerfile.index(uninstall)
+        assert runtime < uninstall_at < dockerfile.index("COPY --from=build", runtime)
+        assert uninstall_at < dockerfile.index("USER 10001:10001", runtime)
 
 
 def test_production_template_pins_the_matching_release_image() -> None:
