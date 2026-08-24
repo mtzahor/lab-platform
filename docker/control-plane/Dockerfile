@@ -4,6 +4,17 @@
 ARG PYTHON_IMAGE="python:3.11.16-slim-bookworm@sha256:2e32f7d302adc1c37428355c1e646897c0c53f4fd60b6a551245fb90ee129f91"
 
 FROM ghcr.io/astral-sh/uv:0.12.5 AS uv
+FROM ${PYTHON_IMAGE} AS pgdg-key
+
+ADD --chmod=0644 \
+    --checksum=sha256:0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76 \
+    https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    /tmp/postgresql.asc
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends gnupg \
+    && gpg --batch --dearmor --output /postgresql.gpg /tmp/postgresql.asc
+
 FROM ${PYTHON_IMAGE} AS build
 
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -44,19 +55,16 @@ ENV PATH="/opt/lab-platform/bin:${PATH}" \
     LAB_RELEASE_CHANNEL="${LAB_RELEASE_CHANNEL}" \
     LAB_HEALTHCHECK_URL="http://127.0.0.1:8443/health/ready"
 
-ADD --chmod=0644 \
-    --checksum=sha256:0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76 \
-    https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    /usr/local/share/keyrings/postgres.gpg.asc
+COPY --from=pgdg-key --chmod=0644 /postgresql.gpg /usr/share/keyrings/postgresql.gpg
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
-    && echo "deb [ signed-by=/usr/local/share/keyrings/postgres.gpg.asc ] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
     && apt-get install --yes --no-install-recommends postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/pgdg.list \
-        /usr/local/share/keyrings/postgres.gpg.asc
+        /usr/share/keyrings/postgresql.gpg
 
 RUN groupadd --gid 10001 lab-platform \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/lab-platform \
