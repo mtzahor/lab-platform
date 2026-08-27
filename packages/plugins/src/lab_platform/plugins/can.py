@@ -148,12 +148,14 @@ class SocketCanTransport:
             can_socket.close()
 
     def _open_socket(self) -> socket.socket:
-        if not hasattr(socket, "AF_CAN") or not hasattr(socket, "CAN_RAW"):
+        address_family = getattr(socket, "AF_CAN", None)
+        protocol = getattr(socket, "CAN_RAW", None)
+        if address_family is None or protocol is None:
             raise OSError("SocketCAN is unavailable")
         can_socket = socket.socket(
-            socket.AF_CAN,
+            address_family,
             socket.SOCK_RAW,
-            socket.CAN_RAW,  # type: ignore[attr-defined]
+            protocol,
         )
         try:
             can_socket.bind((self.interface,))
