@@ -275,6 +275,138 @@
         "title": "AgentTimelineSeverity",
         "type": "string"
       },
+      "Alert": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acknowledged At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "resource_id": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Resource Id",
+            "type": "string"
+          },
+          "resource_type": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/AlertSeverity"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AlertStatus",
+            "default": "OPEN"
+          },
+          "type": {
+            "$ref": "#/components/schemas/AlertType"
+          }
+        },
+        "required": [
+          "severity",
+          "type",
+          "resource_type",
+          "resource_id",
+          "message"
+        ],
+        "title": "Alert",
+        "type": "object"
+      },
+      "AlertSeverity": {
+        "enum": [
+          "INFO",
+          "WARNING",
+          "CRITICAL"
+        ],
+        "title": "AlertSeverity",
+        "type": "string"
+      },
+      "AlertStatus": {
+        "enum": [
+          "OPEN",
+          "ACKNOWLEDGED",
+          "RESOLVED"
+        ],
+        "title": "AlertStatus",
+        "type": "string"
+      },
+      "AlertType": {
+        "enum": [
+          "AGENT_OFFLINE",
+          "BENCH_DEGRADED",
+          "REPEATED_FAILURES",
+          "STORAGE_USAGE",
+          "BACKUP_FAILURE",
+          "DATABASE_ISSUE",
+          "HIGH_QUEUE_WAIT_TIME",
+          "PLUGIN_UNHEALTHY",
+          "INCOMPATIBLE_VERSION"
+        ],
+        "title": "AlertType",
+        "type": "string"
+      },
+      "AlertsPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Alert"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "AlertsPage",
+        "type": "object"
+      },
       "ApiTokenRequest": {
         "additionalProperties": false,
         "properties": {
@@ -569,6 +701,141 @@
         "title": "BenchActionRequest",
         "type": "object"
       },
+      "BenchMaintenanceState": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "manually_set": {
+            "default": false,
+            "title": "Manually Set",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BenchMaintenanceStatus",
+            "default": "HEALTHY"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bench_id"
+        ],
+        "title": "BenchMaintenanceState",
+        "type": "object"
+      },
+      "BenchMaintenanceStatus": {
+        "enum": [
+          "HEALTHY",
+          "DEGRADED",
+          "MAINTENANCE_RECOMMENDED",
+          "MAINTENANCE",
+          "OFFLINE"
+        ],
+        "title": "BenchMaintenanceStatus",
+        "type": "string"
+      },
+      "BenchOperationalAnalytics": {
+        "additionalProperties": false,
+        "properties": {
+          "availability_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Ratio"
+          },
+          "bench_id": {
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "flaky": {
+            "$ref": "#/components/schemas/FlakyBenchAssessment"
+          },
+          "maintenance": {
+            "$ref": "#/components/schemas/BenchMaintenanceState"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "recommendation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MaintenanceRecommendation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reliability": {
+            "$ref": "#/components/schemas/ReliabilityMetrics"
+          },
+          "reservation_utilisation_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reservation Utilisation Ratio"
+          },
+          "target_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Type"
+          },
+          "utilisation": {
+            "$ref": "#/components/schemas/BenchUtilisation"
+          }
+        },
+        "required": [
+          "bench_id",
+          "name",
+          "utilisation",
+          "reliability",
+          "flaky",
+          "maintenance"
+        ],
+        "title": "BenchOperationalAnalytics",
+        "type": "object"
+      },
       "BenchRequest": {
         "additionalProperties": false,
         "properties": {
@@ -681,6 +948,52 @@
           "items"
         ],
         "title": "BenchTimelineResponse",
+        "type": "object"
+      },
+      "BenchUtilisation": {
+        "additionalProperties": false,
+        "properties": {
+          "available_seconds": {
+            "minimum": 0.0,
+            "title": "Available Seconds",
+            "type": "number"
+          },
+          "observation_seconds": {
+            "minimum": 0.0,
+            "title": "Observation Seconds",
+            "type": "number"
+          },
+          "unavailable_seconds": {
+            "minimum": 0.0,
+            "title": "Unavailable Seconds",
+            "type": "number"
+          },
+          "utilisation_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Utilisation Ratio"
+          },
+          "utilised_seconds": {
+            "minimum": 0.0,
+            "title": "Utilised Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "observation_seconds",
+          "available_seconds",
+          "unavailable_seconds",
+          "utilised_seconds"
+        ],
+        "title": "BenchUtilisation",
         "type": "object"
       },
       "BenchVisibility": {
@@ -1491,6 +1804,96 @@
         "title": "EnrollmentTokenRequest",
         "type": "object"
       },
+      "FailureCategory": {
+        "enum": [
+          "USER_ERROR",
+          "WORKFLOW_ERROR",
+          "FIRMWARE_ERROR",
+          "TARGET_ERROR",
+          "DEVICE_DISCONNECTED",
+          "FLASH_ERROR",
+          "SERIAL_ERROR",
+          "NETWORK_ERROR",
+          "AGENT_ERROR",
+          "PLUGIN_ERROR",
+          "INFRASTRUCTURE_ERROR",
+          "UNKNOWN"
+        ],
+        "title": "FailureCategory",
+        "type": "string"
+      },
+      "FlakyBenchAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "bench_id": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Bench Id",
+            "type": "string"
+          },
+          "distinct_contexts": {
+            "minimum": 0.0,
+            "title": "Distinct Contexts",
+            "type": "integer"
+          },
+          "infrastructure_failure_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Infrastructure Failure Rate"
+          },
+          "infrastructure_failures": {
+            "minimum": 0.0,
+            "title": "Infrastructure Failures",
+            "type": "integer"
+          },
+          "potentially_flaky": {
+            "title": "Potentially Flaky",
+            "type": "boolean"
+          },
+          "primary_failure": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Failure"
+          },
+          "reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "sample_size": {
+            "minimum": 0.0,
+            "title": "Sample Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bench_id",
+          "potentially_flaky",
+          "sample_size",
+          "infrastructure_failures",
+          "distinct_contexts"
+        ],
+        "title": "FlakyBenchAssessment",
+        "type": "object"
+      },
       "FlashWorkflowStep": {
         "additionalProperties": false,
         "properties": {
@@ -1778,6 +2181,54 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "MaintenanceRecommendation": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "failure_category": {
+            "$ref": "#/components/schemas/FailureCategory"
+          },
+          "heuristic": {
+            "default": true,
+            "title": "Heuristic",
+            "type": "boolean"
+          },
+          "message": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "failure_category"
+        ],
+        "title": "MaintenanceRecommendation",
+        "type": "object"
+      },
+      "MaintenanceStartRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "MaintenanceStartRequest",
+        "type": "object"
+      },
       "OperationCancelRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1966,6 +2417,78 @@
           "created_at"
         ],
         "title": "OperationSummary",
+        "type": "object"
+      },
+      "OperationalAnalyticsSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "benches": {
+            "items": {
+              "$ref": "#/components/schemas/BenchOperationalAnalytics"
+            },
+            "title": "Benches",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueMetrics"
+          },
+          "reliability": {
+            "$ref": "#/components/schemas/ReliabilityMetrics"
+          },
+          "semantics": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Semantics",
+            "type": "object"
+          },
+          "window": {
+            "$ref": "#/components/schemas/OperationalInterval"
+          },
+          "workflows": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowOperationalAnalytics"
+            },
+            "title": "Workflows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "window",
+          "semantics",
+          "queue",
+          "reliability",
+          "benches",
+          "workflows"
+        ],
+        "title": "OperationalAnalyticsSnapshot",
+        "type": "object"
+      },
+      "OperationalInterval": {
+        "additionalProperties": false,
+        "properties": {
+          "ended_at": {
+            "format": "date-time",
+            "title": "Ended At",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at",
+          "ended_at"
+        ],
+        "title": "OperationalInterval",
         "type": "object"
       },
       "Organisation": {
@@ -2394,6 +2917,82 @@
         "title": "QueueEntryStatus",
         "type": "string"
       },
+      "QueueMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "abandoned": {
+            "minimum": 0.0,
+            "title": "Abandoned",
+            "type": "integer"
+          },
+          "abandonment_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Abandonment Rate"
+          },
+          "average_wait_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Wait Seconds"
+          },
+          "median_wait_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Wait Seconds"
+          },
+          "p95_wait_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Wait Seconds"
+          },
+          "promoted_samples": {
+            "minimum": 0.0,
+            "title": "Promoted Samples",
+            "type": "integer"
+          },
+          "queue_depth": {
+            "minimum": 0.0,
+            "title": "Queue Depth",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "promoted_samples",
+          "abandoned",
+          "queue_depth"
+        ],
+        "title": "QueueMetrics",
+        "type": "object"
+      },
       "QueuePage": {
         "additionalProperties": false,
         "properties": {
@@ -2480,6 +3079,62 @@
           "action"
         ],
         "title": "ReadSerialWorkflowStep",
+        "type": "object"
+      },
+      "ReliabilityMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "failed": {
+            "minimum": 0.0,
+            "title": "Failed",
+            "type": "integer"
+          },
+          "failure_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/FailureCategory"
+            },
+            "title": "Failure Counts",
+            "type": "object"
+          },
+          "infrastructure_failures": {
+            "minimum": 0.0,
+            "title": "Infrastructure Failures",
+            "type": "integer"
+          },
+          "operations": {
+            "minimum": 0.0,
+            "title": "Operations",
+            "type": "integer"
+          },
+          "succeeded": {
+            "minimum": 0.0,
+            "title": "Succeeded",
+            "type": "integer"
+          },
+          "success_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Success Rate"
+          }
+        },
+        "required": [
+          "operations",
+          "succeeded",
+          "failed",
+          "infrastructure_failures"
+        ],
+        "title": "ReliabilityMetrics",
         "type": "object"
       },
       "ReservationActionPermissions": {
@@ -3792,6 +4447,30 @@
           "steps"
         ],
         "title": "WorkflowDefinition",
+        "type": "object"
+      },
+      "WorkflowOperationalAnalytics": {
+        "additionalProperties": false,
+        "properties": {
+          "benches_observed": {
+            "minimum": 0.0,
+            "title": "Benches Observed",
+            "type": "integer"
+          },
+          "reliability": {
+            "$ref": "#/components/schemas/ReliabilityMetrics"
+          },
+          "workflow_name": {
+            "title": "Workflow Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_name",
+          "benches_observed",
+          "reliability"
+        ],
+        "title": "WorkflowOperationalAnalytics",
         "type": "object"
       },
       "WorkflowRequirements": {
@@ -7347,6 +8026,310 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/api/v1/operational/alerts": {
+      "get": {
+        "operationId": "list_alerts_api_v1_operational_alerts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AlertStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertsPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "List Alerts",
+        "tags": [
+          "operational"
+        ]
+      }
+    },
+    "/api/v1/operational/alerts/{alert_id}/acknowledge": {
+      "post": {
+        "operationId": "acknowledge_alert_api_v1_operational_alerts__alert_id__acknowledge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Alert Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Alert"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Acknowledge Alert",
+        "tags": [
+          "operational"
+        ]
+      }
+    },
+    "/api/v1/operational/alerts/{alert_id}/resolve": {
+      "post": {
+        "operationId": "resolve_alert_api_v1_operational_alerts__alert_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Alert Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Alert"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Resolve Alert",
+        "tags": [
+          "operational"
+        ]
+      }
+    },
+    "/api/v1/operational/analytics": {
+      "get": {
+        "operationId": "analytics_api_v1_operational_analytics_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "window_hours",
+            "required": false,
+            "schema": {
+              "default": 168,
+              "maximum": 2160,
+              "minimum": 1,
+              "title": "Window Hours",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationalAnalyticsSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Analytics",
+        "tags": [
+          "operational"
+        ]
+      }
+    },
+    "/api/v1/operational/benches/{bench_id}/maintenance/end": {
+      "post": {
+        "operationId": "end_maintenance_api_v1_operational_benches__bench_id__maintenance_end_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BenchMaintenanceState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "End Maintenance",
+        "tags": [
+          "operational"
+        ]
+      }
+    },
+    "/api/v1/operational/benches/{bench_id}/maintenance/start": {
+      "post": {
+        "operationId": "start_maintenance_api_v1_operational_benches__bench_id__maintenance_start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bench_id",
+            "required": true,
+            "schema": {
+              "title": "Bench Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BenchMaintenanceState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Start Maintenance",
+        "tags": [
+          "operational"
+        ]
       }
     },
     "/api/v1/operations": {

@@ -1,3 +1,5 @@
+config_version: 1
+
 profile: production
 
 control_plane:

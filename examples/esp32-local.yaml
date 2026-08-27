@@ -1,3 +1,5 @@
+config_version: 1
+
 agent:
   name: local-esp32-agent
   host: 127.0.0.1

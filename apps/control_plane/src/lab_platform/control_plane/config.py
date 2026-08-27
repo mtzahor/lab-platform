@@ -8,6 +8,7 @@ from typing import Literal
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import yaml
+from lab_platform.config import CONFIG_VERSION
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -529,6 +530,7 @@ class ReverseProxySettings(ControlPlaneConfigModel):
 
 
 class ControlPlaneConfig(ControlPlaneConfigModel):
+    config_version: Literal[1] = CONFIG_VERSION
     profile: Literal["development", "test", "production"] = "development"
     control_plane: ControlPlaneSettings = Field(default_factory=ControlPlaneSettings)
     database: ControlPlaneDatabaseSettings = Field(default_factory=ControlPlaneDatabaseSettings)

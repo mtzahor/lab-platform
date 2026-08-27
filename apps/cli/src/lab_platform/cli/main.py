@@ -125,6 +125,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "health":
         _print_read_payload(client.get("/api/v1/health"), args.output, _health_table)
         return 0
+    if args.command == "plugin":
+        return _plugin_command(client, args)
     if args.command in {"benches", "plugins"}:
         if args.command == "plugins":
             _print_json(client.get("/plugins"))
@@ -157,6 +159,42 @@ def _dispatch(args: argparse.Namespace) -> int:
         _print_collection(payload, args.output, _event_table)
         return 0
     raise AssertionError("unreachable command")
+
+
+def _plugin_command(client: AgentClient, args: argparse.Namespace) -> int:
+    command = args.plugin_command
+    if command == "list":
+        _print_collection(
+            client.get("/api/v1/plugins"),
+            args.output,
+            _plugin_table,
+        )
+        return 0
+    if command == "show":
+        _print_read_payload(
+            client.get(f"/api/v1/plugins/{args.plugin_name}"),
+            args.output,
+            _plugin_show_table,
+        )
+        return 0
+    if command == "doctor":
+        path = "/api/v1/plugins/doctor"
+        if args.plugin_name is not None:
+            path = f"/api/v1/plugins/{args.plugin_name}/doctor"
+        payload = client.get(path)
+        reports = _plugin_doctor_reports(payload, single=args.plugin_name is not None)
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            _plugin_doctor_table(reports)
+        return int(
+            any(
+                str(check.get("status", "")).casefold() == "fail"
+                for report in reports
+                for check in _mapping_items(report.get("checks"))
+            )
+        )
+    raise AssertionError("unreachable plugin command")
 
 
 def _version_all(client: AgentClient, payload: object, output: str) -> int:
@@ -355,6 +393,18 @@ def _bench_command(client: AgentClient, args: argparse.Namespace) -> int:
             _print_json({"bench_id": args.bench_id, "released": True})
         else:
             print(f"Released {args.bench_id}.")
+    elif command == "maintenance":
+        action = args.maintenance_command
+        body = {"reason": args.reason} if action == "start" else {}
+        payload = client.post(
+            f"/api/v1/operational/benches/{args.bench_id}/maintenance/{action}",
+            body,
+        )
+        if args.output == "json":
+            _print_json(payload)
+        else:
+            state = _require_mapping(payload, "maintenance state")
+            print(f"Maintenance {action}ed for {args.bench_id}: {state.get('status', '')}")
     elif command in {"power-on", "power-off", "power-cycle"}:
         payload = client.post(
             f"/api/v1/benches/{args.bench_id}/actions/{command}",
@@ -2916,6 +2966,24 @@ def _build_parser() -> argparse.ArgumentParser:
     _read_parser(commands.add_parser("benches", help=argparse.SUPPRESS))
     _read_parser(commands.add_parser("plugins", help=argparse.SUPPRESS))
 
+    plugin = commands.add_parser(
+        "plugin",
+        help="Inspect Agent hardware plugins and run diagnostics.",
+    )
+    plugin_commands = plugin.add_subparsers(dest="plugin_command", required=True)
+    _read_parser(plugin_commands.add_parser("list", help="List configured plugins."))
+    plugin_show = _read_parser(
+        plugin_commands.add_parser("show", help="Show one plugin's runtime state.")
+    )
+    plugin_show.add_argument("plugin_name", metavar="NAME")
+    plugin_doctor = _read_parser(
+        plugin_commands.add_parser(
+            "doctor",
+            help="Check plugin compatibility, dependencies, discovery, and health.",
+        )
+    )
+    plugin_doctor.add_argument("plugin_name", metavar="NAME", nargs="?")
+
     auth = commands.add_parser("auth", help="Authenticate a human user with the control plane.")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     auth_login = _read_parser(auth_commands.add_parser("login"))
@@ -3192,6 +3260,16 @@ def _build_parser() -> argparse.ArgumentParser:
     serial_read.add_argument("--timeout", type=float, default=10)
     serial_read.add_argument("--until", dest="until_pattern")
     serial_read.add_argument("--max-lines", type=int, default=500)
+    maintenance = benches.add_parser("maintenance", help="Manage bench maintenance state.")
+    maintenance_commands = maintenance.add_subparsers(
+        dest="maintenance_command",
+        required=True,
+    )
+    maintenance_start = _read_parser(maintenance_commands.add_parser("start"))
+    maintenance_start.add_argument("bench_id")
+    maintenance_start.add_argument("--reason", required=True)
+    maintenance_end = _read_parser(maintenance_commands.add_parser("end"))
+    maintenance_end.add_argument("bench_id")
 
     reservation = commands.add_parser("reservation", help="Reserve and queue benches.")
     reservations = reservation.add_subparsers(dest="reservation_command", required=True)
@@ -3566,6 +3644,92 @@ def _print_operation_created(payload: object, output: str) -> None:
         _print_json(operation)
     else:
         print(f"Operation created: {operation.get('operation_id', '')}")
+
+
+def _plugin_table(items: list[object]) -> None:
+    rows: list[tuple[str, ...]] = []
+    for item in items:
+        plugin = _require_mapping(item, "plugin")
+        metadata_value = plugin.get("metadata")
+        metadata = metadata_value if isinstance(metadata_value, dict) else {}
+        rows.append(
+            (
+                str(plugin.get("name", "")),
+                str(metadata.get("version") or "—"),
+                str(metadata.get("plugin_api_version") or "—"),
+                str(plugin.get("status", "")).replace("_", " ").title(),
+                str(plugin.get("source", "")),
+                str(plugin.get("device_count", 0)),
+                str(plugin.get("error_code") or "—"),
+            )
+        )
+    _print_table(
+        ("NAME", "VERSION", "API", "STATUS", "SOURCE", "DEVICES", "ERROR"),
+        rows,
+    )
+
+
+def _plugin_show_table(plugin: dict[str, object]) -> None:
+    metadata_value = plugin.get("metadata")
+    metadata = metadata_value if isinstance(metadata_value, dict) else {}
+    capabilities = metadata.get("capabilities")
+    supported_devices = metadata.get("supported_devices")
+    _print_table(
+        ("FIELD", "VALUE"),
+        [
+            ("Name", str(plugin.get("name", ""))),
+            ("Status", str(plugin.get("status", "")).replace("_", " ").title()),
+            ("Source", str(plugin.get("source", ""))),
+            ("Version", str(metadata.get("version") or "—")),
+            ("Plugin API", str(metadata.get("plugin_api_version") or "—")),
+            ("Vendor", str(metadata.get("vendor") or metadata.get("author") or "—")),
+            (
+                "Capabilities",
+                ", ".join(str(item) for item in capabilities)
+                if isinstance(capabilities, list)
+                else "—",
+            ),
+            (
+                "Devices",
+                ", ".join(str(item) for item in supported_devices)
+                if isinstance(supported_devices, list) and supported_devices
+                else str(plugin.get("device_count", 0)),
+            ),
+            ("Error", str(plugin.get("error_code") or "—")),
+            ("Message", str(plugin.get("error_message") or "—")),
+        ],
+    )
+
+
+def _plugin_doctor_reports(
+    payload: object,
+    *,
+    single: bool,
+) -> list[dict[str, object]]:
+    if single:
+        return [_require_mapping(payload, "plugin diagnostic")]
+    body = _require_mapping(payload, "plugin diagnostics")
+    return _mapping_items(body.get("items"), name="plugin diagnostic")
+
+
+def _plugin_doctor_table(reports: list[dict[str, object]]) -> None:
+    rows: list[tuple[str, ...]] = []
+    for report in reports:
+        for check in _mapping_items(report.get("checks"), name="diagnostic check"):
+            rows.append(
+                (
+                    str(report.get("plugin", "")),
+                    str(check.get("name", "")),
+                    str(check.get("status", "")).upper(),
+                    str(check.get("message", "")),
+                    str(check.get("remediation") or "—"),
+                )
+            )
+    _print_table(("PLUGIN", "CHECK", "STATUS", "MESSAGE", "REMEDIATION"), rows)
+
+
+def _mapping_items(value: object, *, name: str = "item") -> list[dict[str, object]]:
+    return [_require_mapping(item, name) for item in _require_list(value, f"{name} list")]
 
 
 def _health_table(payload: dict[str, object]) -> None:

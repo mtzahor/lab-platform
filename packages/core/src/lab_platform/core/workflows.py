@@ -28,6 +28,7 @@ from lab_platform.models import (
 )
 from lab_platform.models.workflows import (
     ACTIVE_WORKFLOW_RUN_STATUSES,
+    WORKFLOW_API_VERSION,
     ArtifactReference,
     ArtifactWorkflowInput,
     AssertSerialWorkflowStep,
@@ -69,6 +70,10 @@ class WorkflowNotFoundError(WorkflowError):
 
 class WorkflowInvalidError(WorkflowError):
     code = "WORKFLOW_INVALID"
+
+
+class WorkflowSchemaVersionUnsupportedError(WorkflowInvalidError):
+    code = "WORKFLOW_SCHEMA_VERSION_UNSUPPORTED"
 
 
 class WorkflowCapabilityMismatchError(WorkflowError):
@@ -297,6 +302,15 @@ def parse_workflow_yaml(
         raise WorkflowInvalidError(
             f"Workflow {source_name} must contain a YAML mapping.", source=source_name
         )
+    received_api_version = payload.get("apiVersion")
+    if received_api_version is not None and received_api_version != WORKFLOW_API_VERSION:
+        raise WorkflowSchemaVersionUnsupportedError(
+            f"Unsupported workflow apiVersion {received_api_version!r} in {source_name}; "
+            f"this release supports {WORKFLOW_API_VERSION!r}.",
+            source=source_name,
+            received_api_version=received_api_version,
+            supported_api_versions=[WORKFLOW_API_VERSION],
+        )
     try:
         definition = WorkflowDefinition.model_validate(payload)
     except ValidationError as exc:
@@ -330,14 +344,22 @@ def load_workflow_yaml(path: Path) -> WorkflowDefinition:
 
 
 def validate_workflow_capabilities(definition: WorkflowDefinition, bench: BenchSnapshot) -> None:
-    available = {capability.strip().lower() for capability in bench.capabilities}
-    missing = sorted(set(definition.requirements.capabilities).difference(available))
+    available = {_canonical_capability(capability) for capability in bench.capabilities}
+    required = {
+        _canonical_capability(capability) for capability in definition.requirements.capabilities
+    }
+    missing = sorted(required.difference(available))
     if missing:
         raise WorkflowCapabilityMismatchError(
             f"Bench {bench.id} is missing workflow capabilities: {', '.join(missing)}.",
             bench_id=bench.id,
             missing_capabilities=missing,
         )
+
+
+def _canonical_capability(value: str) -> str:
+    normalized = value.strip().casefold()
+    return "flash" if normalized == "firmware" else normalized
 
 
 def resolve_workflow_inputs(

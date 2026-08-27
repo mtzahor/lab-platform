@@ -8,6 +8,8 @@ from uuid import UUID
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+CONFIG_VERSION: Literal[1] = 1
+
 
 class ConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
@@ -133,6 +135,60 @@ class Esp32FlashSettings(ConfigModel):
         return value
 
 
+class OpenOcdSettings(ConfigModel):
+    executable: str = Field(default="openocd", min_length=1, max_length=1000)
+    interface_config: str = Field(
+        default="interface/stlink.cfg",
+        min_length=1,
+        max_length=1000,
+    )
+    target_config: str = Field(
+        default="target/stm32f4x.cfg",
+        min_length=1,
+        max_length=1000,
+    )
+    transport: Literal["swd", "jtag"] = "swd"
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+    @field_validator("interface_config", "target_config")
+    @classmethod
+    def reject_openocd_command_fragments(cls, value: str) -> str:
+        if any(character in value for character in ("\n", "\r", ";", "{", "}")):
+            raise ValueError("OpenOCD config paths must not contain command separators")
+        return value
+
+
+class JLinkSettings(ConfigModel):
+    executable: str = Field(default="JLinkExe", min_length=1, max_length=1000)
+    device: str = Field(default="nRF52840_xxAA", min_length=1, max_length=200)
+    interface: Literal["SWD", "JTAG"] = "SWD"
+    speed_khz: int = Field(default=4000, ge=1, le=50_000)
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+    @field_validator("device")
+    @classmethod
+    def safe_device_name(cls, value: str) -> str:
+        if not all(character.isalnum() or character in "._-" for character in value):
+            raise ValueError(
+                "J-Link device names may contain only letters, numbers, '.', '_' or '-'"
+            )
+        return value
+
+
+class Rp2040Settings(ConfigModel):
+    tool: Literal["picotool", "uf2"] = "picotool"
+    executable: str = Field(default="picotool", min_length=1, max_length=1000)
+    mount_path: Path | None = None
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+
+class Nrf52Settings(ConfigModel):
+    tool: Literal["nrfjprog", "jlink"] = "nrfjprog"
+    executable: str = Field(default="nrfjprog", min_length=1, max_length=1000)
+    family: Literal["NRF51", "NRF52", "NRF53"] = "NRF52"
+    timeout_seconds: float = Field(default=120, gt=0, le=3600)
+
+
 class FirmwareFormatSettings(ConfigModel):
     format: Literal["raw_bin"] = "raw_bin"
     flash_address: str | None = None
@@ -166,6 +222,10 @@ class HardwareBenchSettings(ConfigModel):
     flash: Esp32FlashSettings = Field(default_factory=Esp32FlashSettings)
     firmware: FirmwareFormatSettings = Field(default_factory=FirmwareFormatSettings)
     boot: BootSettings = Field(default_factory=BootSettings)
+    openocd: OpenOcdSettings = Field(default_factory=OpenOcdSettings)
+    jlink: JLinkSettings = Field(default_factory=JLinkSettings)
+    rp2040: Rp2040Settings = Field(default_factory=Rp2040Settings)
+    nrf52: Nrf52Settings = Field(default_factory=Nrf52Settings)
     labels: dict[str, str] = Field(default_factory=dict)
 
     @property
@@ -306,6 +366,7 @@ class DevelopmentSettings(ConfigModel):
 
 
 class PlatformConfig(ConfigModel):
+    config_version: Literal[1] = CONFIG_VERSION
     agent: AgentSettings = Field(default_factory=AgentSettings)
     control_plane: AgentControlPlaneSettings = Field(default_factory=AgentControlPlaneSettings)
     identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
@@ -322,7 +383,11 @@ class PlatformConfig(ConfigModel):
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     workflows: WorkflowSettings = Field(default_factory=WorkflowSettings)
     development: DevelopmentSettings = Field(default_factory=DevelopmentSettings)
-    plugins: list[str] = Field(default_factory=lambda: ["power", "serial", "firmware"])
+    plugins: list[str] | dict[str, dict[str, Any] | bool | None] = Field(
+        default_factory=lambda: ["power", "serial", "flash"]
+    )
+    plugin_directories: list[Path] = Field(default_factory=list, max_length=100)
+    allow_plugin_import_paths: bool = False
 
     @model_validator(mode="after")
     def globally_unique_configured_ids(self) -> PlatformConfig:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -9,6 +10,9 @@ from uuid import UUID, uuid4
 
 from lab_platform.models.domain import LEGACY_ORGANISATION_ID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+WORKFLOW_API_VERSION = "lab.platform/v1"
+WORKFLOW_KIND = "Workflow"
 
 
 class WorkflowModel(BaseModel):
@@ -238,6 +242,60 @@ WorkflowStep: TypeAlias = Annotated[
 ]
 
 
+class WorkflowDocumentMetadata(WorkflowModel):
+    """Stable identity fields in a versioned workflow document."""
+
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    version: int = Field(default=1, ge=1)
+    description: str | None = None
+
+
+class WorkflowDocumentSpec(WorkflowModel):
+    """Executable portion of a ``lab.platform/v1`` workflow document."""
+
+    inputs: dict[str, WorkflowInput] = Field(default_factory=dict)
+    requirements: WorkflowRequirements
+    steps: list[WorkflowStep] = Field(min_length=1)
+
+
+class WorkflowDocument(WorkflowModel):
+    """Public, versioned workflow envelope used by YAML and REST clients."""
+
+    api_version: str = Field(alias="apiVersion")
+    kind: str
+    metadata: WorkflowDocumentMetadata
+    spec: WorkflowDocumentSpec
+
+    @field_validator("api_version")
+    @classmethod
+    def validate_api_version(cls, value: str) -> str:
+        if value != WORKFLOW_API_VERSION:
+            raise ValueError(
+                f"unsupported workflow apiVersion {value!r}; "
+                f"supported version is {WORKFLOW_API_VERSION!r}"
+            )
+        return value
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, value: str) -> str:
+        if value != WORKFLOW_KIND:
+            raise ValueError(
+                f"unsupported workflow kind {value!r}; supported kind is {WORKFLOW_KIND!r}"
+            )
+        return value
+
+    def definition_payload(self) -> dict[str, object]:
+        return {
+            "name": self.metadata.name,
+            "version": self.metadata.version,
+            "description": self.metadata.description,
+            "inputs": self.spec.inputs,
+            "requirements": self.spec.requirements,
+            "steps": self.spec.steps,
+        }
+
+
 class WorkflowDefinition(WorkflowModel):
     organisation_id: UUID = LEGACY_ORGANISATION_ID
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
@@ -246,6 +304,16 @@ class WorkflowDefinition(WorkflowModel):
     inputs: dict[str, WorkflowInput] = Field(default_factory=dict)
     requirements: WorkflowRequirements
     steps: list[WorkflowStep] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def unwrap_versioned_document(cls, value: object) -> object:
+        """Accept v1 documents while retaining the persisted flat representation."""
+
+        if not isinstance(value, Mapping) or not ({"apiVersion", "kind"} & set(value)):
+            return value
+        document = WorkflowDocument.model_validate(value)
+        return document.definition_payload()
 
     @field_validator("inputs", mode="before")
     @classmethod
@@ -260,11 +328,14 @@ class WorkflowDefinition(WorkflowModel):
     @model_validator(mode="after")
     def require_declared_step_capabilities(self) -> WorkflowDefinition:
         required = {
-            capability
+            _canonical_capability(capability)
             for step in self.steps
             if (capability := _STEP_CAPABILITY.get(WorkflowAction(step.action))) is not None
         }
-        undeclared = sorted(required.difference(self.requirements.capabilities))
+        declared = {
+            _canonical_capability(capability) for capability in self.requirements.capabilities
+        }
+        undeclared = sorted(required.difference(declared))
         if undeclared:
             joined = ", ".join(undeclared)
             raise ValueError(f"workflow steps use undeclared capabilities: {joined}")
@@ -315,13 +386,18 @@ class WorkflowStepResult(WorkflowModel):
 
 
 _STEP_CAPABILITY: dict[WorkflowAction, str | None] = {
-    WorkflowAction.FLASH: "firmware",
+    WorkflowAction.FLASH: "flash",
     WorkflowAction.RESET: "reset",
     WorkflowAction.READ_SERIAL: "serial",
     WorkflowAction.ASSERT_SERIAL: "serial",
     WorkflowAction.WAIT: None,
     WorkflowAction.PROBE: "probe",
 }
+
+
+def _canonical_capability(value: str) -> str:
+    normalized = value.strip().casefold()
+    return "flash" if normalized == "firmware" else normalized
 
 
 def _compile_pattern(pattern: str) -> None:
@@ -362,3 +438,24 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 
 _INPUT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def workflow_document_payload(definition: WorkflowDefinition) -> dict[str, object]:
+    """Render a stored workflow definition using the stable public v1 envelope."""
+
+    return {
+        "apiVersion": WORKFLOW_API_VERSION,
+        "kind": WORKFLOW_KIND,
+        "metadata": {
+            "name": definition.name,
+            "version": definition.version,
+            "description": definition.description,
+        },
+        "spec": {
+            "inputs": {
+                name: item.model_dump(mode="json") for name, item in definition.inputs.items()
+            },
+            "requirements": definition.requirements.model_dump(mode="json"),
+            "steps": [step.model_dump(mode="json") for step in definition.steps],
+        },
+    }

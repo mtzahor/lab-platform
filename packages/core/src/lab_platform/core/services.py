@@ -573,14 +573,18 @@ class BenchService:
     ) -> Operation:
         bench = await self._backend.get_bench(bench_id)
         required_capability = {
-            OperationType.FLASH_FIRMWARE: "firmware",
+            OperationType.FLASH_FIRMWARE: "flash",
             OperationType.SERIAL_READ: "serial",
             OperationType.RESET: "reset",
             OperationType.POWER_ON: "power",
             OperationType.POWER_OFF: "power",
             OperationType.POWER_CYCLE: "power",
         }[operation_type]
-        if required_capability not in {item.lower() for item in bench.capabilities}:
+        available_capabilities = {
+            "flash" if item.strip().casefold() == "firmware" else item.strip().casefold()
+            for item in bench.capabilities
+        }
+        if required_capability not in available_capabilities:
             raise CapabilityNotSupportedError(
                 f"Bench {bench_id} does not support {required_capability}.",
                 bench_id=bench_id,

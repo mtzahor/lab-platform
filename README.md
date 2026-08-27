@@ -5,19 +5,24 @@ central control plane now gives local shells and CI systems one inventory and AP
 independent lab Agents while each Agent remains the final authority for hardware locks, execution,
 and safety.
 
-The current development line is **0.9.0-beta** on the `preview` channel. It retains the distributed
-Agent, physical-safety, workflow/CI, identity/RBAC, and React dashboard foundations from Phases 5–7
-and adds the Phase 8 product boundary: inspectable production/demo Compose deployments, packaged
-`init`/`dev` commands, non-root multi-architecture images, strict environment profiles and mounted
-secrets, proxy/TLS validation, explicit database checks/migrations, local and S3-compatible artifact
-storage, retention, backup/restore verification, liveness/readiness/diagnostics, release and Agent
-compatibility reporting, supply-chain automation, and an Apache-2.0 open-core boundary.
+The current development line is **0.9.0-beta** on the `preview` channel. Phase 9 is the final
+roadmap phase: it adds Plugin API 1.0 and its SDK/template/contracts, vendor-neutral hardware
+capabilities, composed-resource and locking contracts (with production reservation integration
+still gated), broader MCU/accessory integration paths,
+operational analytics/alerts/metrics, versioned workflows/configuration, compatibility metadata,
+and explicit stability, deprecation, support, reliability, and release-readiness gates. It builds
+on the Phase 8 production boundary and all earlier distributed, safety, workflow/CI, RBAC, and web
+foundations.
 
-Start with [Phase 8](docs/PHASE_8.md), [self-hosting](docs/SELF_HOSTING.md), and the
-[production security checklist](docs/PRODUCTION_SECURITY.md). The distributed authority model and
-protocol guarantees remain documented in [Phase 5](docs/PHASE_5.md).
+Start with [the product documentation](docs/index.md), [Phase 9](docs/PHASE_9.md), and
+[self-hosting](docs/SELF_HOSTING.md). The distributed authority model remains documented in
+[Phase 5](docs/PHASE_5.md), and Plugin API 1.0 in [the plugin reference](PLUGIN_API.md).
 
-The supported Phase 8 production target is one self-hosted control plane, not active-active HA or
+`1.0.0` has not been released merely because the Phase 9 contracts exist. The physical,
+reference-scale load, 24-hour soak, recovery, security, upgrade, and RC evidence gates remain
+fail-closed in [the production-readiness review](docs/PHASE_9_READINESS.md).
+
+The supported production target is one self-hosted control plane, not active-active HA or
 a Kubernetes operator. The architecture can host customer Agents using the same protocol, but a
 public multi-tenant managed service still requires the explicit isolation gate and current-gap
 review in [the managed-service boundary](docs/MANAGED_SERVICE.md) and
@@ -138,7 +143,7 @@ labctl ci run \
   --workflow esp32-ci-test \
   --artifact firmware=build/firmware.bin \
   --input expected_version=0.6.0 \
-  --require capability=firmware \
+  --require capability=flash \
   --require capability=serial \
   --require capability=reset \
   --require capability=probe \

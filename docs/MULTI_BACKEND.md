@@ -52,7 +52,7 @@ and metadata.
 ```bash
 labctl bench list --online
 labctl bench list --available
-labctl bench list --capability firmware
+labctl bench list --capability flash
 labctl bench list --label board=esp32 --label location=home-lab
 ```
 

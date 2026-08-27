@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import shlex
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,10 +17,19 @@ from uuid import uuid4
 from lab_platform.agent.runtime import LabAgent, create_agent
 from lab_platform.agent.server import AgentHttpServer
 from lab_platform.cli.client import AgentApiError, AgentClient, AgentConnectionError
-from lab_platform.config import PlatformConfig, load_config
+from lab_platform.config import (
+    HardwareBenchSettings,
+    PlatformConfig,
+    RealBackendSettings,
+    load_config,
+)
 from lab_platform.core import VERSION
 from lab_platform.core.errors import PlatformError
 from lab_platform.models import RemoteCommandStatus
+from lab_platform.plugin_sdk import DiagnosticStatus, PluginRuntimeStatus
+from lab_platform.plugins import PluginManager
+from lab_platform.real_backend.discovery import SerialPortDiscovery
+from lab_platform.real_backend.targets import default_target_registry
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -201,6 +211,7 @@ def _doctor_command(args: argparse.Namespace) -> int:
                 True,
                 "Distributed mode is disabled",
             )
+        checks.extend(asyncio.run(_hardware_doctor_checks(config, _config_source(args))))
 
     if args.output == "json":
         print(json.dumps({"checks": checks}, indent=2, sort_keys=True))
@@ -217,6 +228,196 @@ def _doctor_command(args: argparse.Namespace) -> int:
             ],
         )
     return 0 if checks and all(bool(check["ok"]) for check in checks) else 1
+
+
+async def _hardware_doctor_checks(
+    config: PlatformConfig,
+    config_source: Path,
+) -> list[dict[str, object]]:
+    """Inspect plugin, driver, resource, permission, and physical-access prerequisites."""
+
+    checks: list[dict[str, object]] = []
+    manager = PluginManager(
+        plugin_directories=config.plugin_directories,
+        allow_import_paths=config.allow_plugin_import_paths,
+    )
+    try:
+        load_report = await manager.load_resilient(config.plugins)
+        _doctor_check(
+            checks,
+            "plugins",
+            load_report.ok,
+            (
+                f"Loaded {len(load_report.loaded)} configured plugin(s)"
+                if load_report.ok
+                else "; ".join(
+                    f"{failure.plugin}: {failure.code} ({failure.message})"
+                    for failure in load_report.failures
+                )
+            ),
+        )
+        for report in await manager.diagnose_all():
+            failed = [check for check in report.checks if check.status is DiagnosticStatus.FAIL]
+            healthy = report.status is PluginRuntimeStatus.HEALTHY and not failed
+            detail = (
+                ", ".join(f"{check.name}={check.status.value}" for check in report.checks)
+                or report.status.value
+            )
+            _doctor_check(checks, f"plugin:{report.plugin}", healthy, detail)
+    finally:
+        shutdown_failures = await manager.shutdown()
+        if shutdown_failures:
+            _doctor_check(
+                checks,
+                "plugin cleanup",
+                False,
+                "; ".join(f"{failure.plugin}: {failure.message}" for failure in shutdown_failures),
+            )
+
+    real_backends = [
+        backend for backend in config.effective_backends if isinstance(backend, RealBackendSettings)
+    ]
+    benches = [bench for backend in real_backends for bench in backend.config.benches]
+    _doctor_check(
+        checks,
+        "resources",
+        True,
+        f"{len(benches)} physical bench resource definition(s) validated",
+    )
+
+    target_types = set(default_target_registry().target_types)
+    unsupported = sorted(
+        {
+            bench.target_type
+            for bench in benches
+            if _normalise_target_type(bench.target_type) not in target_types
+        }
+    )
+    _doctor_check(
+        checks,
+        "drivers",
+        not unsupported,
+        (
+            f"Drivers available for {len(benches)} configured target(s)"
+            if not unsupported
+            else f"Unsupported target type(s): {', '.join(unsupported)}"
+        ),
+    )
+    _doctor_check(
+        checks,
+        "resource conflicts",
+        True,
+        "Configured backend and bench identifiers are unique",
+    )
+
+    storage_root = _storage_root(config_source)
+    artifact_directory = _resolve_from(storage_root, config.artifacts.directory)
+    writable_root = _nearest_existing_parent(artifact_directory)
+    _doctor_check(
+        checks,
+        "permissions:artifacts",
+        os.access(writable_root, os.W_OK | os.X_OK),
+        f"Creation root: {writable_root}",
+    )
+    for directory in config.plugin_directories:
+        resolved = _resolve_from(storage_root, directory)
+        accessible = resolved.is_dir() and os.access(resolved, os.R_OK | os.X_OK)
+        _doctor_check(
+            checks,
+            f"permissions:plugin-directory:{resolved}",
+            accessible,
+            "Readable plugin directory" if accessible else "Directory is missing or unreadable",
+        )
+
+    if not benches:
+        for name in ("serial", "usb", "external tools"):
+            _doctor_check(
+                checks,
+                name,
+                True,
+                "No physical target resources are configured",
+            )
+
+    discovery = SerialPortDiscovery()
+    for bench in benches:
+        try:
+            port = discovery.resolve(bench.connection)
+        except (ImportError, OSError, PlatformError) as exc:
+            _doctor_check(checks, f"serial:{bench.id}", False, str(exc))
+            _doctor_check(checks, f"usb:{bench.id}", False, str(exc))
+        else:
+            accessible = os.access(port.device, os.R_OK | os.W_OK)
+            detail = (
+                f"{port.device} is readable and writable"
+                if accessible
+                else f"{port.device} exists but is not readable and writable"
+            )
+            _doctor_check(checks, f"serial:{bench.id}", accessible, detail)
+            selector = bench.connection.usb
+            stable_identity = bool(
+                selector.serial_number
+                or selector.vendor_id is not None
+                or selector.product_id is not None
+                or bench.connection.serial_port.casefold() != "auto"
+            )
+            _doctor_check(
+                checks,
+                f"usb:{bench.id}",
+                stable_identity,
+                (
+                    f"Resolved stable device identity to {port.device}"
+                    if stable_identity
+                    else "Device resolved, but no stable USB selector is configured"
+                ),
+            )
+
+        executable = _target_executable(bench)
+        if executable is None:
+            mount = bench.rp2040.mount_path
+            ready = mount is not None and mount.is_dir() and os.access(mount, os.W_OK | os.X_OK)
+            _doctor_check(
+                checks,
+                f"external-tool:{bench.id}",
+                ready,
+                f"UF2 mount is {'ready' if ready else 'missing or unwritable'}: {mount}",
+            )
+        else:
+            tool_path = shutil.which(executable)
+            _doctor_check(
+                checks,
+                f"external-tool:{bench.id}",
+                tool_path is not None,
+                tool_path or f"Executable not found: {executable}",
+            )
+    return checks
+
+
+def _target_executable(bench: HardwareBenchSettings) -> str | None:
+    target_type = _normalise_target_type(bench.target_type)
+    if target_type in {"stm32", "openocd"}:
+        return bench.openocd.executable
+    if target_type == "jlink":
+        return bench.jlink.executable
+    if target_type == "nrf52":
+        return bench.jlink.executable if bench.nrf52.tool == "jlink" else bench.nrf52.executable
+    if target_type in {"pico", "raspberry-pi-pico", "rp2040"}:
+        return None if bench.rp2040.tool == "uf2" else bench.rp2040.executable
+    return bench.flash.tool
+
+
+def _normalise_target_type(value: str) -> str:
+    return value.strip().casefold().replace("_", "-")
+
+
+def _resolve_from(root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else root / path
+
+
+def _nearest_existing_parent(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
 
 
 def _journal_list(args: argparse.Namespace) -> int:

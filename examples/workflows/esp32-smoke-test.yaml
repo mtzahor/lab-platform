@@ -1,24 +1,27 @@
-name: esp32-smoke-test
-version: 1
-description: Flash firmware and verify the target self-test over serial.
+apiVersion: lab.platform/v1
+kind: Workflow
+metadata:
+  name: esp32-smoke-test
+  version: 1
+  description: Flash firmware and verify the target self-test over serial.
+spec:
+  requirements:
+    capabilities:
+      - flash
+      - serial
+      - reset
 
-requirements:
-  capabilities:
-    - firmware
-    - serial
-    - reset
+  steps:
+    - action: flash
+      firmware: "${firmware}"
+      version: 0.4.0
 
-steps:
-  - action: flash
-    firmware: "${firmware}"
-    version: 0.4.0
+    - action: reset
 
-  - action: reset
+    - action: read_serial
+      until_pattern: READY
+      timeout_seconds: 20
+      max_lines: 500
 
-  - action: read_serial
-    until_pattern: READY
-    timeout_seconds: 20
-    max_lines: 500
-
-  - action: assert_serial
-    pattern: SELF_TEST=PASS
+    - action: assert_serial
+      pattern: SELF_TEST=PASS

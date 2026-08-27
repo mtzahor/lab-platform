@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from lab_platform.plugin_sdk import PluginMetadata as PluginMetadata
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Phase 6 migrates every pre-existing operational record into this seeded
@@ -367,14 +368,6 @@ class Event(LabModel):
     type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=utc_now)
-
-
-class PluginMetadata(LabModel):
-    name: str
-    version: str
-    author: str
-    description: str
-    capabilities: list[str] = Field(default_factory=list)
 
 
 class HealthReport(LabModel):

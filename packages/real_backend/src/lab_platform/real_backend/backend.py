@@ -22,8 +22,12 @@ from lab_platform.models import (
 from lab_platform.real_backend.discovery import SerialPortDiscovery, SerialPortProvider
 from lab_platform.real_backend.process_runner import AsyncSubprocessRunner, ProcessRunner
 from lab_platform.real_backend.targets import PhysicalTarget
-from lab_platform.real_backend.targets.esp32 import Esp32Target
 from lab_platform.real_backend.targets.esp32.serial import Esp32SerialReader, SerialFactory
+from lab_platform.real_backend.targets.registry import (
+    TargetDependencies,
+    TargetDriverRegistry,
+    default_target_registry,
+)
 
 
 class RealLabBackend:
@@ -43,6 +47,7 @@ class RealLabBackend:
         serial_decode_errors: str = "replace",
         serial_capture_max_bytes: int = 50 * 1024 * 1024,
         serial_message_max_bytes: int = 1024 * 1024,
+        target_registry: TargetDriverRegistry | None = None,
     ) -> RealLabBackend:
         if not config.benches:
             raise ConfigurationError("The real backend requires one configured hardware bench.")
@@ -62,15 +67,15 @@ class RealLabBackend:
                 maximum_message_bytes=serial_message_max_bytes,
             )
         )
+        drivers = target_registry or default_target_registry()
+        dependencies = TargetDependencies(
+            discovery=discovery,
+            process_runner=runner,
+            serial_reader=reader,
+        )
         targets: dict[str, PhysicalTarget] = {}
         for bench in config.benches:
-            if bench.target_type.lower() != "esp32":
-                raise ConfigurationError(
-                    f"Unsupported physical target type: {bench.target_type}",
-                    bench_id=bench.id,
-                    target_type=bench.target_type,
-                )
-            targets[bench.id] = Esp32Target(bench, discovery, runner, reader)
+            targets[bench.id] = drivers.create(bench, dependencies)
         return cls(targets)
 
     async def start(self) -> None:

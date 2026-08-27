@@ -10,6 +10,7 @@ import { NotificationProvider } from "./app/NotificationProvider";
 import { ToastProvider } from "./app/ToastProvider";
 import { AgentDetailPage } from "./pages/AgentDetailPage";
 import { AgentsPage } from "./pages/AgentsPage";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { ArtifactsPage } from "./pages/ArtifactsPage";
 import { BenchDetailPage } from "./pages/BenchDetailPage";
 import { BenchesPage } from "./pages/BenchesPage";
@@ -67,6 +68,16 @@ function Application() {
             <Route path="workflow-runs/:runId" element={<WorkflowRunPage />} />
             <Route path="operations" element={<OperationsPage />} />
             <Route path="operations/:operationId" element={<OperationDetailPage />} />
+            <Route
+              path="analytics"
+              element={
+                <WithPermission permission="benches:read">
+                  <WithPermission permission="operations:read">
+                    <AnalyticsPage />
+                  </WithPermission>
+                </WithPermission>
+              }
+            />
             <Route path="ci-sessions" element={<CiSessionsPage />} />
             <Route path="ci-sessions/:sessionId" element={<CiSessionDetailPage />} />
             <Route path="agents" element={<AgentsPage />} />

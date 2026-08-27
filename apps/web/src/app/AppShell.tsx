@@ -3,6 +3,7 @@ import {
   Archive,
   Bot,
   Boxes,
+  ChartNoAxesCombined,
   ChevronDown,
   ChevronRight,
   CircuitBoard,
@@ -39,6 +40,12 @@ const PRIMARY_NAV = [
   },
   { to: "/workflows", label: "Workflows", icon: Workflow, permissions: ["workflows:read"] },
   { to: "/operations", label: "Operations", icon: Activity, permissions: ["operations:read"] },
+  {
+    to: "/analytics",
+    label: "Analytics",
+    icon: ChartNoAxesCombined,
+    permissions: ["benches:read", "operations:read"],
+  },
   {
     to: "/ci-sessions",
     label: "CI Sessions",
@@ -81,7 +88,8 @@ export function AppShell() {
   const visibleAdminNav = ADMIN_NAV.filter((item) => canAny(item.permission));
   const canAdmin = visibleAdminNav.length > 0;
   const visibleNav = PRIMARY_NAV.filter(
-    (item) => !item.permissions.length || canAny(...item.permissions),
+    (item) =>
+      !item.permissions.length || item.permissions.every((permission) => canAny(permission)),
   );
 
   async function logout() {

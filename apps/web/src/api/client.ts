@@ -217,6 +217,12 @@ type CiSessionListQuery = NonNullable<
 type OperationListQuery = NonNullable<
   operations["list_operations_api_v1_operations_get"]["parameters"]["query"]
 >;
+type OperationalAnalyticsQuery = NonNullable<
+  operations["analytics_api_v1_operational_analytics_get"]["parameters"]["query"]
+>;
+type OperationalAlertListQuery = NonNullable<
+  operations["list_alerts_api_v1_operational_alerts_get"]["parameters"]["query"]
+>;
 type ReservationListQuery = NonNullable<
   operations["list_reservations_api_v1_reservations_get"]["parameters"]["query"]
 >;
@@ -327,6 +333,34 @@ export const generatedApi = {
     return generatedRecord(
       await client.GET("/api/v1/operations", {
         params: { query },
+      }),
+    );
+  },
+  async operationalAnalytics(query: OperationalAnalyticsQuery = {}) {
+    return generatedRecord(
+      await client.GET("/api/v1/operational/analytics", {
+        params: { query },
+      }),
+    );
+  },
+  async listOperationalAlerts(query: OperationalAlertListQuery = {}) {
+    return generatedRecord(
+      await client.GET("/api/v1/operational/alerts", {
+        params: { query },
+      }),
+    );
+  },
+  async acknowledgeOperationalAlert(alertId: string) {
+    return generatedRecord(
+      await client.POST("/api/v1/operational/alerts/{alert_id}/acknowledge", {
+        params: { path: { alert_id: alertId } },
+      }),
+    );
+  },
+  async resolveOperationalAlert(alertId: string) {
+    return generatedRecord(
+      await client.POST("/api/v1/operational/alerts/{alert_id}/resolve", {
+        params: { path: { alert_id: alertId } },
       }),
     );
   },

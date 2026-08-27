@@ -1,99 +1,89 @@
 # Lab Platform documentation
 
-## Phase 8 product and deployment
+Lab Platform provides one safe inventory and workflow API for simulated and physical hardware
+across distributed Agents. Start in SimLab; physical devices are an optional next step.
 
-- [Phase 8 objective, product boundary, evidence, and cut line](PHASE_8.md)
-- [Self-hosted installation and day-two operations](SELF_HOSTING.md)
-- [Production architecture, TLS proxy, secrets, and startup](PRODUCTION_DEPLOYMENT.md)
-- [Official container images, tags, verification, and runtime boundaries](DOCKER.md)
-- [Safe upgrade, migration, verification, and rollback workflow](UPGRADING.md)
-- [Complete backup, verification, restore, and recovery testing](BACKUP_RESTORE.md)
-- [Local and S3-compatible artifact storage](ARTIFACT_STORAGE.md)
-- [Artifact and audit retention policy](RETENTION.md)
-- [Stable, preview, and nightly release channels](RELEASE_CHANNELS.md)
-- [Application, Agent, API, protocol, plugin, schema, and backup compatibility](VERSION_COMPATIBILITY.md)
-- [Managed-service responsibility and tenant-isolation boundary](MANAGED_SERVICE.md)
-- [Community/commercial feature and dependency boundary](OPEN_CORE_MODEL.md)
-- [Apache-2.0, contributions, commercial components, and trademarks](LICENSING.md)
-- [Control-plane, database, storage, host, upgrade, and reconnect disaster recovery](DISASTER_RECOVERY.md)
-- [Machine-assisted and manual production security checklist](PRODUCTION_SECURITY.md)
-- [Project security reporting policy](../SECURITY.md)
-- [Roadmap and Phase 8 acceptance status](../ROADMAP.md)
+## Getting started
 
-## Phase 7 web dashboard
+- [Project quickstart and local demos](../README.md)
+- [Self-hosted installation](SELF_HOSTING.md)
+- [Production deployment](PRODUCTION_DEPLOYMENT.md)
+- [Docker images and Compose](DOCKER.md)
+- [Phase 9 scope and current release boundary](PHASE_9.md)
 
-- [Phase 7 status, architecture, security, and cut line](PHASE_7.md)
-- [Dashboard routes and screen diagrams](WEB_DASHBOARD.md)
-- [Integrated and separate-static deployment](WEB_DEPLOYMENT.md)
-- [Browser authentication and CSRF](WEB_AUTHENTICATION.md)
-- [Permission-aware UI model](WEB_PERMISSIONS.md)
-- [SSE, polling, and distributed-state updates](LIVE_UPDATES.md)
-- [Web troubleshooting](WEB_TROUBLESHOOTING.md)
-- [Web accessibility requirements and acceptance pass](WEB_ACCESSIBILITY.md)
-- [Complete SimLab browser demonstration](PHASE_7_BROWSER_DEMO.md)
+## Concepts and architecture
 
-## Phase 6 identity and access control
-
-- [Phase 6 status, architecture, and remaining cut line](PHASE_6.md)
-- [Phase 6 team-access and service-account CI demo](PHASE_6_TEAM_DEMO.md)
-- [Identity and principals](IDENTITY.md)
-- [Local authentication and CLI credential storage](LOCAL_AUTH.md)
-- [OIDC login, configuration, user mapping, and limitations](OIDC.md)
-- [Organisations and transitional backfill](ORGANISATIONS.md)
-- [Teams](TEAMS.md)
-- [Roles and permissions](ROLES_AND_PERMISSIONS.md)
-- [Service accounts](SERVICE_ACCOUNTS.md)
-- [Identity-bound API credentials](API_CREDENTIALS.md)
-- [Audit log and secret safety](AUDIT_LOG.md)
-- [Legacy authentication migration](AUTH_MIGRATION.md)
-- [Phase 6 security model and current limitations](SECURITY_MODEL.md)
-
-## Phase 5 distributed control plane
-
-- [Phase 5 architecture, authority, protocol, recovery, demo, and limitations](PHASE_5.md)
-- [Control-plane OpenAPI contract](control-plane-openapi.json)
-
-## Phase 4 hardware CI
-
-- [Phase 4 overview and local demonstration](PHASE_4.md)
-- [CI sessions, selection, heartbeats, and idempotency](CI_SESSIONS.md)
-- [API tokens and security boundary](API_TOKENS.md)
-- [Artifacts](ARTIFACTS.md)
-- [JSON and JUnit results](JUNIT_RESULTS.md)
-- [Cleanup and cancellation guarantees](CI_CLEANUP.md)
-- [CI troubleshooting and exit codes](CI_TROUBLESHOOTING.md)
-- [GitHub Actions](GITHUB_ACTIONS.md)
-- [GitLab CI](GITLAB_CI.md)
-- [Jenkins](JENKINS.md)
-
-## Core reference
-
-- [Architecture](../ARCHITECTURE.md)
-- [REST API](../API.md)
-- [CLI](../CLI.md)
-- [Roadmap](../ROADMAP.md)
-- [Development](../DEVELOPMENT.md)
-- [Contributing](../CONTRIBUTING.md)
-- [Plugin API](../PLUGIN_API.md)
-- [Standalone Agent OpenAPI contract](openapi.json)
-
-## Earlier phases and shared labs
-
-- [Phase 1](../PHASE_1.md)
-- [Phase 2](PHASE_2.md)
-- [Phase 3](PHASE_3.md)
-- [Reservations](RESERVATIONS.md)
-- [Scheduling](SCHEDULING.md)
-- [Queueing](QUEUEING.md)
-- [Workflows](WORKFLOWS.md)
-- [Recovery](RECOVERY.md)
+- [Architecture and authority boundaries](../ARCHITECTURE.md)
+- [Distributed control plane and Agent protocol](PHASE_5.md)
 - [Multiple backends](MULTI_BACKEND.md)
-- [Team demo](TEAM_DEMO.md)
+- [Reservations](RESERVATIONS.md), [scheduling](SCHEDULING.md), and [queueing](QUEUEING.md)
+- [Artifacts](ARTIFACTS.md) and [results/JUnit](JUNIT_RESULTS.md)
+- [Open-core and commercial boundary](OPEN_CORE_MODEL.md)
 
-## Hardware and simulation
+## Agent and hardware setup
 
-- [ESP32 setup](ESP32_SETUP.md)
-- [Real backend](REAL_BACKEND.md)
-- [Hardware testing](HARDWARE_TESTING.md)
+- [Hardware setup and troubleshooting](HARDWARE_SETUP.md)
+- [Hardware compatibility matrix/status](HARDWARE_COMPATIBILITY.md)
+- [ESP32 reference setup](ESP32_SETUP.md)
+- [Real backend behavior](REAL_BACKEND.md)
+- [Hardware test safety/evidence](HARDWARE_TESTING.md)
 - [Serial troubleshooting](TROUBLESHOOTING_SERIAL.md)
 - [SimLab integration](../SIMLAB_INTEGRATION.md)
+
+## Workflows and CI
+
+- [Workflows and versioned document format](WORKFLOWS.md)
+- [CI sessions](CI_SESSIONS.md), [cleanup](CI_CLEANUP.md), and [troubleshooting](CI_TROUBLESHOOTING.md)
+- [GitHub Actions](GITHUB_ACTIONS.md), [GitLab CI](GITLAB_CI.md), and [Jenkins](JENKINS.md)
+- [Artifact storage](ARTIFACT_STORAGE.md) and [live updates](LIVE_UPDATES.md)
+
+## Web dashboard
+
+- [Dashboard routes and usage](WEB_DASHBOARD.md)
+- [Deployment](WEB_DEPLOYMENT.md), [authentication](WEB_AUTHENTICATION.md), and [permissions](WEB_PERMISSIONS.md)
+- [Accessibility](WEB_ACCESSIBILITY.md) and [troubleshooting](WEB_TROUBLESHOOTING.md)
+
+## Security and administration
+
+- [Production security](PRODUCTION_SECURITY.md) and [security reporting](../SECURITY.md)
+- [Identity](IDENTITY.md), [organisations](ORGANISATIONS.md), [teams](TEAMS.md), and [roles](ROLES_AND_PERMISSIONS.md)
+- [Local authentication](LOCAL_AUTH.md), [OIDC](OIDC.md), and [service accounts](SERVICE_ACCOUNTS.md)
+- [API credentials](API_CREDENTIALS.md), [legacy API tokens](API_TOKENS.md), and [audit log](AUDIT_LOG.md)
+- [Security model and managed-service boundary](SECURITY_MODEL.md)
+
+## Plugins and compatibility
+
+- [Plugin API 1.0](../PLUGIN_API.md)
+- [Plugin developer quickstart, contracts, and contribution evidence](PLUGIN_DEVELOPMENT.md)
+- [Hardware compatibility](HARDWARE_COMPATIBILITY.md)
+- [Stable public interfaces and deprecation](STABILITY_POLICY.md)
+- [Release/LTS support policy](SUPPORT_POLICY.md)
+
+## Operations, backup, and upgrades
+
+- [Production reliability/load/soak/recovery validation](RELIABILITY_VALIDATION.md)
+- [Health, backup, verification, and restore](BACKUP_RESTORE.md)
+- [Disaster recovery](DISASTER_RECOVERY.md)
+- [Retention](RETENTION.md)
+- [Upgrading](UPGRADING.md) and [version compatibility](VERSION_COMPATIBILITY.md)
+- [Release channels](RELEASE_CHANNELS.md)
+- [Phase 9 / 1.0 readiness gate](PHASE_9_READINESS.md)
+
+## API and CLI reference
+
+- [REST API guide](../API.md)
+- [Control-plane OpenAPI](control-plane-openapi.json)
+- [Standalone Agent OpenAPI](openapi.json)
+- [CLI reference](../CLI.md)
+
+## Contributing and project history
+
+- [Development](../DEVELOPMENT.md) and [contributing](../CONTRIBUTING.md)
+- [License and trademarks](LICENSING.md)
+- [Roadmap](../ROADMAP.md)
+- Historical phase records: [Phase 2](PHASE_2.md), [Phase 3](PHASE_3.md),
+  [Phase 4](PHASE_4.md), [Phase 5](PHASE_5.md), [Phase 6](PHASE_6.md),
+  [Phase 7](PHASE_7.md), and [Phase 8](PHASE_8.md)
+
+There is no Phase 10. Work after the Phase 9 cut line belongs to the post-1.0 backlog and is driven
+by real user, maintainer, community, or commercial needs.

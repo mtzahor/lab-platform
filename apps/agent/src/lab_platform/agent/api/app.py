@@ -305,6 +305,45 @@ def create_app(agent: LabAgent, *, manage_lifecycle: bool = True) -> FastAPI:
         values = await agent.metrics_payload()
         return "".join(f"{name} {value}\n" for name, value in sorted(values.items()))
 
+    @router.get("/plugins")
+    async def list_plugins(
+        _token: Annotated[ApiToken | None, Depends(authorize_benches)],
+    ) -> dict[str, object]:
+        return {
+            "items": [plugin.model_dump(mode="json") for plugin in agent.plugin_runtime_info()],
+            "load_report": agent.plugin_load_report().model_dump(mode="json"),
+        }
+
+    @router.get("/plugins/doctor")
+    async def diagnose_plugins(
+        _token: Annotated[ApiToken | None, Depends(authorize_benches)],
+    ) -> dict[str, object]:
+        reports = await agent.plugin_diagnostics()
+        return {"items": [report.model_dump(mode="json") for report in reports]}
+
+    @router.get("/plugins/{plugin_name}")
+    async def get_plugin(
+        plugin_name: str,
+        _token: Annotated[ApiToken | None, Depends(authorize_benches)],
+    ) -> dict[str, object]:
+        plugin = next(
+            (item for item in agent.plugin_runtime_info() if item.name == plugin_name),
+            None,
+        )
+        if plugin is None:
+            raise HTTPException(status_code=404, detail=f"Unknown plugin: {plugin_name}")
+        return plugin.model_dump(mode="json")
+
+    @router.get("/plugins/{plugin_name}/doctor")
+    async def diagnose_plugin(
+        plugin_name: str,
+        _token: Annotated[ApiToken | None, Depends(authorize_benches)],
+    ) -> dict[str, object]:
+        if not any(item.name == plugin_name for item in agent.plugin_runtime_info()):
+            raise HTTPException(status_code=404, detail=f"Unknown plugin: {plugin_name}")
+        reports = await agent.plugin_diagnostics(plugin_name)
+        return reports[0].model_dump(mode="json")
+
     @router.get("/benches")
     async def list_benches(
         _token: Annotated[ApiToken | None, Depends(authorize_benches)],

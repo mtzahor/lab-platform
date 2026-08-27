@@ -40,6 +40,7 @@ lab-agent = "lab_platform.agent.cli:main"
 lab-control-plane = "lab_platform.control_plane.cli:main"
 lab-platform = "lab_platform.cli.product:main"
 labctl = "lab_platform.cli.main:main"
+lab-plugin = "lab_platform.plugin_sdk.cli:main"
 
 [tool.setuptools]
 packages = [
@@ -55,6 +56,7 @@ packages = [
     "lab_platform.logging",
     "lab_platform.models",
     "lab_platform.persistence",
+    "lab_platform.plugin_sdk",
     "lab_platform.plugins",
     "lab_platform.real_backend",
     "lab_platform.real_backend.targets",
@@ -76,6 +78,7 @@ packages = [
 "lab_platform.logging" = "packages/logging/src/lab_platform/logging"
 "lab_platform.models" = "packages/models/src/lab_platform/models"
 "lab_platform.persistence" = "packages/persistence/src/lab_platform/persistence"
+"lab_platform.plugin_sdk" = "packages/plugin_sdk/src/lab_platform/plugin_sdk"
 "lab_platform.plugins" = "packages/plugins/src/lab_platform/plugins"
 "lab_platform.real_backend" = "packages/real_backend/src/lab_platform/real_backend"
 "lab_platform.real_backend.targets" = "packages/real_backend/src/lab_platform/real_backend/targets"
@@ -121,6 +124,7 @@ mypy_path = [
     "packages/logging/src",
     "packages/models/src",
     "packages/persistence/src",
+    "packages/plugin_sdk/src",
     "packages/plugins/src",
     "packages/real_backend/src",
     "packages/simlab/src",
@@ -133,6 +137,7 @@ pythonpath = ["."]
 addopts = "--cov=lab_platform --cov-report=term-missing --cov-fail-under=90"
 markers = [
     "backend_contract: shared behavioral contract for LabBackend implementations",
+    "plugin_contract: shared behavioral contract for Plugin API implementations",
     "hardware: requires an explicitly enabled physical hardware bench",
 ]
 

@@ -16,6 +16,7 @@ SOURCE_ROOTS = (
     ROOT / "packages/logging/src",
     ROOT / "packages/models/src",
     ROOT / "packages/persistence/src",
+    ROOT / "packages/plugin_sdk/src",
     ROOT / "packages/plugins/src",
     ROOT / "packages/real_backend/src",
     ROOT / "packages/simlab/src",

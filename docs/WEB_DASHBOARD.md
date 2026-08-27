@@ -1,9 +1,9 @@
 # Web dashboard
 
-The Phase 7 dashboard is the browser client for the Lab Platform control plane. It is responsive,
-keyboard navigable, permission aware, and deliberately operational rather than analytical. The
-current organisation and principal appear in the persistent shell; the live-state indicator never
-substitutes for the status reported by the API.
+The dashboard is the browser client for the Lab Platform control plane. It is responsive,
+keyboard navigable, permission aware, and combines day-to-day control with bounded operational
+analytics. The current organisation and principal appear in the persistent shell; the live-state
+indicator never substitutes for the status reported by the API.
 
 ## Routes
 
@@ -16,6 +16,7 @@ substitutes for the status reported by the API.
 | `/workflows` | Definitions, recent runs, launch form | `workflows:read` / `workflows:run` |
 | `/workflow-runs/:id` | Step progress, output, assertions, artifacts | `operations:read` |
 | `/operations` and `/operations/:id` | Distributed operations and bounded serial text | `operations:read` |
+| `/analytics` | Utilisation, availability, queue pressure, reliability, alerts, and fleet compatibility | `benches:read` + `operations:read` |
 | `/ci-sessions` and `/ci-sessions/:id` | CI lifecycle, selection, results, artifacts | `ci:sessions:read` |
 | `/agents` and `/agents/:id` | Presence, inventory, work, drain controls | `agents:read` |
 | `/artifacts` | Search and download authorized artifacts | `artifacts:read` |
@@ -78,6 +79,20 @@ These diagrams identify the information hierarchy; exact wrapping changes at nar
 ├ Visible bench inventory ────────────────┼ Active operations / leases   ┤
 └ Timeline: connect, disconnect, drain, reconciliation                  ┘
 ```
+
+### Operational analytics
+
+```text
+┌ Window ─ Utilisation ─ Availability ─ Queue depth/p95 ─ Reliability ┐
+├ Open alerts: severity · condition · resource ─ Acknowledge | Resolve ┤
+├ Bench │ utilisation │ availability │ success │ flaky/maintenance     │
+└ Agent fleet: version · protocol · compatibility · upgrade state      ┘
+```
+
+Utilisation is weighted by available seconds, not averaged across bench percentages. Agent-offline
+and maintenance time is excluded from available capacity. Empty samples display as unavailable,
+not as zero. The Agent fleet section appears only with `agents:read`; alert actions appear only
+with `benches:manage`. The API repeats those permission checks.
 
 ### User administration
 

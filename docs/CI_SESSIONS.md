@@ -43,7 +43,7 @@ labctl ci run \
   --workflow esp32-ci-test \
   --artifact firmware=build/firmware.bin \
   --input expected_version=0.6.0 \
-  --require capability=firmware \
+  --require capability=flash \
   --require capability=serial \
   --require capability=reset \
   --require capability=probe \
@@ -61,7 +61,7 @@ For debugging or custom orchestration, use the lower-level commands:
 ```console
 labctl ci session create \
   --external-run-id local-42 \
-  --require capability=firmware \
+  --require capability=flash \
   --label board=esp32 \
   --allow-simulated \
   --no-allow-physical
@@ -122,7 +122,7 @@ Content-Type: application/json
   "commit_sha": "abc123",
   "actor": "ci-bot",
   "bench_request": {
-    "required_capabilities": ["firmware", "serial", "reset", "probe"],
+    "required_capabilities": ["flash", "serial", "reset", "probe"],
     "required_labels": {"board": "esp32"},
     "preferred_labels": {"location": "simulation"},
     "required_agent_labels": {"environment": "development"},

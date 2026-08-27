@@ -11,7 +11,7 @@ hardware-test:
       --workflow esp32-ci-test
       --artifact firmware=build/firmware.bin
       --input expected_version=$CI_COMMIT_SHA
-      --require capability=firmware
+      --require capability=flash
       --require capability=serial
       --require capability=reset
       --require capability=probe

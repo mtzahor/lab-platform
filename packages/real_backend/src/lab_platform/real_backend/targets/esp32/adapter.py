@@ -88,7 +88,9 @@ class Esp32Target:
 
     @property
     def capabilities(self) -> set[str]:
-        return {"firmware", "serial", "probe", "reset"}
+        # ``flash`` is the stable Plugin API 1.0 capability. ``firmware`` is
+        # retained as the documented pre-1.0 workflow compatibility alias.
+        return {"flash", "firmware", "serial", "probe", "reset"}
 
     @property
     def serial_port(self) -> str | None:

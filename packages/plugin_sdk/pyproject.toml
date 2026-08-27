@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lab-platform-plugin-sdk"
+version = "1.0.0"
+description = "Stable public hardware-plugin SDK for Lab Platform."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = ["pydantic>=2.8,<3"]
+
+[project.scripts]
+lab-plugin = "lab_platform.plugin_sdk.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lab_platform.plugin_sdk*"]

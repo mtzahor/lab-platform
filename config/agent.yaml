@@ -1,3 +1,5 @@
+config_version: 1
+
 agent:
   name: local-agent
   host: 127.0.0.1
@@ -68,4 +70,4 @@ development:
 plugins:
   - power
   - serial
-  - firmware
+  - flash

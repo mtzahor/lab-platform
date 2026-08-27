@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import cast
 
 import lab_platform.plugins.manager as manager_module
 import pytest
@@ -110,4 +111,5 @@ def test_discovery_reads_package_entry_points(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(manager_module, "entry_points", fake_entry_points)
     discovered = PluginManager().discover()
 
-    assert discovered["discovered"]().metadata.name == "test"
+    factory = cast(Callable[[], TestPlugin], discovered["discovered"])
+    assert factory().metadata.name == "test"

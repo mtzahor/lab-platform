@@ -10,6 +10,8 @@ from typing import Any, cast
 from uuid import UUID
 
 from lab_platform.models import (
+    BENCH_MAINTENANCE_LABEL,
+    BENCH_MAINTENANCE_PREVIOUS_STATUS_LABEL,
     DISTRIBUTED_OPERATION_TRANSITIONS,
     REMOTE_COMMAND_TRANSITIONS,
     ActorContext,
@@ -1536,6 +1538,28 @@ def _upsert_bench(connection: sqlite3.Connection, bench: GlobalBenchRecord) -> N
             raise ValueError("Global bench ID is already bound to another identity")
         if bench.updated_at < existing.updated_at:
             raise ValueError("A stale bench update cannot replace newer inventory state")
+        incoming_labels = dict(bench.labels)
+        explicitly_cleared = incoming_labels.get(BENCH_MAINTENANCE_LABEL) == "false"
+        if explicitly_cleared:
+            incoming_labels.pop(BENCH_MAINTENANCE_LABEL, None)
+            incoming_labels.pop(BENCH_MAINTENANCE_PREVIOUS_STATUS_LABEL, None)
+            bench = bench.model_copy(update={"labels": incoming_labels})
+        elif existing.labels.get(BENCH_MAINTENANCE_LABEL) == "true":
+            incoming_labels[BENCH_MAINTENANCE_LABEL] = "true"
+            incoming_labels[BENCH_MAINTENANCE_PREVIOUS_STATUS_LABEL] = existing.labels.get(
+                BENCH_MAINTENANCE_PREVIOUS_STATUS_LABEL,
+                existing.status.value,
+            )
+            bench = bench.model_copy(
+                update={
+                    "labels": incoming_labels,
+                    "status": (
+                        GlobalBenchStatus.OFFLINE
+                        if bench.status is GlobalBenchStatus.OFFLINE
+                        else GlobalBenchStatus.DEGRADED
+                    ),
+                }
+            )
         connection.execute(
             "UPDATE global_benches SET name = ?, backend_id = ?, kind = ?, target_type = ?, "
             "status = ?, health = ?, capabilities_json = ?, labels_json = ?, "

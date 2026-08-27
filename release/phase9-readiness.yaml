@@ -1,0 +1,77 @@
+schema_version: 1
+phase: 9
+target_release: 1.0.0
+overall_status: NOT_READY
+last_reviewed: 2026-08-26
+
+# This file records evidence readiness, not a release announcement. `evidence_available`
+# means that an automated artifact exists and still needs an RC review. Physical and release
+# gates can only be closed by attaching results from the environment in which they ran.
+states:
+  pending: No qualifying implementation or evidence has been accepted.
+  partial: Some reusable implementation exists, but the criterion is not satisfied.
+  evidence_available: An automated evidence path exists; RC review is still required.
+  external_evidence_required: Code cannot close this gate without a physical or operational run.
+  passed: Qualifying evidence has been reviewed and accepted for this release candidate.
+
+criteria:
+  - {id: 1, requirement: "Plugin API 1.0 is defined", gate: automated, state: evidence_available, evidence: ["PLUGIN_API.md", "packages/plugin_sdk/src/lab_platform/plugin_sdk/constants.py"]}
+  - {id: 2, requirement: "Plugin compatibility rules are documented", gate: automated, state: evidence_available, evidence: ["PLUGIN_API.md", "docs/STABILITY_POLICY.md"]}
+  - {id: 3, requirement: "Plugin metadata is validated", gate: automated, state: evidence_available, evidence: ["packages/plugin_sdk/src/lab_platform/plugin_sdk/models.py"]}
+  - {id: 4, requirement: "Incompatible plugins fail safely", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_plugin_sdk.py", "tests/unit/test_phase9_plugin_integration.py"]}
+  - {id: 5, requirement: "Plugin lifecycle is stable", gate: automated, state: evidence_available, evidence: ["packages/plugins/src/lab_platform/plugins/manager.py", "tests/unit/test_phase9_plugin_integration.py"]}
+  - {id: 6, requirement: "Plugin contract tests exist", gate: automated, state: evidence_available, evidence: ["packages/plugin_sdk/src/lab_platform/plugin_sdk/testing.py"]}
+  - {id: 7, requirement: "Plugin development SDK exists", gate: automated, state: evidence_available, evidence: ["packages/plugin_sdk/pyproject.toml", "packages/plugin_sdk/src/lab_platform/plugin_sdk/__init__.py"]}
+  - {id: 8, requirement: "Plugin template generation works", gate: automated, state: evidence_available, evidence: ["packages/plugin_sdk/src/lab_platform/plugin_sdk/scaffold.py"]}
+  - {id: 9, requirement: "ESP32 uses the final plugin API", gate: automated, state: evidence_available, evidence: ["packages/plugins/src/lab_platform/plugins/esp32.py", "tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 10, requirement: "A second MCU family works through the same API", gate: mixed, state: external_evidence_required, evidence: ["tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 11, requirement: "An independent power-control resource works", gate: mixed, state: external_evidence_required, evidence: ["packages/plugins/src/lab_platform/plugins/power.py", "tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 12, requirement: "Benches compose multiple hardware resources", gate: automated, state: partial, evidence: ["tests/unit/test_phase9_resources.py", "tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 13, requirement: "Resource-level locking prevents conflicts", gate: automated, state: partial, evidence: ["tests/unit/test_phase9_resources.py"]}
+  - {id: 14, requirement: "OpenOCD works for at least one target", gate: mixed, state: external_evidence_required, evidence: ["tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 15, requirement: "J-Link integration is validated where tooling is available", gate: mixed, state: external_evidence_required, evidence: ["tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 16, requirement: "CAN capability is defined", gate: automated, state: evidence_available, evidence: ["packages/plugin_sdk/src/lab_platform/plugin_sdk/interfaces.py"]}
+  - {id: 17, requirement: "A CAN adapter path passes the official integration contract", gate: mixed, state: external_evidence_required, evidence: ["tests/unit/test_phase9_hardware_ecosystem.py"]}
+  - {id: 18, requirement: "Measurement and capture abstractions are stable", gate: automated, state: evidence_available, evidence: ["packages/plugin_sdk/src/lab_platform/plugin_sdk/interfaces.py", "PLUGIN_API.md"]}
+  - {id: 19, requirement: "Hardware compatibility metadata exists", gate: automated, state: evidence_available, evidence: ["compatibility/hardware.yaml"]}
+  - {id: 20, requirement: "Compatibility statuses are documented", gate: automated, state: evidence_available, evidence: ["docs/HARDWARE_COMPATIBILITY.md"]}
+  - {id: 21, requirement: "Plugin diagnostics work", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_plugin_integration.py"]}
+  - {id: 22, requirement: "Agent hardware diagnostics work", gate: automated, state: evidence_available, evidence: ["apps/agent/src/lab_platform/agent/cli.py", "tests/unit/test_phase9_plugin_integration.py"]}
+  - {id: 23, requirement: "Bench utilisation is recorded", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py", "tests/integration/test_phase9_operational_api.py"]}
+  - {id: 24, requirement: "Queue wait time is recorded", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py", "tests/integration/test_phase9_operational_api.py"]}
+  - {id: 25, requirement: "Workflow reliability metrics are recorded", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py", "tests/integration/test_phase9_operational_api.py"]}
+  - {id: 26, requirement: "Bench reliability metrics are recorded", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py", "tests/integration/test_phase9_operational_api.py"]}
+  - {id: 27, requirement: "Failure classification is implemented", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py"]}
+  - {id: 28, requirement: "Flaky-bench detection uses documented heuristics", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py", "docs/RELIABILITY_VALIDATION.md"]}
+  - {id: 29, requirement: "Maintenance state works", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py"]}
+  - {id: 30, requirement: "Alert objects work", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_operational_maturity.py"]}
+  - {id: 31, requirement: "Basic web alerts work", gate: automated, state: evidence_available, evidence: ["apps/web/src/pages/AnalyticsPage.tsx", "apps/web/src/pages/AnalyticsPage.test.tsx", "tests/integration/test_phase9_operational_api.py"]}
+  - {id: 32, requirement: "Prometheus-style metrics cover core production services", gate: automated, state: partial, evidence: ["tests/unit/test_phase9_operational_maturity.py", "apps/control_plane/src/lab_platform/control_plane/observability.py"]}
+  - {id: 33, requirement: "Distributed correlation IDs permit end-to-end debugging", gate: automated, state: partial}
+  - {id: 34, requirement: "Reference-scale load tests pass", gate: release, state: external_evidence_required, evidence: ["tests/reliability/phase9-reference.yaml"]}
+  - {id: 35, requirement: "Long-duration soak tests pass", gate: release, state: external_evidence_required, evidence: ["tests/reliability/phase9-reference.yaml"]}
+  - {id: 36, requirement: "Agent reconnect stress tests pass", gate: release, state: partial}
+  - {id: 37, requirement: "Plugin failure recovery works", gate: automated, state: partial, evidence: ["tests/unit/test_phase9_plugin_integration.py"]}
+  - {id: 38, requirement: "Artifact-store interruption recovery is tested", gate: release, state: external_evidence_required}
+  - {id: 39, requirement: "Database interruption recovery is tested", gate: release, state: external_evidence_required}
+  - {id: 40, requirement: "Backup and restore are validated at realistic scale", gate: release, state: external_evidence_required}
+  - {id: 41, requirement: "Agent fleet version compatibility is visible", gate: automated, state: evidence_available, evidence: ["apps/web/src/pages/AgentsPage.tsx", "apps/web/src/pages/AgentDetailPage.tsx"]}
+  - {id: 42, requirement: "REST API v1 stability rules are documented", gate: automated, state: evidence_available, evidence: ["docs/STABILITY_POLICY.md"]}
+  - {id: 43, requirement: "CLI stability rules are documented", gate: automated, state: evidence_available, evidence: ["docs/STABILITY_POLICY.md"]}
+  - {id: 44, requirement: "Workflow schema is versioned", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_schema_versioning.py"]}
+  - {id: 45, requirement: "Configuration schema is versioned", gate: automated, state: evidence_available, evidence: ["tests/unit/test_phase9_schema_versioning.py"]}
+  - {id: 46, requirement: "A deprecation policy exists", gate: automated, state: evidence_available, evidence: ["docs/STABILITY_POLICY.md"]}
+  - {id: 47, requirement: "An LTS policy exists", gate: automated, state: evidence_available, evidence: ["docs/SUPPORT_POLICY.md"]}
+  - {id: 48, requirement: "The 1.0 security review is completed", gate: release, state: external_evidence_required, evidence: ["docs/PHASE_9_READINESS.md"]}
+  - {id: 49, requirement: "A clean installation is tested", gate: release, state: partial}
+  - {id: 50, requirement: "Upgrade from the final 0.9 release is tested", gate: release, state: external_evidence_required}
+  - {id: 51, requirement: "The production-readiness checklist passes", gate: release, state: external_evidence_required}
+  - {id: 52, requirement: "SimLab remains fully functional", gate: automated, state: evidence_available, evidence: ["tests/end_to_end/test_phase5_distributed_scale.py"]}
+  - {id: 53, requirement: "The physical ESP32 regression workflow passes", gate: physical, state: external_evidence_required}
+  - {id: 54, requirement: "A second physical hardware integration is validated", gate: physical, state: external_evidence_required}
+  - {id: 55, requirement: "The OSS build is independent of commercial modules", gate: automated, state: evidence_available, evidence: ["scripts/release/check_oss_boundary.py"]}
+  - {id: 56, requirement: "User documentation is product-oriented", gate: review, state: partial, evidence: ["docs/index.md"]}
+  - {id: 57, requirement: "Plugin-author documentation is complete", gate: review, state: evidence_available, evidence: ["PLUGIN_API.md", "docs/PLUGIN_DEVELOPMENT.md"]}
+  - {id: 58, requirement: "The final end-to-end demonstration succeeds", gate: release, state: external_evidence_required}
+  - {id: 59, requirement: "Release-candidate testing succeeds", gate: release, state: external_evidence_required}
+  - {id: 60, requirement: "1.0.0 is released only after all gates pass", gate: release, state: pending}

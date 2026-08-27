@@ -87,6 +87,7 @@ describe("core workflow accessibility acceptance", () => {
     expect(within(sidebar).getByRole("navigation")).toBeVisible();
     expect(screen.getByRole("link", { name: "Benches" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Workflows" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Analytics" })).toBeVisible();
     expect(screen.queryByRole("link", { name: "Audit" })).not.toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
     expect(screen.getByRole("heading", { level: 1, name: "Operational overview" })).toBeVisible();
@@ -97,6 +98,29 @@ describe("core workflow accessibility acceptance", () => {
     await userEvent.click(account);
     expect(account).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
+  });
+
+  it("hides Analytics unless the role can read both benches and operations", () => {
+    vi.mocked(useAuth).mockReturnValue({
+      ...baseAuth,
+      permissions: new Set(["benches:read"]),
+      canAny: vi.fn((...required: string[]) => required.includes("benches:read")),
+    });
+
+    render(
+      <ToastProvider>
+        <MemoryRouter initialEntries={["/"]}>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route index element={<h1>Operational overview</h1>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+
+    expect(screen.getByRole("link", { name: "Benches" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Analytics" })).not.toBeInTheDocument();
   });
 
   it("gives the local login workflow programmatic labels and announced validation errors", async () => {

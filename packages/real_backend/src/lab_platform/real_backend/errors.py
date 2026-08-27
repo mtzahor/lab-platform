@@ -93,3 +93,59 @@ class ProcessExecutableNotFoundError(RuntimeError):
 
 class ProcessExecutionTimeoutError(RuntimeError):
     pass
+
+
+class ExternalToolNotAvailableError(HardwareError):
+    code = "EXTERNAL_TOOL_NOT_AVAILABLE"
+
+
+class ExternalToolCommandFailedError(HardwareError):
+    code = "EXTERNAL_TOOL_COMMAND_FAILED"
+
+
+class OpenOcdNotAvailableError(ExternalToolNotAvailableError):
+    code = "OPENOCD_NOT_AVAILABLE"
+
+
+class OpenOcdCommandFailedError(ExternalToolCommandFailedError):
+    code = "OPENOCD_COMMAND_FAILED"
+
+
+class OpenOcdTimeoutError(HardwareError):
+    code = "OPENOCD_TIMEOUT"
+
+
+class JLinkNotAvailableError(ExternalToolNotAvailableError):
+    code = "JLINK_NOT_AVAILABLE"
+
+
+class JLinkCommandFailedError(ExternalToolCommandFailedError):
+    code = "JLINK_COMMAND_FAILED"
+
+
+class JLinkTimeoutError(HardwareError):
+    code = "JLINK_TIMEOUT"
+
+
+class PicotoolNotAvailableError(ExternalToolNotAvailableError):
+    code = "PICOTOOL_NOT_AVAILABLE"
+
+
+class PicotoolCommandFailedError(ExternalToolCommandFailedError):
+    code = "PICOTOOL_COMMAND_FAILED"
+
+
+class PicotoolTimeoutError(HardwareError):
+    code = "PICOTOOL_TIMEOUT"
+
+
+class NordicToolNotAvailableError(ExternalToolNotAvailableError):
+    code = "NORDIC_TOOL_NOT_AVAILABLE"
+
+
+class NordicToolCommandFailedError(ExternalToolCommandFailedError):
+    code = "NORDIC_TOOL_COMMAND_FAILED"
+
+
+class NordicToolTimeoutError(HardwareError):
+    code = "NORDIC_TOOL_TIMEOUT"
