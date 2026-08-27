@@ -39,7 +39,7 @@ pipeline {
                       --workflow esp32-ci-test \
                       --artifact "firmware=build/firmware.bin" \
                       --input "expected_version=${GIT_COMMIT}" \
-                      --require capability=firmware \
+                      --require capability=flash \
                       --require capability=serial \
                       --require capability=reset \
                       --require capability=probe \

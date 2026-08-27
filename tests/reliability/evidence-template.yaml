@@ -1,0 +1,92 @@
+schema_version: 1
+kind: phase9-release-candidate-evidence
+status: NOT_RUN
+
+release_candidate:
+  version: null
+  commit: null
+  image_digests: []
+  started_at: null
+  finished_at: null
+  runner: null
+  reviewer: null
+
+environment:
+  deployment_shape: single_control_plane_postgresql
+  control_plane: {operating_system: null, architecture: null, cpu: null, memory_bytes: null}
+  database: {product: postgresql, version: null, storage_bytes: null}
+  artifact_store: {type: null, storage_bytes: null}
+  load_generator: {operating_system: null, architecture: null, cpu: null, memory_bytes: null}
+  network: {description: null}
+
+load:
+  status: NOT_RUN
+  observed:
+    agents: null
+    benches_and_resources: null
+    queued_ci_sessions: null
+    concurrent_workflows: null
+    concurrent_live_streams: null
+    historical_events: null
+    common_api_p95_ms: null
+    operation_progress_p95_ms: null
+    agent_status_propagation_p95_ms: null
+    five_xx_count: null
+    unsafe_duplicate_dispatch_count: null
+    leaked_lock_count: null
+  artifact_paths: []
+
+soak:
+  status: NOT_RUN
+  duration_hours: null
+  predefined_maximum_rss_growth_bytes: null
+  observed_rss_growth_bytes: null
+  leaked_lock_count: null
+  stale_active_reservation_count: null
+  duplicate_terminal_event_count: null
+  stuck_operation_count: null
+  maximum_queue_depth: null
+  post_soak_workflow_id: null
+  artifact_paths: []
+
+recovery:
+  status: NOT_RUN
+  scenarios:
+    agent_restart: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    control_plane_restart: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    postgresql_interruption: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    artifact_store_interruption: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    websocket_delay_and_duplicate: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    plugin_failure: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    hardware_disappearance: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+    failed_artifact_upload: {status: NOT_RUN, duration_seconds: null, artifact_paths: []}
+
+backup_restore:
+  status: NOT_RUN
+  database_bytes: null
+  artifact_bytes: null
+  backup_duration_seconds: null
+  restore_duration_seconds: null
+  reconnect_duration_seconds: null
+  measured_rpo_seconds: null
+  measured_rto_seconds: null
+  entity_counts_before: {}
+  entity_counts_after: {}
+  artifact_manifest_sha256_before: null
+  artifact_manifest_sha256_after: null
+  limitations: []
+  artifact_paths: []
+
+physical:
+  status: NOT_RUN
+  esp32: {status: NOT_RUN, compatibility_row: esp32, artifact_paths: []}
+  second_mcu: {status: NOT_RUN, compatibility_row: stm32-openocd, artifact_paths: []}
+  accessory: {status: NOT_RUN, compatibility_row: usb-relay, artifact_paths: []}
+  composed_bench: {status: NOT_RUN, artifact_paths: []}
+
+review:
+  assertions_reviewed: false
+  environment_reviewed: false
+  redaction_reviewed: false
+  evidence_retention_until: null
+  notes: []

@@ -55,7 +55,7 @@ labctl bench list \
   --output json
 ```
 
-Inspect each candidate's capabilities for `firmware`, `serial`, `reset`, and `probe`. Both backend
+Inspect each candidate's capabilities for `flash`, `serial`, `reset`, and `probe`. Both backend
 kinds are allowed by default; make sure the corresponding `--no-allow-*` flag has not excluded the
 desired kind. An explicit bench still must be online and satisfy the workflow's declared
 requirements. Label comparisons are exact.

@@ -196,7 +196,14 @@ def test_simlab_mapping_and_backend_contract(tmp_path: Path) -> None:
         await backend.start()
         benches = await backend.list_benches()
         assert [bench.id for bench in benches] == ["bench-01", "bench-02", "bench-03"]
-        assert benches[0].capabilities == ["power", "serial", "firmware", "probe", "reset"]
+        assert benches[0].capabilities == [
+            "power",
+            "serial",
+            "firmware",
+            "flash",
+            "probe",
+            "reset",
+        ]
         assert (await backend.get_bench("bench-02")).powered is False
         with pytest.raises(BenchNotFoundError):
             await backend.get_bench("missing")

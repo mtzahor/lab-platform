@@ -20,7 +20,7 @@ inputs:
   required-capabilities:
     description: Comma-separated capability names.
     required: false
-    default: firmware,serial,reset,probe
+    default: flash,serial,reset,probe
   required-labels:
     description: Comma-separated key=value bench labels.
     required: false

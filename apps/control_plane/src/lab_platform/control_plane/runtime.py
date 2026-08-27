@@ -31,10 +31,12 @@ from lab_platform.control_plane.gateway import (
 from lab_platform.control_plane.observability import OperationalMetrics
 from lab_platform.control_plane.oidc_provider import HttpOidcProvider
 from lab_platform.control_plane.operational_access import OperationalAccessService
+from lab_platform.control_plane.operational_api import reconcile_operational_alerts
 from lab_platform.control_plane.operational_events import (
     RetentionOperationalEventSink,
     StructuredOperationalEventSink,
 )
+from lab_platform.control_plane.operational_state import EventBackedOperationalState
 from lab_platform.control_plane.reservation_queue import CentralReservationQueueService
 from lab_platform.control_plane.reservations import (
     CoordinatedReconciliationHandler,
@@ -148,6 +150,7 @@ _LOGGER = logging.getLogger("lab-platform.control-plane")
 
 _IDENTITY_MAINTENANCE_INTERVAL = timedelta(hours=1)
 _IDENTITY_MAINTENANCE_BATCH_SIZE = 1_000
+_OPERATIONAL_ANALYTICS_INTERVAL = timedelta(minutes=1)
 
 
 class ControlPlaneRuntime:
@@ -167,6 +170,7 @@ class ControlPlaneRuntime:
         self._storage_unavailable_reported = False
         self.database = create_control_plane_database(config.database.url)
         self.audit_events = SQLiteEventRepository(self.database)
+        self.operational_state = EventBackedOperationalState(self.audit_events)
         compatibility = config.compatibility.agents
         minimum_agent = compatibility.minimum_supported_version or (
             "0.8.0" if config.profile == "production" else "0.6.0-alpha"
@@ -484,6 +488,7 @@ class ControlPlaneRuntime:
         self._monitor_task: asyncio.Task[None] | None = None
         self._next_identity_maintenance_at: datetime | None = None
         self._next_artifact_retention_at: datetime | None = None
+        self._next_operational_analytics_at: datetime | None = None
         self._active_sse_streams = 0
         self._sse_stream_lock = asyncio.Lock()
         self._started = False
@@ -558,6 +563,7 @@ class ControlPlaneRuntime:
             now = datetime.now(UTC)
             self._next_identity_maintenance_at = now
             self._next_artifact_retention_at = now
+            self._next_operational_analytics_at = now
             self._started = True
             self._monitor_task = asyncio.create_task(
                 self._monitor_loop(),
@@ -570,6 +576,7 @@ class ControlPlaneRuntime:
                 self._monitor_task = None
             self._next_identity_maintenance_at = None
             self._next_artifact_retention_at = None
+            self._next_operational_analytics_at = None
             self.database.close()
             self._started = False
             raise
@@ -584,6 +591,7 @@ class ControlPlaneRuntime:
         await self.hub.close_all()
         self._next_identity_maintenance_at = None
         self._next_artifact_retention_at = None
+        self._next_operational_analytics_at = None
         self.database.close()
 
     async def readiness(self) -> dict[str, object]:
@@ -1381,6 +1389,14 @@ class ControlPlaneRuntime:
                 )
         await self._process_artifact_retention(now)
         await self._process_identity_maintenance(now)
+        await self._process_operational_analytics(now)
+
+    async def _process_operational_analytics(self, now: datetime) -> None:
+        due_at = self._next_operational_analytics_at
+        if due_at is None or now < due_at:
+            return
+        self._next_operational_analytics_at = now + _OPERATIONAL_ANALYTICS_INTERVAL
+        await reconcile_operational_alerts(self, generated_at=now)
 
     async def _process_artifact_retention(self, now: datetime) -> None:
         retention = self.config.retention.artifacts

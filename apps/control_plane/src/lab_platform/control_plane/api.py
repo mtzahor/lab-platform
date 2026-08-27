@@ -39,6 +39,7 @@ from lab_platform.control_plane.identity_api import (
     extract_bearer_or_cookie_token,
     is_phase6_identity_token,
 )
+from lab_platform.control_plane.operational_api import create_operational_router
 from lab_platform.control_plane.rate_limits import (
     InMemoryRateLimiter,
     RateLimitDecision,
@@ -672,6 +673,22 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         ApiTokenScope.CI_SESSIONS,
         phase6_permissions=(),
     )
+    operational_read = _require_scopes(
+        runtime,
+        ApiTokenScope.BENCHES_READ,
+        ApiTokenScope.OPERATIONS_READ,
+    )
+    operational_alert_manage = _require_scopes(
+        runtime,
+        ApiTokenScope.AGENTS_ADMIN,
+        phase6_permissions=("benches:manage",),
+    )
+    operational_maintenance_manage = _require_scopes(
+        runtime,
+        ApiTokenScope.AGENTS_ADMIN,
+        phase6_permissions=("benches:manage",),
+        phase6_resource="bench",
+    )
 
     # Dashboard aggregation and live-update routes are registered before the
     # path-style bench detail route so `/benches/{id}/timeline` remains
@@ -682,6 +699,14 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             collection_auth=benches_read,
             bench_auth=bench_read,
             operation_auth=operation_read,
+        )
+    )
+    app.include_router(
+        create_operational_router(
+            runtime,
+            read_auth=operational_read,
+            alert_auth=operational_alert_manage,
+            maintenance_auth=operational_maintenance_manage,
         )
     )
 
@@ -1341,7 +1366,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         bench = await _action_bench(
             runtime,
             bench_id,
-            capability="firmware",
+            capability="flash",
             organisation_id=organisation_id,
         )
         owner, owner_principal = _reservation_identity(token, owner)
@@ -2573,13 +2598,20 @@ async def _action_bench(
     )
     if bench is None:
         raise BenchNotFoundError("Bench does not exist.", bench_id=bench_id)
-    if capability not in bench.capabilities:
+    required_capability = _canonical_capability(capability)
+    available_capabilities = {_canonical_capability(item) for item in bench.capabilities}
+    if required_capability not in available_capabilities:
         raise CapabilityNotSupportedError(
             "Bench does not support the requested action.",
             bench_id=bench.id,
-            required_capability=capability,
+            required_capability=required_capability,
         )
     return bench
+
+
+def _canonical_capability(value: str) -> str:
+    normalized = value.strip().casefold()
+    return "flash" if normalized == "firmware" else normalized
 
 
 def _ci_session_is_owned_by(session: CiSession, principal: Principal) -> bool:

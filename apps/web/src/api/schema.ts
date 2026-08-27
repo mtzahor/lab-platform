@@ -814,6 +814,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/operational/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Alerts */
+        get: operations["list_alerts_api_v1_operational_alerts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operational/alerts/{alert_id}/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge Alert */
+        post: operations["acknowledge_alert_api_v1_operational_alerts__alert_id__acknowledge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operational/alerts/{alert_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resolve Alert */
+        post: operations["resolve_alert_api_v1_operational_alerts__alert_id__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operational/analytics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Analytics */
+        get: operations["analytics_api_v1_operational_analytics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operational/benches/{bench_id}/maintenance/end": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End Maintenance */
+        post: operations["end_maintenance_api_v1_operational_benches__bench_id__maintenance_end_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operational/benches/{bench_id}/maintenance/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Maintenance */
+        post: operations["start_maintenance_api_v1_operational_benches__bench_id__maintenance_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/operations": {
         parameters: {
             query?: never;
@@ -1731,6 +1833,55 @@ export interface components {
          * @enum {string}
          */
         AgentTimelineSeverity: "INFO" | "WARNING" | "ERROR";
+        /** Alert */
+        Alert: {
+            /** Acknowledged At */
+            acknowledged_at?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at?: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id?: string;
+            /** Message */
+            message: string;
+            /** Resolved At */
+            resolved_at?: string | null;
+            /** Resource Id */
+            resource_id: string;
+            /** Resource Type */
+            resource_type: string;
+            severity: components["schemas"]["AlertSeverity"];
+            /** @default OPEN */
+            status: components["schemas"]["AlertStatus"];
+            type: components["schemas"]["AlertType"];
+        };
+        /**
+         * AlertSeverity
+         * @enum {string}
+         */
+        AlertSeverity: "INFO" | "WARNING" | "CRITICAL";
+        /**
+         * AlertStatus
+         * @enum {string}
+         */
+        AlertStatus: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+        /**
+         * AlertType
+         * @enum {string}
+         */
+        AlertType: "AGENT_OFFLINE" | "BENCH_DEGRADED" | "REPEATED_FAILURES" | "STORAGE_USAGE" | "BACKUP_FAILURE" | "DATABASE_ISSUE" | "HIGH_QUEUE_WAIT_TIME" | "PLUGIN_UNHEALTHY" | "INCOMPATIBLE_VERSION";
+        /** AlertsPage */
+        AlertsPage: {
+            /** Items */
+            items: components["schemas"]["Alert"][];
+            /** Total */
+            total: number;
+        };
         /** ApiTokenRequest */
         ApiTokenRequest: {
             /** Expires At */
@@ -1833,6 +1984,48 @@ export interface components {
             /** Owner */
             owner?: string | null;
         };
+        /** BenchMaintenanceState */
+        BenchMaintenanceState: {
+            /** Bench Id */
+            bench_id: string;
+            /**
+             * Manually Set
+             * @default false
+             */
+            manually_set: boolean;
+            /** Reason */
+            reason?: string | null;
+            /** @default HEALTHY */
+            status: components["schemas"]["BenchMaintenanceStatus"];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at?: string;
+        };
+        /**
+         * BenchMaintenanceStatus
+         * @enum {string}
+         */
+        BenchMaintenanceStatus: "HEALTHY" | "DEGRADED" | "MAINTENANCE_RECOMMENDED" | "MAINTENANCE" | "OFFLINE";
+        /** BenchOperationalAnalytics */
+        BenchOperationalAnalytics: {
+            /** Availability Ratio */
+            availability_ratio?: number | null;
+            /** Bench Id */
+            bench_id: string;
+            flaky: components["schemas"]["FlakyBenchAssessment"];
+            maintenance: components["schemas"]["BenchMaintenanceState"];
+            /** Name */
+            name: string;
+            recommendation?: components["schemas"]["MaintenanceRecommendation"] | null;
+            reliability: components["schemas"]["ReliabilityMetrics"];
+            /** Reservation Utilisation Ratio */
+            reservation_utilisation_ratio?: number | null;
+            /** Target Type */
+            target_type?: string | null;
+            utilisation: components["schemas"]["BenchUtilisation"];
+        };
         /** BenchRequest */
         BenchRequest: {
             /**
@@ -1885,6 +2078,19 @@ export interface components {
             generated_at: string;
             /** Items */
             items: components["schemas"]["TimelineEvent"][];
+        };
+        /** BenchUtilisation */
+        BenchUtilisation: {
+            /** Available Seconds */
+            available_seconds: number;
+            /** Observation Seconds */
+            observation_seconds: number;
+            /** Unavailable Seconds */
+            unavailable_seconds: number;
+            /** Utilisation Ratio */
+            utilisation_ratio?: number | null;
+            /** Utilised Seconds */
+            utilised_seconds: number;
         };
         /**
          * BenchVisibility
@@ -2105,6 +2311,33 @@ export interface components {
             /** Name */
             name: string;
         };
+        /**
+         * FailureCategory
+         * @enum {string}
+         */
+        FailureCategory: "USER_ERROR" | "WORKFLOW_ERROR" | "FIRMWARE_ERROR" | "TARGET_ERROR" | "DEVICE_DISCONNECTED" | "FLASH_ERROR" | "SERIAL_ERROR" | "NETWORK_ERROR" | "AGENT_ERROR" | "PLUGIN_ERROR" | "INFRASTRUCTURE_ERROR" | "UNKNOWN";
+        /** FlakyBenchAssessment */
+        FlakyBenchAssessment: {
+            /** Bench Id */
+            bench_id: string;
+            /** Distinct Contexts */
+            distinct_contexts: number;
+            /** Infrastructure Failure Rate */
+            infrastructure_failure_rate?: number | null;
+            /** Infrastructure Failures */
+            infrastructure_failures: number;
+            /** Potentially Flaky */
+            potentially_flaky: boolean;
+            /** Primary Failure */
+            primary_failure?: string | null;
+            /**
+             * Reasons
+             * @default []
+             */
+            reasons: string[];
+            /** Sample Size */
+            sample_size: number;
+        };
         /** FlashWorkflowStep */
         FlashWorkflowStep: {
             /**
@@ -2220,6 +2453,24 @@ export interface components {
             /** Username */
             username: string;
         };
+        /** MaintenanceRecommendation */
+        MaintenanceRecommendation: {
+            /** Code */
+            code: string;
+            failure_category: components["schemas"]["FailureCategory"];
+            /**
+             * Heuristic
+             * @default true
+             */
+            heuristic: boolean;
+            /** Message */
+            message: string;
+        };
+        /** MaintenanceStartRequest */
+        MaintenanceStartRequest: {
+            /** Reason */
+            reason: string;
+        };
         /** OperationCancelRequest */
         OperationCancelRequest: {
             /** Owner */
@@ -2269,6 +2520,38 @@ export interface components {
             /** Started At */
             started_at?: string | null;
             status: components["schemas"]["DistributedOperationStatus"];
+        };
+        /** OperationalAnalyticsSnapshot */
+        OperationalAnalyticsSnapshot: {
+            /** Benches */
+            benches: components["schemas"]["BenchOperationalAnalytics"][];
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            queue: components["schemas"]["QueueMetrics"];
+            reliability: components["schemas"]["ReliabilityMetrics"];
+            /** Semantics */
+            semantics: {
+                [key: string]: string;
+            };
+            window: components["schemas"]["OperationalInterval"];
+            /** Workflows */
+            workflows: components["schemas"]["WorkflowOperationalAnalytics"][];
+        };
+        /** OperationalInterval */
+        OperationalInterval: {
+            /**
+             * Ended At
+             * Format: date-time
+             */
+            ended_at: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
         };
         /** Organisation */
         Organisation: {
@@ -2466,6 +2749,23 @@ export interface components {
          * @enum {string}
          */
         QueueEntryStatus: "waiting" | "promoted" | "cancelled" | "expired";
+        /** QueueMetrics */
+        QueueMetrics: {
+            /** Abandoned */
+            abandoned: number;
+            /** Abandonment Rate */
+            abandonment_rate?: number | null;
+            /** Average Wait Seconds */
+            average_wait_seconds?: number | null;
+            /** Median Wait Seconds */
+            median_wait_seconds?: number | null;
+            /** P95 Wait Seconds */
+            p95_wait_seconds?: number | null;
+            /** Promoted Samples */
+            promoted_samples: number;
+            /** Queue Depth */
+            queue_depth: number;
+        };
         /** QueuePage */
         QueuePage: {
             /** Items */
@@ -2494,6 +2794,23 @@ export interface components {
             timeout_seconds: number | string;
             /** Until Pattern */
             until_pattern?: string | null;
+        };
+        /** ReliabilityMetrics */
+        ReliabilityMetrics: {
+            /** Failed */
+            failed: number;
+            /** Failure Counts */
+            failure_counts?: {
+                [key: string]: number;
+            };
+            /** Infrastructure Failures */
+            infrastructure_failures: number;
+            /** Operations */
+            operations: number;
+            /** Succeeded */
+            succeeded: number;
+            /** Success Rate */
+            success_rate?: number | null;
         };
         /** ReservationActionPermissions */
         ReservationActionPermissions: {
@@ -2954,6 +3271,14 @@ export interface components {
             steps: (components["schemas"]["FlashWorkflowStep"] | components["schemas"]["ResetWorkflowStep"] | components["schemas"]["ReadSerialWorkflowStep"] | components["schemas"]["AssertSerialWorkflowStep"] | components["schemas"]["WaitWorkflowStep"] | components["schemas"]["ProbeWorkflowStep"])[];
             /** Version */
             version: number;
+        };
+        /** WorkflowOperationalAnalytics */
+        WorkflowOperationalAnalytics: {
+            /** Benches Observed */
+            benches_observed: number;
+            reliability: components["schemas"]["ReliabilityMetrics"];
+            /** Workflow Name */
+            workflow_name: string;
         };
         /** WorkflowRequirements */
         WorkflowRequirements: {
@@ -4851,6 +5176,196 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_alerts_api_v1_operational_alerts_get: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["AlertStatus"] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertsPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    acknowledge_alert_api_v1_operational_alerts__alert_id__acknowledge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Alert"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_alert_api_v1_operational_alerts__alert_id__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Alert"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    analytics_api_v1_operational_analytics_get: {
+        parameters: {
+            query?: {
+                window_hours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationalAnalyticsSnapshot"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    end_maintenance_api_v1_operational_benches__bench_id__maintenance_end_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bench_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BenchMaintenanceState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_maintenance_api_v1_operational_benches__bench_id__maintenance_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bench_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MaintenanceStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BenchMaintenanceState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

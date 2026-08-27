@@ -1,0 +1,88 @@
+schema_version: 1
+name: phase9-reference-reliability
+status: EVIDENCE_NOT_RUN
+evidence_template: tests/reliability/evidence-template.yaml
+runbook: docs/RELIABILITY_VALIDATION.md
+
+# Targets are engineering acceptance targets, not commercial SLAs. The reduced initial
+# reference scale reflects what the existing single-control-plane architecture can exercise
+# deterministically in ordinary CI. Larger profiles may be attached as supplemental evidence.
+load:
+  agents: 10
+  benches_and_resources: 1000
+  queued_ci_sessions: 500
+  concurrent_workflows: 100
+  concurrent_live_streams: 20
+  historical_events: 10000
+  common_api_p95_ms: 500
+  operation_progress_p95_ms: 2000
+  agent_status_propagation_p95_ms: 30000
+  automated_evidence:
+    - tests/end_to_end/test_phase5_distributed_scale.py
+    - apps/web/src/pages/Scale.acceptance.test.tsx
+  probe_command:
+    - python
+    - scripts/reliability/phase9_http_probe.py
+    - --base-url
+    - http://127.0.0.1:8443
+    - --requests
+    - "10000"
+    - --concurrency
+    - "20"
+    - --profile
+    - reference
+    - --output
+    - evidence/phase9-http-load.json
+
+soak:
+  minimum_duration_hours: 24
+  extended_durations_hours: [72, 168]
+  scenarios:
+    - reservations
+    - workflows
+    - agent_reconnects
+    - artifact_creation_and_cleanup
+    - queue_promotion_and_abandonment
+    - injected_failures
+  pass_conditions:
+    - no_unbounded_memory_growth
+    - no_resource_or_operation_lock_leaks
+    - no_stale_active_reservations
+    - no_duplicate_terminal_events
+    - no_stuck_operations_or_unbounded_queues
+  latest_evidence: null
+
+recovery:
+  scenarios:
+    - agent_restart
+    - control_plane_restart
+    - postgresql_interruption
+    - artifact_store_interruption
+    - websocket_disconnect_and_duplicate_messages
+    - plugin_failure
+    - hardware_disappearance
+    - failed_artifact_upload
+    - full_backup_destroy_restore_reconnect
+  required_assertions:
+    - no_duplicate_unsafe_hardware_operation
+    - resource_locks_recover
+    - reservation_and_operation_state_reconciles
+    - history_and_artifacts_survive_within_recorded_rpo
+    - new_simlab_workflow_succeeds_after_recovery
+  latest_evidence: null
+
+acceptance:
+  # These are engineering targets for the documented reference environment, not an SLA.
+  common_api_p95_ms: 500
+  bench_inventory_entries: 1000
+  operation_progress_p95_ms: 2000
+  agent_status_propagation_p95_ms: 30000
+  reservation_conflict_result: deterministic_single_winner
+  minimum_soak_duration_hours: 24
+  release_gate_requires:
+    - preserved_environment_manifest
+    - raw_metrics_and_logs
+    - correlation_ids
+    - predeclared_memory_growth_limit
+    - post_load_and_post_recovery_workflow
+    - runner_and_reviewer_signoff

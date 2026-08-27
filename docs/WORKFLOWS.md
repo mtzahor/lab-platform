@@ -9,7 +9,7 @@ version: 1
 description: Flash and verify an ESP32 image
 
 requirements:
-  capabilities: [firmware, serial, reset]
+  capabilities: [flash, serial, reset]
 
 steps:
   - action: flash

@@ -940,7 +940,10 @@ class DistributedWorkflowCoordinator:
             )
         agents_by_id = {agent.id: agent for agent in agents}
         required_capabilities = {
-            *(capability.casefold() for capability in definition.requirements.capabilities),
+            *(
+                _normalise_capability(capability)
+                for capability in definition.requirements.capabilities
+            ),
             *request.required_capabilities,
         }
         required_bench_labels = dict(definition.requirements.labels)
@@ -965,7 +968,7 @@ class DistributedWorkflowCoordinator:
                 continue
             if request.kind is not None and bench.kind is not request.kind:
                 continue
-            available = {capability.casefold() for capability in bench.capabilities}
+            available = {_normalise_capability(capability) for capability in bench.capabilities}
             if not required_capabilities.issubset(available):
                 continue
             if not _labels_match(bench.labels, required_bench_labels):
@@ -1209,8 +1212,13 @@ def _normalise_required_capabilities(values: Collection[str]) -> tuple[str, ...]
     for value in values:
         if not isinstance(value, str) or not value.strip():
             raise WorkflowInvalidError("Required capability names must be non-empty strings.")
-        normalised.add(value.strip().casefold())
+        normalised.add(_normalise_capability(value))
     return tuple(sorted(normalised))
+
+
+def _normalise_capability(value: str) -> str:
+    normalized = value.strip().casefold()
+    return "flash" if normalized == "firmware" else normalized
 
 
 def _authenticated_request_context(

@@ -1,5 +1,7 @@
 # Production-oriented control-plane example. Supply the real DSN and TLS files through your
 # deployment secret/configuration system; never commit database passwords or private keys.
+config_version: 1
+
 control_plane:
   host: 0.0.0.0
   port: 8443

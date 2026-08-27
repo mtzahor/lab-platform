@@ -47,7 +47,7 @@ jobs:
           workflow: esp32-ci-test
           firmware: build/firmware.bin
           expected-version: ${{ github.sha }}
-          required-capabilities: firmware,serial,reset,probe
+          required-capabilities: flash,serial,reset,probe
           required-labels: board=esp32,location=simulation
           allow-simulated: "true"
           allow-physical: "false"
@@ -79,7 +79,7 @@ The repository includes a dogfooding example at
 | `workflow` | yes | — | Registered workflow name |
 | `firmware` | yes | — | Firmware file uploaded as the `firmware` artifact input |
 | `expected-version` | yes | — | Expected target version string |
-| `required-capabilities` | no | `firmware,serial,reset,probe` | Comma-separated capability filter |
+| `required-capabilities` | no | `flash,serial,reset,probe` | Comma-separated capability filter |
 | `required-labels` | no | `board=esp32` | Comma-separated exact label filters |
 | `allow-simulated` | no | `true` | Permit SimLab candidates |
 | `allow-physical` | no | `false` | Permit real-backend candidates only when explicitly enabled |
@@ -117,7 +117,7 @@ For required PR validation, avoid consuming or depending on physical hardware:
     workflow: esp32-ci-test
     firmware: build/firmware.bin
     expected-version: ${{ github.sha }}
-    required-capabilities: firmware,serial,reset,probe
+    required-capabilities: flash,serial,reset,probe
     required-labels: board=esp32,location=simulation
     allow-simulated: "true"
     allow-physical: "false"
@@ -142,7 +142,7 @@ physical-esp32:
         workflow: esp32-ci-test
         firmware: build/firmware.bin
         expected-version: ${{ github.sha }}
-        required-capabilities: firmware,serial,reset,probe
+        required-capabilities: flash,serial,reset,probe
         required-labels: board=esp32,location=local
         allow-simulated: "false"
         allow-physical: "true"

@@ -1,4 +1,5 @@
 # NOT FOR PRODUCTION. This profile deliberately permits plaintext loopback Agent transport.
+config_version: 1
 profile: development
 
 control_plane:

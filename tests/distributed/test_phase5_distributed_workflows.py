@@ -157,7 +157,9 @@ def _artifact_workflow() -> WorkflowDefinition:
                 "enabled": {"type": "boolean", "default": True},
             },
             "requirements": {
-                "capabilities": ["firmware"],
+                # Stable workflows use ``flash`` while the legacy Agent fixture below
+                # still reports ``firmware``; selection must bridge that 1.0 alias.
+                "capabilities": ["flash"],
                 "labels": {"board": "esp32"},
             },
             "steps": [

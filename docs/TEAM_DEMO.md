@@ -17,7 +17,7 @@ optional physical `esp32-devkit-01`.
 
 ```bash
 labctl bench list
-labctl bench list --capability firmware
+labctl bench list --capability flash
 labctl bench list --label location=simulation
 ```
 

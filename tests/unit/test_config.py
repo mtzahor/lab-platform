@@ -24,7 +24,7 @@ def test_missing_files_use_defaults(tmp_path: Path) -> None:
     assert not config.control_plane.enabled
     assert config.identity.agent_id is None
     assert config.simlab.benches == 5
-    assert config.plugins == ["power", "serial", "firmware"]
+    assert config.plugins == ["power", "serial", "flash"]
     assert config.ci.default_reservation_minutes == 30
     assert config.ci.heartbeat_timeout_seconds == 120
     assert config.artifacts.max_upload_size_mb == 100

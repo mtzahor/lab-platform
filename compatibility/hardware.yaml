@@ -1,0 +1,135 @@
+schema_version: 1
+matrix_version: 1
+last_reviewed: 2026-08-26
+
+status_definitions:
+  VERIFIED: Repeated physical or automated hardware evidence is attached for the exact listed setup and remains within its review interval.
+  SUPPORTED: Maintained and expected to work through a reproducible contract, but not continuously exercised in the reference lab.
+  EXPERIMENTAL: Integration or its public behavior is incomplete, new, or awaiting qualifying evidence.
+  COMMUNITY: Maintained outside the official reference set by the named maintainer.
+  DEPRECATED: Available only during a documented removal window with a named replacement.
+
+# A software contract and physical verification are independent. No entry is VERIFIED until a
+# durable Phase 9 device result is linked in latest_physical_evidence.
+plugins:
+  esp32:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: final_plugin_api_adapter_implemented_physical_revalidation_pending
+    external_dependencies: [esptool, pyserial]
+    supported_operating_systems: [linux, macos]
+    known_failure_modes: [ambiguous_serial_match, permission_denied, boot_timeout, checksum_mismatch]
+    tested:
+      - board: ESP32 DevKit V1
+        operating_systems: [linux, macos]
+        status: EXPERIMENTAL
+        automated_contract: tests/contract/test_real_lab_backend_contract.py
+        physical_test: tests/hardware/test_esp32_hardware.py
+        latest_physical_evidence: null
+        limitations:
+          - Physical validation is opt-in and no qualifying Phase 9 evidence is attached yet.
+          - The firmware input alias remains readable during the 1.x migration window.
+
+  stm32-openocd:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: automated_openocd_target_and_plugin_contract_available
+    external_dependencies: [openocd, pyserial]
+    supported_operating_systems: [linux, macos, windows]
+    known_failure_modes: [tool_missing, probe_missing, permission_denied, tool_timeout, flash_verify_failed]
+    tested:
+      - board: Nucleo-F446RE
+        debugger: ST-Link
+        target_config: target/stm32f4x.cfg
+        status: EXPERIMENTAL
+        automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+        latest_physical_evidence: null
+        limitations:
+          - Command construction and backend behavior are automated; a physical Nucleo run is pending.
+
+  rp2040:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: picotool_and_uf2_target_plugin_contract_implemented
+    external_dependencies: [picotool_or_reviewed_uf2_mount]
+    supported_operating_systems: [linux, macos, windows]
+    known_failure_modes: [boot_mode_missing, ambiguous_mount, reenumeration_timeout]
+    tested:
+      - board: Raspberry Pi Pico
+        status: EXPERIMENTAL
+        automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+        latest_physical_evidence: null
+        limitations: [A physical adapter/board validation run is pending.]
+
+  nrf52:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: nrfjprog_and_jlink_target_plugin_contract_implemented
+    external_dependencies: [nrfjprog_or_jlink]
+    supported_operating_systems: [linux, macos, windows]
+    known_failure_modes: [tool_missing, probe_missing, family_mismatch, protection_enabled]
+    tested:
+      - board: Nordic nRF52 development board
+        status: EXPERIMENTAL
+        automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+        latest_physical_evidence: null
+        limitations: [A physical board/debugger validation run is pending.]
+
+accessories:
+  usb-relay:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: sdk_power_driver_and_safe_command_transport_implemented
+    supported_operating_systems: [linux, macos, windows]
+    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    latest_physical_evidence: null
+    limitations:
+      - No specific relay vendor/model has qualifying physical evidence.
+      - The reference integration is for low-voltage lab targets, not mains switching.
+
+  j-link:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: safe_commander_script_target_and_plugin_contract_implemented
+    external_dependencies: [SEGGER J-Link Software]
+    supported_operating_systems: [linux, macos, windows]
+    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    latest_physical_evidence: null
+    limitations: [SEGGER tooling and its license are installed outside Lab Platform.]
+
+  socketcan:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: socketcan_send_receive_filter_and_capture_contract_implemented
+    external_dependencies: [Linux SocketCAN]
+    supported_operating_systems: [linux]
+    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    latest_physical_evidence: null
+    limitations:
+      - Interface provisioning and bitrate remain host-administrator responsibilities.
+      - No physical adapter/bus evidence is attached.
+
+  instrument:
+    plugin_version: 1.0.0
+    plugin_api_version: "1.0"
+    maintainer: Lab Platform Contributors
+    status: EXPERIMENTAL
+    implementation_state: generic_measure_capture_and_programmable_power_driver_contract_implemented
+    supported_operating_systems: [linux, macos, windows]
+    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    latest_physical_evidence: null
+    limitations: [No official SCPI, logic-analyzer, or oscilloscope driver is verified.]

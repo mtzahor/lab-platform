@@ -6,6 +6,8 @@ from lab_platform.simlab import SimulatedBenchSnapshot
 
 def map_simlab_bench(bench: SimulatedBenchSnapshot) -> BenchSnapshot:
     capabilities = [capability.lower() for capability in bench.capabilities]
+    if "firmware" in capabilities and "flash" not in capabilities:
+        capabilities.append("flash")
     capabilities.append("probe")
     if "power" in capabilities:
         capabilities.append("reset")

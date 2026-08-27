@@ -1,4 +1,11 @@
 from lab_platform.core.agent import AgentCore
+from lab_platform.core.alerts import (
+    add_or_get_active_alert,
+    alert_identity,
+    create_alert,
+    find_active_alert,
+    replace_alert,
+)
 from lab_platform.core.artifact_storage import (
     ArtifactStorage,
     LocalArtifactStorage,
@@ -96,6 +103,16 @@ from lab_platform.core.oidc import (
     validate_oidc_id_token,
 )
 from lab_platform.core.operation_locks import OperationLockService
+from lab_platform.core.operational import (
+    assess_flaky_bench,
+    calculate_bench_utilisation,
+    calculate_queue_metrics,
+    calculate_reliability,
+    classify_failure,
+    end_bench_maintenance,
+    maintenance_recommendation,
+    start_bench_maintenance,
+)
 from lab_platform.core.queueing import FifoQueuePolicy, QueuePolicy
 from lab_platform.core.recovery import RecoveryService
 from lab_platform.core.release import (
@@ -107,6 +124,15 @@ from lab_platform.core.release import (
     release_channel,
 )
 from lab_platform.core.reservations import ReservationService as TimedReservationService
+from lab_platform.core.resources import (
+    BenchCompositionNotFoundError,
+    HardwareResourceNotFoundError,
+    ResourceCatalog,
+    ResourceConflictError,
+    ResourceLockManager,
+    ResourceReservationCoordinator,
+    ResourceUnavailableError,
+)
 from lab_platform.core.results import build_test_results, render_junit_xml
 from lab_platform.core.retention import (
     RetentionClass,
@@ -134,6 +160,7 @@ from lab_platform.core.workflows import (
     WorkflowNotFoundError,
     WorkflowRunner,
     WorkflowRunNotFoundError,
+    WorkflowSchemaVersionUnsupportedError,
     WorkflowService,
     parse_workflow_yaml,
 )
@@ -147,6 +174,8 @@ __all__ = [
     "ORGANISATION_ROLE_PERMISSIONS",
     "ROLE_PERMISSIONS",
     "AgentCore",
+    "add_or_get_active_alert",
+    "alert_identity",
     "ApiTokenService",
     "ArtifactChecksumMismatchError",
     "ArtifactNotFoundError",
@@ -171,6 +200,7 @@ __all__ = [
     "BenchOperationInProgressError",
     "BenchWaitTimeoutError",
     "BenchCatalog",
+    "BenchCompositionNotFoundError",
     "BenchMetadata",
     "BenchRecord",
     "BenchService",
@@ -182,15 +212,18 @@ __all__ = [
     "CiSessionService",
     "ConfigurationError",
     "Clock",
+    "create_alert",
     "EventService",
     "EventBus",
     "EventHandler",
     "FakeClock",
     "Feature",
     "FeatureProvider",
+    "find_active_alert",
     "FifoQueuePolicy",
     "FirmwareFileTooLargeError",
     "HealthMonitor",
+    "HardwareResourceNotFoundError",
     "IdentityAuthenticationRepository",
     "IdentityAuthenticationService",
     "IdentityAdministrationRepository",
@@ -216,6 +249,13 @@ __all__ = [
     "OperationRunner",
     "OperationLockService",
     "OperationService",
+    "assess_flaky_bench",
+    "calculate_bench_utilisation",
+    "calculate_queue_metrics",
+    "calculate_reliability",
+    "classify_failure",
+    "end_bench_maintenance",
+    "maintenance_recommendation",
     "NoCompatibleBenchError",
     "PlatformError",
     "PermissionDeniedError",
@@ -238,6 +278,11 @@ __all__ = [
     "RetentionWorker",
     "RequestBodyTooLargeError",
     "ResourceLimitExceededError",
+    "ResourceCatalog",
+    "ResourceConflictError",
+    "ResourceLockManager",
+    "ResourceReservationCoordinator",
+    "ResourceUnavailableError",
     "RecoveryService",
     "ReservationService",
     "RegistryRefreshResult",
@@ -259,6 +304,7 @@ __all__ = [
     "WorkflowInvalidError",
     "WorkflowNotFoundError",
     "WorkflowRunNotFoundError",
+    "WorkflowSchemaVersionUnsupportedError",
     "WorkflowRunner",
     "WorkflowService",
     "build_test_results",
@@ -269,7 +315,9 @@ __all__ = [
     "validate_oidc_id_token",
     "recover_interrupted_operations",
     "release_channel",
+    "replace_alert",
     "retention_class_for_artifact_type",
     "as_utc",
+    "start_bench_maintenance",
     "parse_workflow_yaml",
 ]

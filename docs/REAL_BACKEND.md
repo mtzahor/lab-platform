@@ -8,23 +8,31 @@ backend:
   type: real
 ```
 
-The real backend owns configured `PhysicalTarget` implementations. Phase 2 provides one
-`Esp32Target`; the API, CLI, reservation service, operation runner, event history, and persistence
-layers contain no ESP32 branch.
+The real backend owns configured `PhysicalTarget` implementations selected by the target-driver
+registry. The ESP32 and OpenOCD/STM32 paths use that same factory boundary; the API, CLI,
+reservation service, operation runner, event history, and persistence layers contain no
+vendor-family branch.
 
 ```text
 CLI -> REST API -> application services -> LabBackend
                                           |
                                           +-- SimLabBackend
-                                          +-- RealLabBackend -> PhysicalTarget -> Esp32Target
+                                          +-- RealLabBackend -> target registry -> PhysicalTarget
+                                                                    +-- Esp32Target
+                                                                    +-- OpenOcdTarget
 ```
 
 ## Capabilities
 
-The ESP32 target advertises `firmware`, `serial`, `probe`, and `reset`. It does not advertise
+The ESP32 target advertises the stable `flash`, `serial`, `probe`, and `reset` capabilities and
+retains `firmware` as a pre-1.0 input alias. It does not advertise
 `power`, `power_on`, `power_off`, or `power_cycle`, because toggling DTR/RTS or resetting through
 the ROM bootloader is not physical power control. Unsupported power requests return
 `CAPABILITY_NOT_SUPPORTED`.
+
+The OpenOCD/STM32 path advertises `probe`, `reset`, `flash`, `debug`, and optional serial through
+the same backend contract. Independent power, debugger, CAN, or instrument devices are composed as
+resources; they are not hidden as target-specific branches.
 
 ## Discovery and health
 
@@ -55,9 +63,9 @@ regular expression matches. Failure patterns abort verification, and the named `
 stored as the current firmware version. The boot capture is attached to the generic operation
 artifact mechanism.
 
-The dependency is deliberately constrained to esptool 4.x because the Phase 2 command/config
-vocabulary uses the v4 underscore-form commands and reset values. Upgrading to esptool 5 requires
-an explicit command compatibility change and its own adapter tests.
+The supported esptool range is pinned by the package metadata and adapter tests. Treat any major
+tool upgrade as a compatibility change: review command/reset vocabulary, rerun the fake process
+contract, then attach new physical evidence before changing the compatibility status.
 
 ## Concurrency and recovery
 

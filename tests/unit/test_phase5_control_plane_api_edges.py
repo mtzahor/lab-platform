@@ -77,7 +77,7 @@ async def _seed_bench(runtime: ControlPlaneRuntime, agent: AgentRecord) -> Globa
         kind=GlobalBenchKind.SIMULATED,
         status=GlobalBenchStatus.ONLINE,
         health=HealthStatus.HEALTHY,
-        capabilities=frozenset({"firmware", "probe", "reset", "serial"}),
+        capabilities=frozenset({"flash", "probe", "reset", "serial"}),
         created_at=now,
         updated_at=now,
         last_seen_at=now,

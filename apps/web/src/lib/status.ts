@@ -23,6 +23,7 @@ const POSITIVE = new Set([
   "CLEAN",
   "COMPATIBLE",
   "UP_TO_DATE",
+  "RESOLVED",
 ]);
 const WARNING = new Set([
   "DEGRADED",
@@ -35,6 +36,9 @@ const WARNING = new Set([
   "RECONCILING",
   "UPGRADE_AVAILABLE",
   "UPGRADE_RECOMMENDED",
+  "OPEN",
+  "MAINTENANCE_RECOMMENDED",
+  "WARNING",
 ]);
 const NEGATIVE = new Set([
   "OFFLINE",
@@ -45,6 +49,7 @@ const NEGATIVE = new Set([
   "INCOMPATIBLE",
   "UPGRADE_REQUIRED",
   "UNSUPPORTED",
+  "CRITICAL",
   "CANCELLED",
   "EXPIRED",
 ]);
@@ -56,6 +61,8 @@ const INFO = new Set([
   "DISPATCHED",
   "ACKNOWLEDGED",
   "CREATED",
+  "INFO",
+  "MAINTENANCE",
 ]);
 
 export function statusTone(status?: string): Tone {

@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID, uuid4
 
 from lab_platform.config import (
@@ -54,6 +54,7 @@ from lab_platform.models import (
     Bench,
     BenchOperationLock,
     BenchSnapshot,
+    Capability,
     Event,
     EventRecord,
     HealthReport,
@@ -79,6 +80,12 @@ from lab_platform.persistence import (
     SQLiteTimelineRepository,
 )
 from lab_platform.persistence.workflows import SQLiteWorkflowRepository
+from lab_platform.plugin_sdk import (
+    PluginDiagnosticReport,
+    PluginLoadReport,
+    PluginRuntimeInfo,
+    PluginRuntimeStatus,
+)
 from lab_platform.plugins import PluginManager
 from lab_platform.real_backend import RealLabBackend
 from lab_platform.simlab_adapter import SimLabBackend
@@ -87,6 +94,10 @@ if TYPE_CHECKING:
     from lab_platform.agent.distributed import AgentDistributedRuntime
 
 DistributedRuntimeFactory = Callable[["LabAgent"], "AgentDistributedRuntime"]
+
+
+class _PluginWithMetadata(Protocol):
+    metadata: PluginMetadata
 
 
 class _WorkflowOperationLockAdapter:
@@ -279,6 +290,7 @@ class LabAgent:
         self._event_bus = event_bus
         self._health_monitor = health_monitor
         self._plugin_manager = plugin_manager
+        self._plugin_load_report = PluginLoadReport()
         self._backend: LabBackend = backend_registry
         self._database = database
         self._core = core
@@ -314,11 +326,26 @@ class LabAgent:
             await self._set_health("event_bus", HealthStatus.HEALTHY, "Event bus started")
             await self._core.start()
 
-            plugins = await self._plugin_manager.load(self.config.plugins)
+            self._plugin_load_report = await self._plugin_manager.load_resilient(
+                self.config.plugins
+            )
+            plugins = self._plugin_manager.plugins()
             for plugin in plugins:
-                await self._core.register_plugin(plugin.metadata, plugin.capabilities())
+                await self._core.register_plugin(
+                    plugin.metadata,
+                    _plugin_capabilities(plugin),
+                )
+            plugin_runtime = self._plugin_manager.runtime_info()
+            plugin_degraded = bool(self._plugin_load_report.failures) or any(
+                info.status is not PluginRuntimeStatus.HEALTHY for info in plugin_runtime
+            )
+            plugin_message = f"{len(plugins)} plugins loaded"
+            if self._plugin_load_report.failures:
+                plugin_message += f"; {len(self._plugin_load_report.failures)} isolated failure(s)"
             await self._set_health(
-                "plugins", HealthStatus.HEALTHY, f"{len(plugins)} plugins loaded"
+                "plugins",
+                HealthStatus.WARNING if plugin_degraded else HealthStatus.HEALTHY,
+                plugin_message,
             )
 
             await self.backend_registry.start()
@@ -470,6 +497,22 @@ class LabAgent:
 
     def plugins(self) -> list[PluginMetadata]:
         return self._core.plugins()
+
+    def plugin_runtime_info(self) -> list[PluginRuntimeInfo]:
+        """Return loaded, disabled, incompatible, and failed plugin state."""
+
+        return self._plugin_manager.runtime_info()
+
+    def plugin_load_report(self) -> PluginLoadReport:
+        return self._plugin_load_report
+
+    async def plugin_diagnostics(
+        self,
+        plugin_name: str | None = None,
+    ) -> list[PluginDiagnosticReport]:
+        if plugin_name is not None:
+            return [await self._plugin_manager.diagnose(plugin_name)]
+        return await self._plugin_manager.diagnose_all()
 
     def health_reports(self) -> list[HealthReport]:
         return self._health_monitor.component_statuses()
@@ -1139,7 +1182,10 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
         logger=logger,
         event_bus=event_bus,
         health_monitor=health_monitor,
-        plugin_manager=PluginManager(),
+        plugin_manager=PluginManager(
+            plugin_directories=config.plugin_directories,
+            allow_import_paths=config.allow_plugin_import_paths,
+        ),
         backend_registry=registry,
         catalog=catalog,
         catalog_repository=catalog_repository,
@@ -1172,6 +1218,29 @@ def create_agent(config_dir: str | Path = "config") -> LabAgent:
         artifacts_directory=artifact_path,
         distributed_runtime_factory=distributed_runtime_factory,
     )
+
+
+def _plugin_capabilities(plugin: object) -> list[Capability]:
+    """Bridge legacy capability objects and Plugin API 1.x metadata."""
+
+    legacy_method = getattr(plugin, "capabilities", None)
+    if callable(legacy_method):
+        return [
+            Capability.model_validate(capability, from_attributes=True)
+            for capability in legacy_method()
+        ]
+    metadata = PluginMetadata.model_validate(
+        cast(_PluginWithMetadata, plugin).metadata,
+        from_attributes=True,
+    )
+    return [
+        Capability(
+            name=name,
+            description=f"{metadata.name} plugin {name} capability",
+            metadata={"plugin": metadata.name, "plugin_version": metadata.version},
+        )
+        for name in metadata.capabilities
+    ]
 
 
 def _catalog_metadata(config: PlatformConfig) -> dict[str, BenchMetadata]:
