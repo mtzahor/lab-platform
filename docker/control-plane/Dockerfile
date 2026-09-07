@@ -3,7 +3,7 @@
 # The multi-architecture index is pinned. Dependabot proposes digest updates.
 ARG PYTHON_IMAGE="python:3.11.16-slim-bookworm@sha256:2e32f7d302adc1c37428355c1e646897c0c53f4fd60b6a551245fb90ee129f91"
 
-FROM ghcr.io/astral-sh/uv:0.12.5 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.10 AS uv
 FROM ${PYTHON_IMAGE} AS pgdg-key
 
 ADD --chmod=0644 \
