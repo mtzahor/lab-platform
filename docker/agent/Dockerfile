@@ -22,6 +22,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM ${PYTHON_IMAGE} AS runtime
 
+RUN apt-get update \
+    && apt-get upgrade --yes --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG LAB_VERSION="0.0.0-dev"
 ARG LAB_REVISION="unknown"
 ARG LAB_BUILD_DATE="1970-01-01T00:00:00Z"
