@@ -58,6 +58,7 @@ ENV PATH="/opt/lab-platform/bin:${PATH}" \
 COPY --from=pgdg-key --chmod=0644 /postgresql.gpg /usr/share/keyrings/postgresql.gpg
 
 RUN apt-get update \
+    && apt-get upgrade --yes --no-install-recommends \
     && apt-get install --yes --no-install-recommends ca-certificates \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \

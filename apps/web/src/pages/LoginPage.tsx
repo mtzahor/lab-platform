@@ -63,8 +63,7 @@ export function LoginPage() {
         <div className="login-hero">
           <p className="eyebrow">Distributed hardware operations</p>
           <h1>
-            Your lab,
-            <br />
+            Your lab, <br />
             under control.
           </h1>
           <p>

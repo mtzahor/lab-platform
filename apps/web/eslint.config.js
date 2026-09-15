@@ -13,7 +13,10 @@ export default tseslint.config(
     languageOptions: { ecmaVersion: 2022, globals: globals.browser },
     plugins: { "react-hooks": reactHooks, "react-refresh": reactRefresh },
     rules: {
-      ...reactHooks.configs.recommended.rules,
+      // Keep the existing Hooks checks; the v7 recommended preset also enables
+      // React Compiler diagnostics, but this application does not use the compiler.
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
       "react-refresh/only-export-components": "off",
       "@typescript-eslint/no-explicit-any": "off",
     },

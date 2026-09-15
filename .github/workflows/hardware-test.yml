@@ -15,7 +15,7 @@ jobs:
       LAB_PLATFORM_TOKEN: ${{ secrets.LAB_PLATFORM_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build deterministic demo firmware
         shell: bash
@@ -39,7 +39,7 @@ jobs:
           wait-timeout: 10m
 
       - name: Publish hardware-test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ always() && steps.hardware.outcome != 'skipped' }}
         with:
           name: hardware-test-results
