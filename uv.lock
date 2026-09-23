@@ -601,7 +601,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35,<2" },
     { name = "cryptography", specifier = ">=50,<51" },
-    { name = "esptool", specifier = ">=5.2,<5.4" },
+    { name = "esptool", specifier = ">=5.2,<5.5" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
