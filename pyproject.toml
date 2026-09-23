@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-jev = ["typesafe-sdk==0.7.1"]
+jev = ["typesafe-sdk==0.7.1", "httpx2>=2.12,<3"]
 dev = [
     "mypy>=1.10",
     "pytest>=8.2",
@@ -153,5 +153,5 @@ skip_covered = true
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.5.0",
+    "httpx2>=2.12,<3",
 ]
