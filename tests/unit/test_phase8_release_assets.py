@@ -225,7 +225,8 @@ def test_security_workflow_uses_available_actions_and_guards_dependency_review()
     root = Path(__file__).resolve().parents[2]
     workflow = (root / ".github/workflows/security.yml").read_text(encoding="utf-8")
 
-    assert workflow.count("aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25") == 2
+    assert workflow.count("aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25") == 3
+    assert "format: spdx-json" in workflow
     assert "# v0.36.0" in workflow
     assert "aquasecurity/trivy-action@0.32.0" not in workflow
     assert "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294" in workflow
