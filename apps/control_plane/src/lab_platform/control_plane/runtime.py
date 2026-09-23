@@ -22,12 +22,14 @@ from lab_platform.control_plane.compatibility import (
     VersionCompatibilityPolicy,
 )
 from lab_platform.control_plane.config import ControlPlaneConfig
+from lab_platform.control_plane.decision_worker import shadow_loop
 from lab_platform.control_plane.gateway import (
     WS_AUTHENTICATION_FAILED,
     AgentConnectionHub,
     AgentGateway,
     AgentMessageRouter,
 )
+from lab_platform.control_plane.jev_provider import JevDecisionEngine
 from lab_platform.control_plane.observability import OperationalMetrics
 from lab_platform.control_plane.oidc_provider import HttpOidcProvider
 from lab_platform.control_plane.operational_access import OperationalAccessService
@@ -78,6 +80,7 @@ from lab_platform.core.artifact_storage import (
 from lab_platform.core.artifacts import ArtifactService
 from lab_platform.core.auth import ApiTokenService
 from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.decision_engine.service import DecisionService
 from lab_platform.core.errors import (
     AuthenticationRequiredError,
     ConfigurationError,
@@ -119,6 +122,7 @@ from lab_platform.persistence.database_management import (
     inspect_database_schema,
     require_current_schema,
 )
+from lab_platform.persistence.decisions import SQLiteDecisionRepository
 from lab_platform.persistence.distributed import (
     SQLiteAgentTimelineRepository,
     SQLiteArtifactTransferRepository,
@@ -294,6 +298,14 @@ class ControlPlaneRuntime:
             self.artifact_storage,
             events=RetentionOperationalEventSink(self.operational_events),
         )
+        self.decision_settings = config.decision_engine.with_environment()
+        self.decision_repository = SQLiteDecisionRepository(self.database)
+        self.decision_service = DecisionService(
+            JevDecisionEngine(self.decision_settings),
+            self.decision_repository,
+            self.decision_settings,
+        )
+        self._decision_task: asyncio.Task[None] | None = None
         self.workflow_repository = SQLiteWorkflowRepository(
             self.database,
             initialize_schema=False,
@@ -565,11 +577,29 @@ class ControlPlaneRuntime:
             self._next_artifact_retention_at = now
             self._next_operational_analytics_at = now
             self._started = True
+            if self.decision_settings.configuration_error or (
+                self.decision_settings.enabled
+                and not self.decision_settings.api_key.get_secret_value()
+            ):
+                _LOGGER.warning("Decision engine configuration invalid; normal operation continues")
+            if (
+                self.decision_settings.enabled
+                and self.decision_settings.mode == "shadow"
+                and not self.decision_settings.configuration_error
+                and self.decision_settings.api_key.get_secret_value()
+            ):
+                self._decision_task = asyncio.create_task(
+                    shadow_loop(self), name="decision-engine-shadow"
+                )
             self._monitor_task = asyncio.create_task(
                 self._monitor_loop(),
                 name="control-plane-monitor",
             )
         except Exception:
+            if self._decision_task is not None:
+                self._decision_task.cancel()
+                await asyncio.gather(self._decision_task, return_exceptions=True)
+                self._decision_task = None
             if self._monitor_task is not None:
                 self._monitor_task.cancel()
                 await asyncio.gather(self._monitor_task, return_exceptions=True)
@@ -588,6 +618,10 @@ class ControlPlaneRuntime:
             self._monitor_task.cancel()
             await asyncio.gather(self._monitor_task, return_exceptions=True)
             self._monitor_task = None
+        if self._decision_task is not None:
+            self._decision_task.cancel()
+            await asyncio.gather(self._decision_task, return_exceptions=True)
+            self._decision_task = None
         await self.hub.close_all()
         self._next_identity_maintenance_at = None
         self._next_artifact_retention_at = None

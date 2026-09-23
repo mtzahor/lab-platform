@@ -9,6 +9,7 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import yaml
 from lab_platform.config import CONFIG_VERSION
+from lab_platform.core.decision_engine.settings import DecisionSettings
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -530,6 +531,7 @@ class ReverseProxySettings(ControlPlaneConfigModel):
 
 
 class ControlPlaneConfig(ControlPlaneConfigModel):
+    decision_engine: DecisionSettings = Field(default_factory=DecisionSettings)
     config_version: Literal[1] = CONFIG_VERSION
     profile: Literal["development", "test", "production"] = "development"
     control_plane: ControlPlaneSettings = Field(default_factory=ControlPlaneSettings)

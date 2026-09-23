@@ -28,6 +28,7 @@ from lab_platform.persistence.database_management import (
     migrate_database,
     require_current_schema,
 )
+from lab_platform.persistence.decisions import SQLiteDecisionRepository
 from lab_platform.persistence.distributed_reservations import (
     SQLiteCentralReservationLeaseRepository,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "SQLiteBenchCatalogRepository",
     "SQLiteCatalogRepository",
     "SQLiteCiSessionRepository",
+    "SQLiteDecisionRepository",
     "SQLiteCentralReservationLeaseRepository",
     "SQLiteDatabase",
     "SQLiteEventRepository",

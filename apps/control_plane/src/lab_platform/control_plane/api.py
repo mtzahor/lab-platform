@@ -32,6 +32,7 @@ from lab_platform.control_plane.dashboard_api import (
     enrich_benches,
     reservation_action_permissions,
 )
+from lab_platform.control_plane.decision_api import create_decision_router
 from lab_platform.control_plane.identity_admin_api import create_identity_admin_router
 from lab_platform.control_plane.identity_api import (
     authenticate_identity_token,
@@ -688,6 +689,17 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
         ApiTokenScope.AGENTS_ADMIN,
         phase6_permissions=("benches:manage",),
         phase6_resource="bench",
+    )
+
+    decision_write = _require_scopes(
+        runtime,
+        ApiTokenScope.OPERATIONS_READ,
+        ApiTokenScope.WORKFLOWS_RUN,
+        phase6_permissions=("operations:read", "workflows:run"),
+        phase6_resource="operation",
+    )
+    app.include_router(
+        create_decision_router(runtime, read_auth=operation_read, write_auth=decision_write)
     )
 
     # Dashboard aggregation and live-update routes are registered before the
@@ -1909,7 +1921,11 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             operation.remote_command_id,
             organisation_id=operation.organisation_id,
         )
-        return _distributed_workflow_payload(operation, command)
+        payload = _distributed_workflow_payload(operation, command)
+        payload["decision_engine_enabled"] = (
+            runtime.decision_settings.enabled and runtime.decision_settings.mode == "recommend"
+        )
+        return payload
 
     @app.post("/api/v1/workflow-runs/{operation_id:uuid}/cancel", status_code=202)
     async def cancel_distributed_workflow_run(
