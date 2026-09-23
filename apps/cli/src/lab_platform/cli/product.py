@@ -5,6 +5,7 @@ import os
 import secrets
 import stat
 import subprocess
+import sys
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -16,6 +17,11 @@ from lab_platform.core import VERSION
 def main(argv: list[str] | None = None) -> int:
     """Initialize and operate the supported local deployment layouts."""
 
+    actual = sys.argv[1:] if argv is None else argv
+    if actual and actual[0] == "evaluate-decision-engine":
+        from lab_platform.cli.decision_evaluation import main as evaluate_main
+
+        return evaluate_main(actual[1:])
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "init":

@@ -1,0 +1,1346 @@
+{
+  "00000000-0000-0000-0000-000000000064": {
+    "answers": {
+      "diagnosis": {
+        "choice": "unknown",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.98
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "no_action",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.98,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 1.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 0,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000065": {
+    "answers": {
+      "diagnosis": {
+        "choice": "dut_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.98,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000066": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "retry_step",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.98
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000067": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000068": {
+    "answers": {
+      "diagnosis": {
+        "choice": "instrument_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.98,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000069": {
+    "answers": {
+      "diagnosis": {
+        "choice": "instrument_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.98,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000006a": {
+    "answers": {
+      "diagnosis": {
+        "choice": "configuration_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.98,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000006b": {
+    "answers": {
+      "diagnosis": {
+        "choice": "expected_test_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.98,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "mark_failed",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.98,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000006c": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "retry_step",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.98
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 1.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 1,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000006d": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "retry_step",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.98
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000006e": {
+    "answers": {
+      "diagnosis": {
+        "choice": "unknown",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.98
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000006f": {
+    "answers": {
+      "diagnosis": {
+        "choice": "dut_failure",
+        "confidence": 0.99,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.98,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "power_cycle_dut",
+        "confidence": 0.99,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.98,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000070": {
+    "answers": {
+      "diagnosis": {
+        "choice": "unknown",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.98
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "no_action",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.98,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 1.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 0,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000071": {
+    "answers": {
+      "diagnosis": {
+        "choice": "dut_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.98,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000072": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "retry_step",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.98
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000073": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000074": {
+    "answers": {
+      "diagnosis": {
+        "choice": "instrument_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.98,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000075": {
+    "answers": {
+      "diagnosis": {
+        "choice": "instrument_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.98,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000076": {
+    "answers": {
+      "diagnosis": {
+        "choice": "configuration_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.98,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000077": {
+    "answers": {
+      "diagnosis": {
+        "choice": "expected_test_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.98,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "mark_failed",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.98,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000078": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "retry_step",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.98
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 1.0,
+          "2": 0.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 1,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-000000000079": {
+    "answers": {
+      "diagnosis": {
+        "choice": "communication_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.98,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "retry_step",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.98
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000007a": {
+    "answers": {
+      "diagnosis": {
+        "choice": "unknown",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.0033333333333333335,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.98
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "request_human_review",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.0033333333333333335,
+          "request_human_review": 0.98,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.0
+        },
+        "score": 2,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  },
+  "00000000-0000-0000-0000-00000000007b": {
+    "answers": {
+      "diagnosis": {
+        "choice": "dut_failure",
+        "confidence": 0.4,
+        "probabilities": {
+          "communication_failure": 0.0033333333333333335,
+          "configuration_failure": 0.0033333333333333335,
+          "dut_failure": 0.98,
+          "expected_test_failure": 0.0033333333333333335,
+          "infrastructure_failure": 0.0033333333333333335,
+          "instrument_failure": 0.0033333333333333335,
+          "unknown": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "recommended_action": {
+        "choice": "power_cycle_dut",
+        "confidence": 0.4,
+        "probabilities": {
+          "mark_failed": 0.0033333333333333335,
+          "no_action": 0.0033333333333333335,
+          "power_cycle_dut": 0.98,
+          "request_human_review": 0.0033333333333333335,
+          "reset_interface": 0.0033333333333333335,
+          "restart_test": 0.0033333333333333335,
+          "retry_step": 0.0033333333333333335
+        },
+        "type": "choice"
+      },
+      "retry_safe": {
+        "noul": 0.995,
+        "type": "noul"
+      },
+      "severity": {
+        "confidence": 0.95,
+        "legend": {
+          "0": "informational: successful or expected operation, no corrective intervention indicated",
+          "1": "low: isolated software issue, no evidence of hardware or safety impact",
+          "2": "medium: test blocked or failed; engineer investigation required",
+          "3": "high: likely device/instrument fault or disruptive recovery needed",
+          "4": "critical: evidence of electrical, thermal, physical or other safety hazard"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.0,
+          "2": 0.0,
+          "3": 1.0,
+          "4": 0.0
+        },
+        "score": 3,
+        "type": "score"
+      }
+    },
+    "model": "jev-synthetic-replay"
+  }
+}

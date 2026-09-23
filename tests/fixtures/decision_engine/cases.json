@@ -1,0 +1,1114 @@
+[
+  {
+    "expected": {
+      "acceptable_actions": [
+        "no_action",
+        "request_human_review"
+      ],
+      "classification": "unknown",
+      "human_review_required": true,
+      "severity_range": [
+        0,
+        1
+      ]
+    },
+    "id": "normal_success",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": null,
+      "error_message": null,
+      "id": "00000000-0000-0000-0000-000000000064",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "succeeded",
+      "workflow_name": "normal_success",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": null,
+        "error_message": null,
+        "id": "00000000-0000-0000-0000-0000000003e8",
+        "name": "normal_success",
+        "output": {
+          "dut_state": "ready"
+        },
+        "status": "succeeded",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000064"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "dut_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "dut_boot_failure",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "boot failed",
+      "id": "00000000-0000-0000-0000-000000000065",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "dut_boot_failure",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "boot failed",
+        "id": "00000000-0000-0000-0000-0000000003e9",
+        "name": "dut_boot_failure",
+        "output": {
+          "dut_state": "not_booted",
+          "uart_boot_detected": false
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000065"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "retry_step"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": false,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "network_timeout",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "network timeout",
+      "id": "00000000-0000-0000-0000-000000000066",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "network_timeout",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "network timeout",
+        "id": "00000000-0000-0000-0000-0000000003ea",
+        "name": "network_timeout",
+        "output": {
+          "communication_status": "timeout",
+          "instruments": {
+            "network_interface": "healthy"
+          },
+          "retry_count": 0
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000066"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "serial_disconnect",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "serial disconnected",
+      "id": "00000000-0000-0000-0000-000000000067",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "serial_disconnect",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "serial disconnected",
+        "id": "00000000-0000-0000-0000-0000000003eb",
+        "name": "serial_disconnect",
+        "output": {
+          "connected": false
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000067"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "instrument_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "instrument_disconnected",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "instrument disconnected",
+      "id": "00000000-0000-0000-0000-000000000068",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "instrument_disconnected",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "instrument disconnected",
+        "id": "00000000-0000-0000-0000-0000000003ec",
+        "name": "instrument_disconnected",
+        "output": {
+          "instruments": {
+            "power_supply": "disconnected"
+          }
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000068"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "instrument_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "instrument_malfunction",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "instrument failure",
+      "id": "00000000-0000-0000-0000-000000000069",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "instrument_malfunction",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "instrument failure",
+        "id": "00000000-0000-0000-0000-0000000003ed",
+        "name": "instrument_malfunction",
+        "output": {
+          "instruments": {
+            "scope": "malfunction"
+          }
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000069"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "configuration_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "incorrect_configuration",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "configuration invalid",
+      "id": "00000000-0000-0000-0000-00000000006a",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "incorrect_configuration",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "configuration invalid",
+        "id": "00000000-0000-0000-0000-0000000003ee",
+        "name": "incorrect_configuration",
+        "output": {
+          "configuration_status": "failed"
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000006a"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "mark_failed"
+      ],
+      "classification": "expected_test_failure",
+      "human_review_required": false,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "measurement_outside_limits",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "assertion failed",
+      "id": "00000000-0000-0000-0000-00000000006b",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "measurement_outside_limits",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "assert_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "assertion failed",
+        "id": "00000000-0000-0000-0000-0000000003ef",
+        "name": "measurement_outside_limits",
+        "output": {
+          "measurements": [
+            {
+              "lower_limit": 350,
+              "name": "supply_current",
+              "passed": false,
+              "unit": "mA",
+              "upper_limit": 500,
+              "value": 700
+            }
+          ]
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000006b"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "retry_step"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": false,
+      "severity_range": [
+        0,
+        2
+      ]
+    },
+    "id": "flaky_test",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "serial timeout",
+      "id": "00000000-0000-0000-0000-00000000006c",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "flaky_test",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "serial timeout",
+        "id": "00000000-0000-0000-0000-0000000003f0",
+        "name": "flaky_test",
+        "output": {
+          "communication_status": "timeout",
+          "retry_count": 0
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000006c"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "retry_step"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": false,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "recoverable_timeout",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "network timeout",
+      "id": "00000000-0000-0000-0000-00000000006d",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "recoverable_timeout",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "network timeout",
+        "id": "00000000-0000-0000-0000-0000000003f1",
+        "name": "recoverable_timeout",
+        "output": {
+          "communication_status": "timeout",
+          "retry_count": 0,
+          "safety_checks_passed": true
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000006d"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "unknown",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "ambiguous_failure",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "failure",
+      "id": "00000000-0000-0000-0000-00000000006e",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "ambiguous_failure",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "failure",
+        "id": "00000000-0000-0000-0000-0000000003f2",
+        "name": "ambiguous_failure",
+        "output": {},
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000006e"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "power_cycle_dut",
+        "request_human_review"
+      ],
+      "classification": "dut_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "power_cycle_candidate",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "boot failure",
+      "id": "00000000-0000-0000-0000-00000000006f",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "power_cycle_candidate",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "boot failure",
+        "id": "00000000-0000-0000-0000-0000000003f3",
+        "name": "power_cycle_candidate",
+        "output": {
+          "dut_state": "not_ready",
+          "uart_boot_detected": false
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000006f"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "no_action",
+        "request_human_review"
+      ],
+      "classification": "unknown",
+      "human_review_required": true,
+      "severity_range": [
+        0,
+        1
+      ]
+    },
+    "id": "normal_success_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": null,
+      "error_message": null,
+      "id": "00000000-0000-0000-0000-000000000070",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "succeeded",
+      "workflow_name": "normal_success_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": null,
+        "error_message": null,
+        "id": "00000000-0000-0000-0000-0000000003f4",
+        "name": "normal_success_uncertain",
+        "output": {
+          "dut_state": "ready"
+        },
+        "status": "succeeded",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000070"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "dut_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "dut_boot_failure_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "boot failed",
+      "id": "00000000-0000-0000-0000-000000000071",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "dut_boot_failure_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "boot failed",
+        "id": "00000000-0000-0000-0000-0000000003f5",
+        "name": "dut_boot_failure_uncertain",
+        "output": {
+          "dut_state": "not_booted",
+          "uart_boot_detected": false
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000071"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "retry_step"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "network_timeout_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "network timeout",
+      "id": "00000000-0000-0000-0000-000000000072",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "network_timeout_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "network timeout",
+        "id": "00000000-0000-0000-0000-0000000003f6",
+        "name": "network_timeout_uncertain",
+        "output": {
+          "communication_status": "timeout",
+          "instruments": {
+            "network_interface": "healthy"
+          },
+          "retry_count": 0
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000072"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "serial_disconnect_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "serial disconnected",
+      "id": "00000000-0000-0000-0000-000000000073",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "serial_disconnect_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "serial disconnected",
+        "id": "00000000-0000-0000-0000-0000000003f7",
+        "name": "serial_disconnect_uncertain",
+        "output": {
+          "connected": false
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000073"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "instrument_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "instrument_disconnected_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "instrument disconnected",
+      "id": "00000000-0000-0000-0000-000000000074",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "instrument_disconnected_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "instrument disconnected",
+        "id": "00000000-0000-0000-0000-0000000003f8",
+        "name": "instrument_disconnected_uncertain",
+        "output": {
+          "instruments": {
+            "power_supply": "disconnected"
+          }
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000074"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "instrument_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "instrument_malfunction_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "instrument failure",
+      "id": "00000000-0000-0000-0000-000000000075",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "instrument_malfunction_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "instrument failure",
+        "id": "00000000-0000-0000-0000-0000000003f9",
+        "name": "instrument_malfunction_uncertain",
+        "output": {
+          "instruments": {
+            "scope": "malfunction"
+          }
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000075"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "configuration_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "incorrect_configuration_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "configuration invalid",
+      "id": "00000000-0000-0000-0000-000000000076",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "incorrect_configuration_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "configuration invalid",
+        "id": "00000000-0000-0000-0000-0000000003fa",
+        "name": "incorrect_configuration_uncertain",
+        "output": {
+          "configuration_status": "failed"
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000076"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "mark_failed"
+      ],
+      "classification": "expected_test_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "measurement_outside_limits_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "assertion failed",
+      "id": "00000000-0000-0000-0000-000000000077",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "measurement_outside_limits_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "assert_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "assertion failed",
+        "id": "00000000-0000-0000-0000-0000000003fb",
+        "name": "measurement_outside_limits_uncertain",
+        "output": {
+          "measurements": [
+            {
+              "lower_limit": 350,
+              "name": "supply_current",
+              "passed": false,
+              "unit": "mA",
+              "upper_limit": 500,
+              "value": 700
+            }
+          ]
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000077"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "retry_step"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": true,
+      "severity_range": [
+        0,
+        2
+      ]
+    },
+    "id": "flaky_test_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "serial timeout",
+      "id": "00000000-0000-0000-0000-000000000078",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "flaky_test_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "serial timeout",
+        "id": "00000000-0000-0000-0000-0000000003fc",
+        "name": "flaky_test_uncertain",
+        "output": {
+          "communication_status": "timeout",
+          "retry_count": 0
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000078"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "retry_step"
+      ],
+      "classification": "communication_failure",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "recoverable_timeout_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "network timeout",
+      "id": "00000000-0000-0000-0000-000000000079",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "recoverable_timeout_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "network timeout",
+        "id": "00000000-0000-0000-0000-0000000003fd",
+        "name": "recoverable_timeout_uncertain",
+        "output": {
+          "communication_status": "timeout",
+          "retry_count": 0,
+          "safety_checks_passed": true
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-000000000079"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "request_human_review",
+        "request_human_review"
+      ],
+      "classification": "unknown",
+      "human_review_required": true,
+      "severity_range": [
+        1,
+        3
+      ]
+    },
+    "id": "ambiguous_failure_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "failure",
+      "id": "00000000-0000-0000-0000-00000000007a",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "ambiguous_failure_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "probe",
+        "error_code": "TEST_FAILED",
+        "error_message": "failure",
+        "id": "00000000-0000-0000-0000-0000000003fe",
+        "name": "ambiguous_failure_uncertain",
+        "output": {},
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000007a"
+      }
+    ],
+    "synthetic": true
+  },
+  {
+    "expected": {
+      "acceptable_actions": [
+        "power_cycle_dut",
+        "request_human_review"
+      ],
+      "classification": "dut_failure",
+      "human_review_required": true,
+      "severity_range": [
+        2,
+        4
+      ]
+    },
+    "id": "power_cycle_candidate_uncertain",
+    "run": {
+      "bench_id": "synthetic-bench",
+      "completed_at": "2026-09-01T00:00:01Z",
+      "created_at": "2026-09-01T00:00:00Z",
+      "current_step": 0,
+      "error_code": "TEST_FAILED",
+      "error_message": "boot failure",
+      "id": "00000000-0000-0000-0000-00000000007b",
+      "owner": "synthetic-operator",
+      "reservation_id": "00000000-0000-0000-0000-00000000000a",
+      "status": "failed",
+      "workflow_name": "power_cycle_candidate_uncertain",
+      "workflow_version": 1
+    },
+    "steps": [
+      {
+        "action": "read_serial",
+        "error_code": "TEST_FAILED",
+        "error_message": "boot failure",
+        "id": "00000000-0000-0000-0000-0000000003ff",
+        "name": "power_cycle_candidate_uncertain",
+        "output": {
+          "dut_state": "not_ready",
+          "uart_boot_detected": false
+        },
+        "status": "failed",
+        "step_index": 0,
+        "workflow_run_id": "00000000-0000-0000-0000-00000000007b"
+      }
+    ],
+    "synthetic": true
+  }
+]

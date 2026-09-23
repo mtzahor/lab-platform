@@ -275,3 +275,8 @@ Documentation starts at [docs/index.md](docs/index.md). Core references are
 [ARCHITECTURE.md](ARCHITECTURE.md), [API.md](API.md), [CLI.md](CLI.md), and
 [ROADMAP.md](ROADMAP.md). Provider guides cover [GitHub Actions](docs/GITHUB_ACTIONS.md),
 [GitLab CI](docs/GITLAB_CI.md), and [Jenkins](docs/JENKINS.md).
+
+## Experimental post-v1 diagnosis
+
+An optional, disabled-by-default [Decision Engine](docs/DECISION_ENGINE.md) provides
+Jev recommendations alongside deterministic test results. It never controls hardware.

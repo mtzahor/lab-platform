@@ -34,6 +34,7 @@ import {
   Panel,
   StatusBadge,
 } from "../components/ui";
+import { DecisionEnginePanel } from "../features/DecisionEnginePanel";
 import { useApiDetail, useApiList, useApiMutation } from "../hooks/useApi";
 import { formatBytes, formatDate, formatDuration, shortId, titleCase } from "../lib/format";
 import { isActiveStatus } from "../lib/status";
@@ -260,6 +261,9 @@ export function WorkflowRunPage() {
               />
             )}
           </Panel>
+          {run.decision_engine_enabled === true && !active && (
+            <DecisionEnginePanel runId={runId} canDiagnose={auth.can("workflows:run")} />
+          )}
           <Panel
             title="Run log"
             description={`Bounded to the newest ${Math.min(logLines.length, 1000)} structured output lines`}

@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+jev = ["typesafe-sdk==0.7.1", "httpx2>=2.12,<3"]
 dev = [
     "mypy>=1.10",
     "pytest>=8.2",
@@ -53,6 +54,7 @@ packages = [
     "lab_platform.control_plane_core",
     "lab_platform.control_plane",
     "lab_platform.core",
+    "lab_platform.core.decision_engine",
     "lab_platform.logging",
     "lab_platform.models",
     "lab_platform.persistence",
@@ -75,6 +77,7 @@ packages = [
 "lab_platform.control_plane_core" = "packages/control_plane_core/src/lab_platform/control_plane_core"
 "lab_platform.control_plane" = "apps/control_plane/src/lab_platform/control_plane"
 "lab_platform.core" = "packages/core/src/lab_platform/core"
+"lab_platform.core.decision_engine" = "packages/core/src/lab_platform/core/decision_engine"
 "lab_platform.logging" = "packages/logging/src/lab_platform/logging"
 "lab_platform.models" = "packages/models/src/lab_platform/models"
 "lab_platform.persistence" = "packages/persistence/src/lab_platform/persistence"
@@ -150,5 +153,5 @@ skip_covered = true
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.5.0",
+    "httpx2>=2.12,<3",
 ]

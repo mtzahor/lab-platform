@@ -28,9 +28,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
-      - name: Audit locked Python dependencies
+      - name: Audit locked Python dependencies including optional Jev
         run: |
-          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/requirements.txt
+          uv export --frozen --no-dev --no-emit-project --extra jev --format requirements-txt --output-file /tmp/requirements.txt
           uvx --from pip-audit==2.9.0 pip-audit --requirement /tmp/requirements.txt
       - name: Audit locked frontend dependencies
         run: npm audit --audit-level=high

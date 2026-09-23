@@ -92,6 +92,13 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (12, datetime('now'))"
         )
 
+    # Decision Engine storage is an optional post-v1 capability. Keep the core
+    # platform schema version stable so existing deployment cutlines remain valid;
+    # its own idempotent tables are installed as part of the central migration.
+    from lab_platform.persistence.decisions import DECISION_SCHEMA_SQL
+
+    connection.executescript(DECISION_SCHEMA_SQL)
+
 
 def _create_phase5_agent_tables(connection: sqlite3.Connection) -> None:
     connection.executescript(

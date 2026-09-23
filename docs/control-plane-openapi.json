@@ -2491,6 +2491,71 @@
         "title": "OperationalInterval",
         "type": "object"
       },
+      "OperatorFeedback": {
+        "additionalProperties": false,
+        "properties": {
+          "action_taken": {
+            "anyOf": [
+              {
+                "enum": [
+                  "retry_step",
+                  "power_cycle_dut",
+                  "reset_interface",
+                  "restart_test",
+                  "mark_failed",
+                  "request_human_review",
+                  "no_action"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Taken"
+          },
+          "actual_root_cause": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dut_failure",
+                  "communication_failure",
+                  "configuration_failure",
+                  "instrument_failure",
+                  "infrastructure_failure",
+                  "expected_test_failure",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Root Cause"
+          },
+          "notes": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Notes",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "accepted",
+              "rejected",
+              "different_action_taken"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "OperatorFeedback",
+        "type": "object"
+      },
       "Organisation": {
         "additionalProperties": false,
         "properties": {
@@ -11072,6 +11137,176 @@
           }
         ],
         "summary": "Cancel Distributed Workflow Run"
+      }
+    },
+    "/api/v1/workflow-runs/{operation_id}/diagnose": {
+      "post": {
+        "operationId": "diagnose_run_api_v1_workflow_runs__operation_id__diagnose_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Diagnose Run Api V1 Workflow Runs  Operation Id  Diagnose Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Diagnose Run",
+        "tags": [
+          "decision-engine"
+        ]
+      }
+    },
+    "/api/v1/workflow-runs/{operation_id}/diagnoses": {
+      "get": {
+        "operationId": "list_diagnoses_api_v1_workflow_runs__operation_id__diagnoses_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Diagnoses Api V1 Workflow Runs  Operation Id  Diagnoses Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "List Diagnoses",
+        "tags": [
+          "decision-engine"
+        ]
+      }
+    },
+    "/api/v1/workflow-runs/{operation_id}/diagnoses/{decision_id}/feedback": {
+      "post": {
+        "operationId": "record_feedback_api_v1_workflow_runs__operation_id__diagnoses__decision_id__feedback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "decision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Decision Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorFeedback"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Record Feedback Api V1 Workflow Runs  Operation Id  Diagnoses  Decision Id  Feedback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "summary": "Record Feedback",
+        "tags": [
+          "decision-engine"
+        ]
       }
     },
     "/api/v1/workflow-runs/{operation_id}/results": {
