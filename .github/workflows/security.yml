@@ -89,12 +89,12 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - uses: anchore/sbom-action@v0
+      - name: Generate runtime SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image: lab-platform-${{ matrix.service }}:security-gate
+          image-ref: lab-platform-${{ matrix.service }}:security-gate
           format: spdx-json
-          output-file: ${{ matrix.service }}.spdx.json
-          upload-artifact: false
+          output: ${{ matrix.service }}.spdx.json
       - uses: actions/upload-artifact@v7
         with:
           name: security-sbom-${{ matrix.service }}
