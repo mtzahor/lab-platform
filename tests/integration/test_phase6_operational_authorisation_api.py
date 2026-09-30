@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.control_plane_core import IssuedEnrollmentToken
 from lab_platform.control_plane_core.reservations import (
     CoordinatedReservationLease,
@@ -53,6 +53,8 @@ from lab_platform.models import (
     WorkflowRunStatus,
 )
 
+from tests.support.control_plane import make_control_plane_runtime
+
 PASSWORD = "correct horse battery staple"
 
 
@@ -63,28 +65,18 @@ def _runtime(
     hide_unauthorised_resources: bool = True,
     maximum_firmware_size_mb: int = 100,
 ) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "distributed": {"queue_commands_for_offline_agents": True},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "web": {"uploads": {"maximum_firmware_size_mb": maximum_firmware_size_mb}},
-                "authorisation": {
-                    "hide_unauthorised_resources": hide_unauthorised_resources,
-                },
-                "development": {
-                    "enabled": True,
-                    "auto_login_user": auto_login_user,
-                    "allow_insecure_agent_transport": True,
-                },
-            }
-        )
+    return make_control_plane_runtime(
+        tmp_path,
+        overrides={
+            "distributed": {"queue_commands_for_offline_agents": True},
+            "web": {"uploads": {"maximum_firmware_size_mb": maximum_firmware_size_mb}},
+            "authorisation": {"hide_unauthorised_resources": hide_unauthorised_resources},
+            "development": {
+                "auto_login_user": auto_login_user,
+                "allow_insecure_agent_transport": True,
+                "enabled": True,
+            },
+        },
     )
 
 

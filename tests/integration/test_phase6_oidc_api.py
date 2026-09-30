@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi.testclient import TestClient
 from httpx2 import Response
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.core.oidc import OidcProviderMetadata
 from lab_platform.models import (
     AuditEvent,
@@ -22,6 +22,8 @@ from lab_platform.models import (
     User,
     UserStatus,
 )
+
+from tests.support.control_plane import make_control_plane_runtime
 
 ISSUER = "https://identity.example.test"
 CLIENT_ID = "lab-platform"
@@ -347,36 +349,22 @@ def test_oidc_disabled_and_provider_error_are_explicit(tmp_path: Path) -> None:
 
 
 def _runtime(
-    tmp_path: Path,
-    *,
-    provider: FakeOidcProvider | None = None,
-    enabled: bool = True,
+    tmp_path: Path, *, provider: FakeOidcProvider | None = None, enabled: bool = True
 ) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "identity": {
-                    "oidc": {
-                        "enabled": enabled,
-                        "issuer_url": ISSUER if enabled else None,
-                        "client_id": CLIENT_ID if enabled else None,
-                        "client_secret_env": "TEST_OIDC_SECRET" if enabled else None,
-                        "clock_skew_seconds": 0,
-                    }
-                },
-                "development": {
-                    "enabled": True,
-                    "allow_insecure_agent_transport": True,
-                },
+    return make_control_plane_runtime(
+        tmp_path,
+        development_enabled=True,
+        overrides={
+            "identity": {
+                "oidc": {
+                    "enabled": enabled,
+                    "issuer_url": ISSUER if enabled else None,
+                    "client_id": CLIENT_ID if enabled else None,
+                    "client_secret_env": "TEST_OIDC_SECRET" if enabled else None,
+                    "clock_skew_seconds": 0,
+                }
             }
-        ),
+        },
         oidc_provider=provider,
     )
 

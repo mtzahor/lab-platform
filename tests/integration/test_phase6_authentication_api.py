@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.core.identity import IssuedApiCredential
 from lab_platform.models import (
     ApiTokenScope,
@@ -23,6 +23,8 @@ from lab_platform.models import (
     ServiceAccount,
     User,
 )
+
+from tests.support.control_plane import make_control_plane_runtime
 
 PASSWORD = "correct horse battery staple"
 
@@ -43,29 +45,16 @@ async def _login_audit_events(
 
 
 def _runtime(
-    tmp_path: Path,
-    *,
-    legacy_token_compatibility_enabled: bool = True,
+    tmp_path: Path, *, legacy_token_compatibility_enabled: bool = True
 ) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "authorisation": {
-                    "legacy_token_compatibility_enabled": (legacy_token_compatibility_enabled)
-                },
-                "development": {
-                    "enabled": True,
-                    "allow_insecure_agent_transport": True,
-                },
+    return make_control_plane_runtime(
+        tmp_path,
+        development_enabled=True,
+        overrides={
+            "authorisation": {
+                "legacy_token_compatibility_enabled": legacy_token_compatibility_enabled
             }
-        )
+        },
     )
 
 

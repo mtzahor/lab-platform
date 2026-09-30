@@ -5,7 +5,7 @@ from pathlib import Path
 
 import lab_platform.control_plane.api as control_plane_api
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.control_plane.dashboard_api import _refresh_sse_actor
 from lab_platform.models import (
     ApiTokenScope,
@@ -17,23 +17,23 @@ from lab_platform.models import (
 )
 from starlette.requests import Request
 
+from tests.support.control_plane import make_control_plane_runtime
+
 PASSWORD = "correct horse battery staple"
 
 
 def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "0.0.0.0",
-                    "public_url": "https://lab.example.test",
-                    "tls_certificate_path": tmp_path / "server.crt",
-                    "tls_private_key_path": tmp_path / "server.key",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-            }
-        )
+    return make_control_plane_runtime(
+        tmp_path,
+        overrides={
+            "control_plane": {
+                "host": "0.0.0.0",
+                "public_url": "https://lab.example.test",
+                "tls_certificate_path": tmp_path / "server.crt",
+                "tls_private_key_path": tmp_path / "server.key",
+            },
+            "development": {},
+        },
     )
 
 

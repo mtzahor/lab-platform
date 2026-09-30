@@ -1405,13 +1405,10 @@ def test_ci_exit_mapping_and_result_diagnostics_cover_failure_precedence() -> No
     assert cli._ci_session_error_code({"errors": [42, "not a code"]}) is None
 
 
-def test_cli_error_dispatch_server_and_formatting_helpers(
-    tmp_path: Path,
+def test_cli_reports_interrupt_and_invalid_request(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    dispatch = cli._dispatch
-
     def interrupt(_args: object) -> int:
         raise KeyboardInterrupt
 
@@ -1427,6 +1424,11 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
     assert "Hardware CI cancelled" in captured.err
     assert "bad input" in captured.err
 
+
+def test_cli_dispatch_routes_and_rejects_unknown_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatch = cli._dispatch
     client = ScriptedClient()
     monkeypatch.setattr(cli, "_client", lambda _args: client)
     client.queue("GET", "/api/v1/version", {"version": "0.6.0"})
@@ -1440,6 +1442,11 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
     with pytest.raises(AssertionError, match="unreachable command"):
         dispatch(SimpleNamespace(command="unknown"))
 
+
+def test_cli_resolves_environment_and_config_servers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LAB_PLATFORM_SERVER", "https://environment.example")
     assert cli._resolve_server(SimpleNamespace(server=None, config=tmp_path / "none")) == (
         "https://environment.example"
@@ -1456,6 +1463,11 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
         "https://nested.example"
     )
 
+
+def test_cli_rejects_invalid_firmware_and_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     empty = tmp_path / "empty.bin"
     empty.write_bytes(b"")
     with pytest.raises(ValueError, match="empty"):
@@ -1472,6 +1484,11 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
     with pytest.raises(ValueError, match="unsafe artifact"):
         cli._safe_artifact_filename("../secret")
 
+
+def test_cli_writes_github_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     github_output = tmp_path / "github-output.txt"
     monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
     cli._append_github_outputs({"single": "value", "multiline": "one\ntwo"})
@@ -1479,6 +1496,8 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
     assert "single=value" in github_text
     assert "multiline<<lab_platform_" in github_text
 
+
+def test_ci_datetime_and_polling_validation() -> None:
     assert cli._parse_ci_datetime("not-a-date") is None
     naive = cli._parse_ci_datetime("2026-07-29T12:00:00")
     assert naive is not None and naive.tzinfo is not None
@@ -1486,6 +1505,10 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
         cli._ci_poll_interval(SimpleNamespace(interval=0))
     assert cli._ci_configured_seconds({"timeout": True}, "timeout", default=4.0) == 4.0
 
+
+def test_cli_formats_json_and_tables(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     cli._print_collection({"items": []}, "json", cli._agent_table)
     cli._print_operation_created({"operation_id": "operation-2"}, "json")
     cli._health_table(
@@ -1525,7 +1548,7 @@ def test_cli_error_dispatch_server_and_formatting_helpers(
     assert "home-lab/bench-01" in capsys.readouterr().out
 
 
-def test_operation_json_cancel_wait_and_internal_guard_branches(
+def test_operation_json_cancel_and_wait_for_terminal(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1558,7 +1581,12 @@ def test_operation_json_cancel_wait_and_internal_guard_branches(
         "status": "SUCCEEDED",
     }
 
-    for function, namespace in (
+    assert '"cancellation_requested": true' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("function", "namespace"),
+    (
         (cli._agent_command, SimpleNamespace(agent_command="unknown", agent_id="agent-1")),
         (
             cli._agent_enrollment_token_command,
@@ -1570,7 +1598,10 @@ def test_operation_json_cancel_wait_and_internal_guard_branches(
         (cli._ci_command, SimpleNamespace(ci_command="unknown")),
         (cli._ci_session_command, SimpleNamespace(ci_session_command="unknown", session_id="one")),
         (cli._operation_command, SimpleNamespace(operation_command="unknown")),
-    ):
-        with pytest.raises(AssertionError, match="unreachable"):
-            function(client, namespace)
-    assert '"cancellation_requested": true' in capsys.readouterr().out
+    ),
+)
+def test_cli_command_handlers_reject_unknown_commands(
+    function: Any, namespace: SimpleNamespace
+) -> None:
+    with pytest.raises(AssertionError, match="unreachable"):
+        function(ScriptedClient(), namespace)

@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from lab_platform.agent_protocol import CommandRequestEnvelope
 from lab_platform.agent_runtime.command_journal import command_fingerprint
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime
+from lab_platform.control_plane import ControlPlaneRuntime
 from lab_platform.models import (
     AgentConnectionRecord,
     AgentStatus,
@@ -31,24 +31,15 @@ from lab_platform.models import (
 from lab_platform.persistence.distributed import SQLiteAgentConnectionRepository
 from starlette.websockets import WebSocketState
 
+from tests.support.control_plane import make_control_plane_runtime
+
 
 def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {
-                    "directory": tmp_path / "artifacts",
-                    "transfer_token_ttl_seconds": 300,
-                },
-                "development": {"allow_insecure_agent_transport": True},
-            }
-        )
+    return make_control_plane_runtime(
+        tmp_path,
+        overrides={
+            "artifacts": {"directory": tmp_path / "artifacts", "transfer_token_ttl_seconds": 300}
+        },
     )
 
 

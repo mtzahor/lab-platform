@@ -11,7 +11,7 @@ import lab_platform.control_plane.api as control_plane_api
 import lab_platform.control_plane.dashboard_api as dashboard_api_module
 import pytest
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.control_plane.dashboard_api import (
     OperationSummary,
     OverviewCounts,
@@ -56,22 +56,7 @@ from lab_platform.models import (
 )
 from starlette.requests import Request
 
-
-def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "development": {"allow_insecure_agent_transport": True},
-            }
-        )
-    )
+from tests.support.control_plane import make_control_plane_runtime as _runtime
 
 
 def _bootstrap(client: TestClient) -> dict[str, str]:
