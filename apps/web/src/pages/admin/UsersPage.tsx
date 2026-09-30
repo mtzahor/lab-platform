@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../../lib/table";
 import { KeyRound, Plus, RefreshCw, UserRound, UserRoundCheck, UserRoundX } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -154,8 +154,8 @@ export function UsersPage() {
       notify({ title: "Password reset failed", message: errorMessage(error), tone: "error" });
     }
   }
-  const columns: ColumnDef<ApiRecord, any>[] = (() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns: ApiColumnDef[] = (() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor((row) => stringValue(row, "display_name") ?? "", {
         id: "name",

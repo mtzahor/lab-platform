@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../lib/table";
 import { Bot, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { generatedApi, labels, records, stringValue, type ApiRecord } from "../api/client";
+import { generatedApi, labels, records, stringValue } from "../api/client";
 import { useLive } from "../app/LiveProvider";
 import {
   Button,
@@ -49,8 +49,8 @@ export function AgentsPage() {
       (!location || stringValue(item, "location") === location) &&
       (!version || stringValue(item, "version") === version),
   );
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns = useMemo<ApiColumnDef[]>(() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor((row) => stringValue(row, "name") ?? stringValue(row, "slug") ?? "", {
         id: "name",

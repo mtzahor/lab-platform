@@ -1,4 +1,4 @@
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../lib/table";
 import { Download, Eye, FileArchive, RefreshCw, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -118,8 +118,8 @@ export function ArtifactsPage() {
       setPreviewLoading(false);
     }
   }
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns = useMemo<ApiColumnDef[]>(() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor((row) => stringValue(row, "name") ?? "", {
         id: "name",

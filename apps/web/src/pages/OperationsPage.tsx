@@ -1,8 +1,8 @@
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../lib/table";
 import { Activity, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { generatedApi, nested, records, stringValue, type ApiRecord } from "../api/client";
+import { generatedApi, nested, records, stringValue } from "../api/client";
 import {
   Button,
   DataTable,
@@ -39,8 +39,8 @@ export function OperationsPage() {
       (!status || stringValue(item, "status") === status) &&
       (!type || stringValue(item, "operation_type") === type),
   );
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns = useMemo<ApiColumnDef[]>(() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor((row) => stringValue(row, "operation_type") ?? "", {
         id: "type",
