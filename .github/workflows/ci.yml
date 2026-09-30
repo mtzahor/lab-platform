@@ -142,7 +142,7 @@ jobs:
           load: true
           tags: lab-platform-control-plane:deployment-acceptance
           cache-from: type=gha,scope=deployment-acceptance-control-plane
-          cache-to: type=gha,mode=max,scope=deployment-acceptance-control-plane
+          cache-to: type=gha,mode=max,scope=deployment-acceptance-control-plane,ignore-error=true
       - name: Build tagged Agent image
         uses: docker/build-push-action@v6
         with:
@@ -151,7 +151,7 @@ jobs:
           load: true
           tags: lab-platform-agent:deployment-acceptance
           cache-from: type=gha,scope=deployment-acceptance-agent
-          cache-to: type=gha,mode=max,scope=deployment-acceptance-agent
+          cache-to: type=gha,mode=max,scope=deployment-acceptance-agent,ignore-error=true
       - name: Exercise deployment, migration, backup, and isolated restore
         run: >-
           python scripts/deployment_acceptance.py
