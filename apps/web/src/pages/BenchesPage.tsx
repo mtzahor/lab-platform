@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../lib/table";
 import { CircuitBoard, Filter, LayoutGrid, List, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -141,8 +141,8 @@ export function BenchesPage() {
       }),
     [agent, benches, capability, health, kind, location, search, status, targetType],
   );
-  const columnHelper = createColumnHelper<ApiRecord>();
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(
+  const columnHelper = createApiColumnHelper();
+  const columns = useMemo<ApiColumnDef[]>(
     () => [
       columnHelper.accessor((row) => stringValue(row, "name") ?? "", {
         id: "name",

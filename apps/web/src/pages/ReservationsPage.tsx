@@ -1,4 +1,4 @@
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../lib/table";
 import { CalendarClock, CalendarPlus, Clock3, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -98,8 +98,8 @@ export function ReservationsPage() {
     },
     [["reservations"], ["benches"], ["overview"]],
   );
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns = useMemo<ApiColumnDef[]>(() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor((row) => stringValue(reservation(row), "bench_id") ?? "", {
         id: "bench",

@@ -10,15 +10,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import {
-  flexRender,
-  getCoreRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
-  useReactTable,
-  type ColumnDef,
-  type SortingState,
-} from "@tanstack/react-table";
+import { flexRender, useTable, type SortingState } from "@tanstack/react-table";
 import {
   useEffect,
   useId,
@@ -31,6 +23,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { apiErrorDetails, errorMessage, type ApiRecord } from "../api/client";
+import { dataTableFeatures, type ApiColumnDef } from "../lib/table";
 import { titleCase } from "../lib/format";
 import { statusIcon, statusTone } from "../lib/status";
 
@@ -240,21 +233,19 @@ export function DataTable({
   onRowClick,
 }: {
   data: ApiRecord[];
-  columns: ColumnDef<ApiRecord, any>[];
+  columns: ApiColumnDef[];
   rowLabel?: (row: ApiRecord) => string;
   pageSize?: number;
   onRowClick?: (row: ApiRecord) => void;
 }) {
   const [sorting, setSorting] = useState<SortingState>([]);
-  const table = useReactTable({
+  const table = useTable({
+    features: dataTableFeatures,
     data,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    initialState: { pagination: { pageSize } },
+    initialState: { pagination: { pageIndex: 0, pageSize } },
   });
 
   return (
@@ -313,7 +304,7 @@ export function DataTable({
       {table.getPageCount() > 1 && (
         <div className="table-pagination">
           <span>
-            Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount()} ·{" "}
+            Page {table.state.pagination.pageIndex + 1} of {table.getPageCount()} ·{" "}
             {data.length.toLocaleString()} results
           </span>
           <div>

@@ -1,4 +1,4 @@
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../lib/table";
 import { BellRing, Bot, CheckCircle2, Clock3, Gauge, RefreshCw, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -240,8 +240,8 @@ export function AnalyticsPage() {
     [benches],
   );
 
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns = useMemo<ApiColumnDef[]>(() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor((row) => stringValue(row, "name") ?? stringValue(row, "bench_id") ?? "", {
         id: "bench",

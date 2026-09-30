@@ -1,4 +1,4 @@
-import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { createApiColumnHelper, type ApiColumnDef } from "../../lib/table";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { FileClock, RefreshCw, ShieldAlert } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -76,8 +76,8 @@ export function AuditPage() {
   const resourceTypes = [
     ...new Set(items.map((item) => stringValue(item, "resource_type")).filter(Boolean) as string[]),
   ].sort();
-  const columns = useMemo<ColumnDef<ApiRecord, any>[]>(() => {
-    const column = createColumnHelper<ApiRecord>();
+  const columns = useMemo<ApiColumnDef[]>(() => {
+    const column = createApiColumnHelper();
     return [
       column.accessor(
         (row) => stringValue(row, "created_at") ?? stringValue(row, "timestamp") ?? "",
