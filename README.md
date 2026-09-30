@@ -271,6 +271,11 @@ uv build
 uv run python scripts/verify_web_wheel.py dist/*.whl
 ```
 
+The dashboard typecheck and build use TypeScript 7 via the `@typescript/native` npm alias.
+The separate `typescript` 5 dependency supplies the JavaScript compiler API required by
+`openapi-typescript` and `typescript-eslint`; it does not compile the dashboard.
+
+
 Documentation starts at [docs/index.md](docs/index.md). Core references are
 [ARCHITECTURE.md](ARCHITECTURE.md), [API.md](API.md), [CLI.md](CLI.md), and
 [ROADMAP.md](ROADMAP.md). Provider guides cover [GitHub Actions](docs/GITHUB_ACTIONS.md),
