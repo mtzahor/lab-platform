@@ -7,7 +7,7 @@ from typing import cast
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import create_app
 from lab_platform.control_plane.operational_api import reconcile_operational_alerts
 from lab_platform.control_plane.operational_state import EventBackedOperationalState
 from lab_platform.core import create_alert
@@ -24,22 +24,7 @@ from lab_platform.models import (
     HealthStatus,
 )
 
-
-def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "development": {"allow_insecure_agent_transport": True},
-            }
-        )
-    )
+from tests.support.control_plane import make_control_plane_runtime as _runtime
 
 
 def _bootstrap_admin(client: TestClient) -> dict[str, str]:

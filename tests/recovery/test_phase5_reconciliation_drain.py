@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -42,7 +42,6 @@ from lab_platform.models import (
     GlobalBenchKind,
     GlobalBenchStatus,
     HealthStatus,
-    OrganisationMembership,
     Principal,
     PrincipalType,
     ReconciliationBenchSnapshot,
@@ -58,44 +57,13 @@ from lab_platform.models import (
     RoleSubjectType,
 )
 
+from tests.support.authorisation import ScopedAuthorisationRepository
+
 NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 AGENT_ID = UUID(int=1)
 OLD_BOOT_ID = UUID(int=101)
 NEW_BOOT_ID = UUID(int=102)
 PHASE6_DRAIN_PRINCIPAL_ID = UUID(int=80_001)
-
-
-class ScopedAuthorisationRepository:
-    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
-        self.assignments = tuple(assignments)
-
-    async def get_organisation_membership(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> OrganisationMembership | None:
-        del organisation_id, user_id
-        return None
-
-    async def list_team_ids_for_user(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> Collection[UUID]:
-        del organisation_id, user_id
-        return ()
-
-    async def list_role_assignments(
-        self,
-        organisation_id: UUID,
-        subjects: Collection[tuple[RoleSubjectType, UUID]],
-    ) -> Sequence[RoleAssignment]:
-        return tuple(
-            assignment
-            for assignment in self.assignments
-            if assignment.organisation_id == organisation_id
-            and (assignment.subject_type, assignment.subject_id) in subjects
-        )
 
 
 def _agent(status: AgentStatus = AgentStatus.ONLINE, *, number: int = 1) -> AgentRecord:

@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.control_plane_core.reservations import (
     CoordinatedReservationLease,
     LeaseApplicationReceipt,
@@ -30,6 +30,8 @@ from lab_platform.models import (
     ReservationSource,
     ReservationStatus,
 )
+
+from tests.support.control_plane import make_control_plane_runtime
 
 PASSWORD = "correct horse battery staple"
 
@@ -59,25 +61,14 @@ class IsolatedLab:
 
 
 def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "agent_gateway": {"monitor_interval_seconds": 3_600},
-                "distributed": {"queue_commands_for_offline_agents": True},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "authorisation": {"hide_unauthorised_resources": True},
-                "development": {
-                    "enabled": True,
-                    "allow_insecure_agent_transport": True,
-                },
-            }
-        )
+    return make_control_plane_runtime(
+        tmp_path,
+        development_enabled=True,
+        overrides={
+            "agent_gateway": {"monitor_interval_seconds": 3600},
+            "distributed": {"queue_commands_for_offline_agents": True},
+            "authorisation": {"hide_unauthorised_resources": True},
+        },
     )
 
 

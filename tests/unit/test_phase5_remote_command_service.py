@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -50,7 +50,6 @@ from lab_platform.models import (
     GlobalBenchRecord,
     GlobalBenchStatus,
     HealthStatus,
-    OrganisationMembership,
     Principal,
     PrincipalType,
     RemoteCommand,
@@ -65,6 +64,8 @@ from lab_platform.models import (
     WorkflowDefinition,
 )
 
+from tests.support.authorisation import ScopedAuthorisationRepository
+
 NOW = datetime(2026, 7, 29, 9, tzinfo=UTC)
 AGENT_ID = UUID("10000000-0000-0000-0000-000000000001")
 OTHER_AGENT_ID = UUID("10000000-0000-0000-0000-000000000002")
@@ -72,39 +73,6 @@ CONNECTION_ID = UUID("20000000-0000-0000-0000-000000000001")
 RESERVATION_ID = UUID("30000000-0000-0000-0000-000000000001")
 BENCH_ID = "home-lab/esp32-01"
 PHASE6_PRINCIPAL_ID = UUID(int=60_001)
-
-
-class ScopedAuthorisationRepository:
-    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
-        self.assignments = tuple(assignments)
-
-    async def get_organisation_membership(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> OrganisationMembership | None:
-        del organisation_id, user_id
-        return None
-
-    async def list_team_ids_for_user(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> Collection[UUID]:
-        del organisation_id, user_id
-        return ()
-
-    async def list_role_assignments(
-        self,
-        organisation_id: UUID,
-        subjects: Collection[tuple[RoleSubjectType, UUID]],
-    ) -> Sequence[RoleAssignment]:
-        return tuple(
-            assignment
-            for assignment in self.assignments
-            if assignment.organisation_id == organisation_id
-            and (assignment.subject_type, assignment.subject_id) in subjects
-        )
 
 
 class InMemoryAuthorisationSnapshotRepository:

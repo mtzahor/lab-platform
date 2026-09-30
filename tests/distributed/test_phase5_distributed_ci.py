@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Collection, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
@@ -62,6 +62,8 @@ from lab_platform.persistence import SQLiteCiSessionRepository, SQLiteDatabase
 from lab_platform.persistence.distributed import SQLiteRemoteArtifactRepository
 from lab_platform.persistence.distributed_adapters import SQLiteRemoteCommandServiceRepository
 
+from tests.support.authorisation import ScopedAuthorisationRepository
+
 NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 
 
@@ -102,39 +104,6 @@ class FakeCatalog:
             and (organisation_id is None or item.organisation_id == organisation_id)
         ]
         return max(matches, key=lambda item: item.version) if matches else None
-
-
-class ScopedAuthorisationRepository:
-    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
-        self.assignments = tuple(assignments)
-
-    async def get_organisation_membership(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> None:
-        del organisation_id, user_id
-        return None
-
-    async def list_team_ids_for_user(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> Collection[UUID]:
-        del organisation_id, user_id
-        return ()
-
-    async def list_role_assignments(
-        self,
-        organisation_id: UUID,
-        subjects: Collection[tuple[RoleSubjectType, UUID]],
-    ) -> Sequence[RoleAssignment]:
-        return tuple(
-            assignment
-            for assignment in self.assignments
-            if assignment.organisation_id == organisation_id
-            and (assignment.subject_type, assignment.subject_id) in subjects
-        )
 
 
 class FakeCoordinator:

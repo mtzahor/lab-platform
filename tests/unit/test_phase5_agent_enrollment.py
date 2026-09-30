@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -29,7 +28,6 @@ from lab_platform.models import (
     AuthenticationContext,
     EnrollmentStatus,
     EventRecord,
-    OrganisationMembership,
     Principal,
     PrincipalType,
     ResourceType,
@@ -37,6 +35,8 @@ from lab_platform.models import (
     RoleName,
     RoleSubjectType,
 )
+
+from tests.support.authorisation import ScopedAuthorisationRepository
 
 NOW = datetime(2026, 7, 26, 12, tzinfo=UTC)
 ENROLLMENT_SECRET = f"lpe_{'e' * 48}"
@@ -46,39 +46,6 @@ DEFAULT_REQUEST_ID = UUID(int=10_000)
 FIRST_ORGANISATION_ID = UUID(int=20_001)
 SECOND_ORGANISATION_ID = UUID(int=20_002)
 PHASE6_PRINCIPAL_ID = UUID(int=20_003)
-
-
-class ScopedAuthorisationRepository:
-    def __init__(self, assignments: Sequence[RoleAssignment]) -> None:
-        self.assignments = tuple(assignments)
-
-    async def get_organisation_membership(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> OrganisationMembership | None:
-        del organisation_id, user_id
-        return None
-
-    async def list_team_ids_for_user(
-        self,
-        organisation_id: UUID,
-        user_id: UUID,
-    ) -> Collection[UUID]:
-        del organisation_id, user_id
-        return ()
-
-    async def list_role_assignments(
-        self,
-        organisation_id: UUID,
-        subjects: Collection[tuple[RoleSubjectType, UUID]],
-    ) -> Sequence[RoleAssignment]:
-        return tuple(
-            assignment
-            for assignment in self.assignments
-            if assignment.organisation_id == organisation_id
-            and (assignment.subject_type, assignment.subject_id) in subjects
-        )
 
 
 def _phase6_context(

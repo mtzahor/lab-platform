@@ -4,8 +4,10 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi.testclient import TestClient
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime, create_app
+from lab_platform.control_plane import ControlPlaneRuntime, create_app
 from lab_platform.models import ApiTokenScope
+
+from tests.support.control_plane import make_control_plane_runtime
 
 OWNER_PASSWORD = "correct horse battery staple"
 MEMBER_PASSWORD = "member password is long enough"
@@ -13,23 +15,7 @@ REPLACEMENT_PASSWORD = "replacement password is long enough"
 
 
 def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "development": {
-                    "enabled": True,
-                    "allow_insecure_agent_transport": True,
-                },
-            }
-        )
-    )
+    return make_control_plane_runtime(tmp_path, development_enabled=True)
 
 
 async def _bootstrap_owner(runtime: ControlPlaneRuntime) -> None:

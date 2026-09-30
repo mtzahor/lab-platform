@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, call
 from uuid import UUID, uuid4
 
 import pytest
-from lab_platform.control_plane import ControlPlaneConfig, ControlPlaneRuntime
 from lab_platform.control_plane.runtime import _sqlite_path
 from lab_platform.control_plane_core.artifacts import IssuedArtifactTransfer
 from lab_platform.control_plane_core.reconciliation import ReconciliationResult
@@ -40,22 +39,7 @@ from lab_platform.models import (
     ResourceType,
 )
 
-
-def _runtime(tmp_path: Path) -> ControlPlaneRuntime:
-    return ControlPlaneRuntime(
-        ControlPlaneConfig.model_validate(
-            {
-                "control_plane": {
-                    "host": "127.0.0.1",
-                    "port": 8443,
-                    "public_url": "http://127.0.0.1:8443",
-                },
-                "database": {"url": f"sqlite:///{tmp_path / 'control-plane.db'}"},
-                "artifacts": {"directory": tmp_path / "artifacts"},
-                "development": {"allow_insecure_agent_transport": True},
-            }
-        )
-    )
+from tests.support.control_plane import make_control_plane_runtime as _runtime
 
 
 def _reconciliation_result(agent_id: UUID) -> ReconciliationResult:
