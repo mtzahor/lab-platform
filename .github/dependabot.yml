@@ -22,6 +22,11 @@ updates:
 
   - package-ecosystem: npm
     directory: /apps/web
+    # API generation and ESLint require the TypeScript 5 JavaScript API.
+    # Application typechecking uses the separate @typescript/native alias.
+    ignore:
+      - dependency-name: typescript
+        versions: [">=6"]
     schedule:
       interval: weekly
     groups:
