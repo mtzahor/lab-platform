@@ -4,6 +4,7 @@ from __future__ import annotations
 # mypy: disable-error-code="no-untyped-def,no-untyped-call"
 import asyncio
 import copy
+import importlib.metadata
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -526,7 +527,7 @@ def test_official_sdk_request_contract(monkeypatch):
     settings = DecisionSettings(enabled=True, api_key=SecretStr("synthetic-api-key"))
     decision = asyncio.run(JevDecisionEngine(settings).diagnose_run(serialize_run(*sample())))
     assert decision.classification == "communication_failure"
-    assert decision.raw_metadata["sdk_version"] == "0.7.1"
+    assert decision.raw_metadata["sdk_version"] == importlib.metadata.version("typesafe-sdk")
     assert len(requests) == 1
     assert requests[0].url.path == "/v1/systemone"
     assert set(json.loads(requests[0].content)["questions"]) == set(questions())
