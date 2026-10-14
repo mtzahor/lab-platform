@@ -460,20 +460,45 @@ wheels = [
 ]
 
 [[package]]
+name = "esp-pylib"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c6/af/ebfab3ce5babdf0bc068d13205c3b28a4fe55f41d7cc229e1991f3f07e43/esp_pylib-1.2.0.tar.gz", hash = "sha256:51f0c44a0f7a92fdded9cab54bde92441b22b464f7d684ed179afb57000bed70", size = 100301, upload-time = "2026-10-07T07:44:12.903Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/63/5cbd52f1993887756b7d60d4b7a8a99ee0b2efda7526ae43d3fa2eefbf7f/esp_pylib-1.2.0-py3-none-any.whl", hash = "sha256:581fd31eb20db4b80519fe883eaeacf5b3c6a2c0b7cce353a7d326ae7cbd4f5f", size = 59355, upload-time = "2026-10-07T07:44:11.643Z" },
+]
+
+[package.optional-dependencies]
+cli = [
+    { name = "click" },
+    { name = "rich-click" },
+]
+ide = [
+    { name = "websockets" },
+]
+serial = [
+    { name = "pyserial" },
+]
+
+[[package]]
 name = "esptool"
-version = "5.3.0"
+version = "5.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bitstring" },
     { name = "click" },
     { name = "cryptography" },
+    { name = "esp-pylib", extra = ["cli", "ide", "serial"] },
     { name = "intelhex" },
     { name = "pyserial" },
     { name = "pyyaml" },
     { name = "reedsolo" },
     { name = "rich-click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/82/ca/aa2a6aafe214b3338eb56c5dc941e7e83a0f9e8b9bd05ac91b5d1a6ee9c9/esptool-5.3.0.tar.gz", hash = "sha256:0a077cb3ee8e60e223882c06ab7dae9b3686816c2547904d7472a42e6284e7de", size = 487446, upload-time = "2026-06-01T15:21:45.662Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/c8/15a0d5a80a81d7a33d1bdf4a75db4c3b4334e53ef81f178cd52567acde80/esptool-5.5.0.tar.gz", hash = "sha256:cfc1d1c6d1699427451af1be7335efa835b7974c61ed86d77927d9553c443d57", size = 521828, upload-time = "2026-10-08T08:55:50.746Z" }
 
 [[package]]
 name = "fastapi"
@@ -616,7 +641,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35,<2" },
     { name = "cryptography", specifier = ">=50,<51" },
-    { name = "esptool", specifier = ">=5.2,<5.5" },
+    { name = "esptool", specifier = ">=5.2,<5.6" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "httpx2", marker = "extra == 'jev'", specifier = ">=2.12,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
