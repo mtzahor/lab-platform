@@ -30,7 +30,6 @@ from lab_platform.control_plane.gateway import (
     _control_plane_envelope,
     _decode_message,
     _safe_reason,
-    _utc,
 )
 from lab_platform.control_plane_core.commands import RemoteCommandService
 from lab_platform.control_plane_core.errors import AgentAuthenticationFailedError
@@ -185,9 +184,6 @@ def test_gateway_transport_helpers_validate_secrets_sizes_types_and_timestamps()
     assert _safe_reason(BenchNotFoundError("missing")) == "BENCH_NOT_FOUND"
     assert _safe_reason(ProtocolMessageInvalidError("invalid")) == "PROTOCOL_MESSAGE_INVALID"
     assert _safe_reason(ValueError("sensitive detail")) == "PROTOCOL_MESSAGE_INVALID"
-    assert _utc(NOW) == NOW
-    with pytest.raises(ValueError, match="timezone-aware"):
-        _utc(NOW.replace(tzinfo=None))
 
 
 def test_close_socket_is_idempotent_bounded_and_suppresses_close_races() -> None:

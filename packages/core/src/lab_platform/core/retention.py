@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import UUID
 
 from lab_platform.core.artifact_storage import ArtifactStorage
+from lab_platform.core.clock import as_utc
 
 
 class RetentionClass(StrEnum):
@@ -49,7 +50,7 @@ class RetentionPolicy:
         *,
         failed_workflow: bool = False,
     ) -> datetime | None:
-        created = _utc(created_at, field_name="artifact creation time")
+        created = as_utc(created_at, field="artifact creation time")
         configured = self.class_days.get(retention_class)
         if retention_class not in self.class_days:
             configured = (
@@ -78,7 +79,7 @@ class RetentionCandidate:
     attempt_count: int = 1
 
     def __post_init__(self) -> None:
-        _utc(self.expires_at, field_name="artifact expiry time")
+        as_utc(self.expires_at, field="artifact expiry time")
         if self.size_bytes < 0:
             raise ValueError("retained artifact size cannot be negative")
         if self.state is not RetentionState.PENDING_DELETION:
@@ -224,7 +225,7 @@ class RetentionWorker:
     ) -> RetentionRunResult:
         if limit <= 0:
             raise ValueError("retention batch size must be positive")
-        observed_at = _utc(now or self._clock(), field_name="retention run time")
+        observed_at = as_utc(now or self._clock(), field="retention run time")
         candidates = await self._repository.claim_due(
             now=observed_at,
             limit=limit,
@@ -353,12 +354,6 @@ def retention_class_for_artifact_type(artifact_type: str) -> RetentionClass:
         "diagnostic_bundle": RetentionClass.DIAGNOSTIC_BUNDLE,
     }
     return aliases.get(normalized, RetentionClass.OTHER)
-
-
-def _utc(value: datetime, *, field_name: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field_name} must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 def _bounded_error(exc: Exception) -> str:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -14,6 +14,7 @@ from lab_platform.control_plane_core.errors import (
     AgentNotFoundError,
     AgentRevokedError,
 )
+from lab_platform.core.clock import as_utc
 from lab_platform.core.errors import PlatformError
 from lab_platform.models import (
     AgentConnectionRecord,
@@ -299,7 +300,7 @@ class AgentPresenceService:
         agent_version: str | None = None,
         observed_clock_offset_seconds: float = 0,
     ) -> ConnectionRegistration:
-        now = _as_utc(observed_at, field="connection timestamp")
+        now = as_utc(observed_at, field="connection timestamp")
         _validate_monotonic(observed_monotonic)
         _validate_sequence(sequence_number, minimum=1)
         if not math.isfinite(observed_clock_offset_seconds):
@@ -373,7 +374,7 @@ class AgentPresenceService:
         observed_monotonic: float,
         observed_clock_offset_seconds: float | None = None,
     ) -> ConnectionRegistration:
-        now = _as_utc(observed_at, field="heartbeat timestamp")
+        now = as_utc(observed_at, field="heartbeat timestamp")
         _validate_monotonic(observed_monotonic)
         current = await self.require_current_connection(
             agent_id,
@@ -501,7 +502,7 @@ class AgentPresenceService:
         ):
             return False
         agent = await self.get_agent(agent_id)
-        now = _as_utc(observed_at, field="disconnect timestamp")
+        now = as_utc(observed_at, field="disconnect timestamp")
         transition = _offline_transition(agent, current, now)
         # Fail safe: make remote benches unavailable before publishing the Agent
         # as disconnected. If the connection is superseded during this call, the
@@ -522,7 +523,7 @@ class AgentPresenceService:
         observed_at: datetime,
         observed_monotonic: float,
     ) -> tuple[PresenceTransition, ...]:
-        now = _as_utc(observed_at, field="presence timeout timestamp")
+        now = as_utc(observed_at, field="presence timeout timestamp")
         _validate_monotonic(observed_monotonic)
         transitions: list[PresenceTransition] = []
         for current in await self._repository.list_active_connections():
@@ -702,12 +703,6 @@ def _non_regressing_agent_time(agent: AgentRecord, observed_at: datetime) -> dat
     if agent.disconnected_at is not None:
         candidates.append(agent.disconnected_at)
     return max(candidates)
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 def _validate_monotonic(value: float) -> None:

@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import NoReturn, Protocol
 from uuid import UUID, uuid4
@@ -24,6 +24,7 @@ from lab_platform.control_plane_core.errors import (
     ReservationLeaseVersionMismatchError,
 )
 from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.core.errors import (
     AuthenticationRequiredError,
     BenchAlreadyReservedError,
@@ -299,7 +300,7 @@ class CentralReservationLeaseService:
         self._scheduled_repository = scheduled_repository
         self._directory = directory
         self._synchronizer = synchronizer
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._id_factory = id_factory or uuid4
         self._default_reservation_duration = default_reservation_duration_seconds
         self._maximum_reservation_duration = maximum_reservation_duration_seconds
@@ -463,7 +464,7 @@ class CentralReservationLeaseService:
         # Validate the eventual lease request now so a scheduled request cannot become
         # permanently unactivatable only after its start time.
         lease_ttl = self._lease_ttl(lease_ttl_seconds)
-        start = _as_utc(starts_at, field="reservation start timestamp")
+        start = as_utc(starts_at, field="reservation start timestamp")
         now = self._now()
         if start <= now:
             raise ReservationTimeConflictError(
@@ -1100,7 +1101,7 @@ class CentralReservationLeaseService:
         observed = (
             now
             if agent_observed_at is None
-            else _as_utc(
+            else as_utc(
                 agent_observed_at,
                 field="Agent lease observation timestamp",
             )
@@ -1336,7 +1337,7 @@ class CentralReservationLeaseService:
         try:
             receipt = await self._synchronizer.apply_lease(pending.lease)
             _require_matching_receipt(pending.lease, receipt)
-            receipt_time = _as_utc(
+            receipt_time = as_utc(
                 receipt.confirmed_at,
                 field="lease application confirmation timestamp",
             )
@@ -1527,7 +1528,7 @@ class CentralReservationLeaseService:
         )
 
     def _now(self) -> datetime:
-        return _as_utc(self._clock(), field="reservation lease timestamp")
+        return as_utc(self._clock(), field="reservation lease timestamp")
 
     def _reservation_duration(self, requested: int | None) -> int:
         duration = self._default_reservation_duration if requested is None else requested
@@ -1552,7 +1553,7 @@ def _terminal_record(
     occurred_at: datetime,
 ) -> CoordinatedReservationLease:
     timestamp = max(
-        _as_utc(occurred_at, field="reservation terminal timestamp"),
+        as_utc(occurred_at, field="reservation terminal timestamp"),
         current.lease.valid_from,
     )
     reservation_updates: dict[str, object] = {
@@ -1575,7 +1576,7 @@ def _activated_reservation(
     reservation: Reservation,
     confirmed_at: datetime,
 ) -> Reservation:
-    timestamp = _as_utc(confirmed_at, field="reservation activation timestamp")
+    timestamp = as_utc(confirmed_at, field="reservation activation timestamp")
     starts_at = reservation.starts_at or reservation.created_at
     activated_at = max(timestamp, starts_at)
     return reservation.model_copy(
@@ -1609,8 +1610,8 @@ def _validate_coordination_state(record: CoordinatedReservationLease) -> None:
     if record.state is ReservationLeaseState.UNKNOWN:
         if record.unknown_since is None or record.reconciliation_deadline is None:
             raise ValueError("UNKNOWN lease requires reconciliation timestamps")
-        unknown_since = _as_utc(record.unknown_since, field="unknown lease timestamp")
-        deadline = _as_utc(
+        unknown_since = as_utc(record.unknown_since, field="unknown lease timestamp")
+        deadline = as_utc(
             record.reconciliation_deadline,
             field="lease reconciliation deadline",
         )
@@ -1779,7 +1780,7 @@ def _require_matching_receipt(
             reservation_id=str(lease.reservation_id),
             lease_version=lease.lease_version,
         )
-    _as_utc(receipt.confirmed_at, field="lease application confirmation timestamp")
+    as_utc(receipt.confirmed_at, field="lease application confirmation timestamp")
 
 
 def _require_positive_version(value: int) -> None:
@@ -1820,13 +1821,3 @@ def _request_fingerprint(kind: str, payload: Mapping[str, object]) -> str:
         ensure_ascii=True,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

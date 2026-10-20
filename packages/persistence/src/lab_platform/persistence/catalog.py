@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, overload
 
 from lab_platform.core.bench_catalog import BenchMetadata, BenchRecord
+from lab_platform.core.clock import as_utc
 from lab_platform.core.errors import BenchNotFoundError
 from lab_platform.models import HealthStatus
 from lab_platform.persistence.database import SQLiteDatabase
@@ -27,7 +28,7 @@ class BackendRegistration(BaseModel):
     @field_validator("created_at", "updated_at")
     @classmethod
     def _timestamps_are_utc(cls, value: datetime) -> datetime:
-        return _as_utc(value)
+        return as_utc(value)
 
 
 class SQLiteCatalogRepository:
@@ -139,7 +140,7 @@ class SQLiteCatalogRepository:
         items = list(records)
         backend_ids = sorted(set(reconciled_backend_ids))
         seen_ids = {record.id for record in items}
-        timestamp = _as_utc(observed_at or datetime.now(UTC)).isoformat()
+        timestamp = as_utc(observed_at or datetime.now(UTC)).isoformat()
         with self._database.transaction(immediate=True) as connection:
             for record in items:
                 _upsert_record(connection, record)
@@ -224,7 +225,7 @@ class SQLiteCatalogRepository:
     ) -> BenchMetadata:
         """Replace the platform-owned metadata for an existing bench."""
 
-        timestamp = _as_utc(updated_at or datetime.now(UTC)).isoformat()
+        timestamp = as_utc(updated_at or datetime.now(UTC)).isoformat()
         labels_json = _dump_json(dict(metadata.labels))
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
@@ -317,7 +318,7 @@ def _coerce_backend_registration(
         return backend
     if backend_type is None:
         raise TypeError("backend_type is required when backend is an ID")
-    timestamp = _as_utc(now or datetime.now(UTC))
+    timestamp = as_utc(now or datetime.now(UTC))
     return BackendRegistration(
         id=backend,
         type=backend_type,
@@ -337,8 +338,8 @@ def _upsert_backend(connection: sqlite3.Connection, registration: BackendRegistr
             registration.id,
             registration.type,
             _dump_json(registration.config),
-            _as_utc(registration.created_at).isoformat(),
-            _as_utc(registration.updated_at).isoformat(),
+            as_utc(registration.created_at).isoformat(),
+            as_utc(registration.updated_at).isoformat(),
         ),
     )
 
@@ -366,8 +367,8 @@ def _upsert_record(connection: sqlite3.Connection, record: BenchRecord) -> None:
             _dump_json(sorted(record.capabilities)),
             _dump_json(dict(record.labels)),
             _datetime_value(record.last_seen_at),
-            _as_utc(record.created_at).isoformat(),
-            _as_utc(record.updated_at).isoformat(),
+            as_utc(record.created_at).isoformat(),
+            as_utc(record.updated_at).isoformat(),
         ),
     )
 
@@ -422,7 +423,7 @@ def _dump_json(value: object) -> str:
 
 
 def _datetime_value(value: datetime | None) -> str | None:
-    return _as_utc(value).isoformat() if value is not None else None
+    return as_utc(value).isoformat() if value is not None else None
 
 
 def _parse_optional_datetime(value: str | None) -> datetime | None:
@@ -430,10 +431,4 @@ def _parse_optional_datetime(value: str | None) -> datetime | None:
 
 
 def _parse_datetime(value: str) -> datetime:
-    return _as_utc(datetime.fromisoformat(value))
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Persisted catalog timestamps must be timezone-aware")
-    return value.astimezone(UTC)
+    return as_utc(datetime.fromisoformat(value))

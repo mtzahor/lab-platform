@@ -366,8 +366,6 @@ def test_connection_manager_endpoint_and_numeric_helpers_cover_security_edges() 
     for number_value in (True, "one", 0):
         with pytest.raises(ValueError, match="positive"):
             connection_manager._positive_number(cast(Any, number_value), field="delay")
-    with pytest.raises(ValueError, match="timezone-aware"):
-        connection_manager._as_utc(datetime(2026, 1, 1), field="clock")
 
 
 @pytest.mark.anyio
@@ -715,8 +713,6 @@ def test_sqlite_state_private_helpers_reject_corrupt_payloads() -> None:
     )
     with pytest.raises(ValueError, match="marker payload"):
         sqlite_state._restore_dropped_from_marker(state, marker)
-    with pytest.raises(ValueError, match="timezone-aware"):
-        sqlite_state._as_utc(datetime(2026, 1, 1), field="timestamp")
 
 
 @pytest.mark.anyio

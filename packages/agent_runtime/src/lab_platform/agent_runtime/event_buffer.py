@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from threading import RLock
 from typing import Any, Protocol, TypeAlias
 from uuid import UUID, uuid4
 
+from lab_platform.core.clock import utc_now
 from lab_platform.models import BufferedAgentEvent, BufferedEventPriority
 
 EVENT_BUFFER_OVERFLOW = "EVENT_BUFFER_OVERFLOW"
@@ -78,7 +79,7 @@ class InMemoryAgentEventBuffer:
             raise ValueError("event buffer capacity must be a positive integer")
         self._agent_id = agent_id
         self._capacity = capacity
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._event_id_factory = event_id_factory or uuid4
         self._events: dict[int, BufferedAgentEvent] = {}
         self._coalesce_sequences: dict[str, int] = {}
@@ -272,7 +273,3 @@ def default_progress_key(event_type: str, payload: Mapping[str, Any]) -> str:
         if value is not None:
             identity_parts.append(f"{field}={value}")
     return "|".join(identity_parts)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

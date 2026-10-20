@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from lab_platform.core.artifact_storage import ArtifactStorage
+from lab_platform.core.clock import as_utc
 from lab_platform.core.retention import (
     RetentionCandidate,
     retention_class_for_artifact_type,
@@ -206,7 +207,7 @@ class SQLiteGenericArtifactRepository:
             raise ValueError("retention claim limit must be positive")
         if claim_ttl <= timedelta(0):
             raise ValueError("retention claim TTL must be positive")
-        observed_at = _aware_utc(now, field="retention claim time")
+        observed_at = as_utc(now, field="retention claim time")
         reclaim_before = observed_at - claim_ttl
         candidates: list[RetentionCandidate] = []
         with self._database.transaction(immediate=True) as connection:
@@ -258,7 +259,7 @@ class SQLiteGenericArtifactRepository:
                         retention_class=retention_class_for_artifact_type(
                             str(row["artifact_type"])
                         ),
-                        expires_at=_aware_utc(
+                        expires_at=as_utc(
                             datetime.fromisoformat(str(row["expires_at"])),
                             field="artifact expiry time",
                         ),
@@ -276,7 +277,7 @@ class SQLiteGenericArtifactRepository:
         claim_token: UUID,
         deleted_at: datetime,
     ) -> bool:
-        observed_at = _aware_utc(deleted_at, field="retention deletion time")
+        observed_at = as_utc(deleted_at, field="retention deletion time")
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM artifacts WHERE id = ? AND retention_state = "
@@ -312,7 +313,7 @@ class SQLiteGenericArtifactRepository:
         failed_at: datetime,
         error: str,
     ) -> bool:
-        observed_at = _aware_utc(failed_at, field="retention failure time")
+        observed_at = as_utc(failed_at, field="retention failure time")
         bounded_error = error.strip()[:2_000] or "artifact deletion failed"
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
@@ -476,9 +477,3 @@ def _datetime_value(value: datetime | None) -> str | None:
 
 def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
-
-
-def _aware_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)

@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -16,6 +16,7 @@ from lab_platform.control_plane_core.errors import (
     RemoteCommandExpiredError,
     RemoteOperationReconciliationTimeoutError,
 )
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.models import (
     DistributedOperation,
     DistributedOperationStatus,
@@ -211,7 +212,7 @@ class ReconciliationService:
         self._work = work
         self._leases = leases
         self._inventory = inventory
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._batch_limit = reconciliation_batch_limit
 
     async def reconcile(
@@ -219,7 +220,7 @@ class ReconciliationService:
         report_id: UUID,
         report: ReconciliationReport,
     ) -> ReconciliationResult:
-        now = _as_utc(self._clock(), field="reconciliation receipt timestamp")
+        now = as_utc(self._clock(), field="reconciliation receipt timestamp")
         digest = reconciliation_report_digest(report)
         claim = await self._reports.claim_report(
             report_id,
@@ -266,7 +267,7 @@ class ReconciliationService:
     async def timeout_unreconciled_operations(self, *, limit: int = 500) -> int:
         if limit <= 0:
             raise ValueError("limit must be positive")
-        now = _as_utc(self._clock(), field="reconciliation timeout timestamp")
+        now = as_utc(self._clock(), field="reconciliation timeout timestamp")
         operations = await self._work.list_operations(
             agent_id=None,
             statuses=_RECONCILABLE_OPERATION_STATUSES,
@@ -698,7 +699,7 @@ def _validate_report_lease_owners(report: ReconciliationReport) -> None:
 
 
 def _command_effective_time(command: RemoteCommand, occurred_at: datetime) -> datetime:
-    values = [command.created_at, _as_utc(occurred_at, field="command reconciliation timestamp")]
+    values = [command.created_at, as_utc(occurred_at, field="command reconciliation timestamp")]
     values.extend(
         value
         for value in (
@@ -717,7 +718,7 @@ def _operation_effective_time(
 ) -> datetime:
     values = [
         operation.created_at,
-        _as_utc(occurred_at, field="operation reconciliation timestamp"),
+        as_utc(occurred_at, field="operation reconciliation timestamp"),
     ]
     values.extend(
         value
@@ -729,13 +730,3 @@ def _operation_effective_time(
         if value is not None
     )
     return max(values)
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

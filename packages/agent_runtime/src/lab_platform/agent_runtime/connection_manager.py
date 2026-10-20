@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Protocol, TypeAlias, cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -54,6 +54,7 @@ from lab_platform.agent_runtime.command_handler import (
 )
 from lab_platform.agent_runtime.event_buffer import AgentEventBufferRepository
 from lab_platform.agent_runtime.leases import ReservationLeaseStore
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.models import BufferedAgentEvent, ReconciliationReport
 from pydantic import SecretStr
 
@@ -340,7 +341,7 @@ class AgentConnectionManager:
         self._reconnect_maximum = reconnect_maximum_delay_seconds
         self._reconnect_jitter = reconnect_jitter_ratio
         self._reconnect_stability = reconnect_stability_seconds
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._monotonic = monotonic or time.monotonic
         self._sleep = sleep or asyncio.sleep
         self._random = random_source or random.random
@@ -678,7 +679,7 @@ class AgentConnectionManager:
                 return
             state = await self._heartbeat.heartbeat_state()
             event_stats = await self._events.stats()
-            observed_at = _as_utc(self._clock(), field="Agent heartbeat clock")
+            observed_at = as_utc(self._clock(), field="Agent heartbeat clock")
             item = _OutgoingItem(
                 message_id=self._message_id_factory(),
                 message_type=MessageType.AGENT_HEARTBEAT,
@@ -708,7 +709,7 @@ class AgentConnectionManager:
         elif isinstance(envelope, CommandCancelEnvelope):
             await self._commands.cancel(envelope.payload)
         elif isinstance(envelope, ReservationActivatedEnvelope):
-            confirmed_at = _as_utc(self._clock(), field="Agent lease clock")
+            confirmed_at = as_utc(self._clock(), field="Agent lease clock")
             await self._leases.apply(
                 envelope.payload.lease,
                 observed_at=confirmed_at,
@@ -869,7 +870,7 @@ class AgentConnectionManager:
                 "message_id": item.message_id,
                 "message_type": item.message_type,
                 "agent_id": self._agent_id,
-                "sent_at": _as_utc(self._clock(), field="Agent protocol clock"),
+                "sent_at": as_utc(self._clock(), field="Agent protocol clock"),
                 "correlation_id": item.correlation_id,
                 "sequence_number": sequence_number,
                 "payload": item.payload,
@@ -1014,13 +1015,3 @@ def _bounded_integer(value: int, *, field: str, maximum: int) -> None:
 def _positive_number(value: float, *, field: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError(f"{field} must be positive")
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must return a timezone-aware timestamp")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

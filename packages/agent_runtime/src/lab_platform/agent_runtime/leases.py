@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from threading import RLock
 from typing import Protocol, TypeAlias
 from uuid import UUID
 
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.core.errors import PlatformError
 from lab_platform.models import ReservationLease
 
@@ -41,7 +42,7 @@ class ReservationLeaseTombstone:
         object.__setattr__(
             self,
             "released_at",
-            _as_utc(self.released_at, field="Reservation lease release timestamp"),
+            as_utc(self.released_at, field="Reservation lease release timestamp"),
         )
 
 
@@ -99,7 +100,7 @@ class InMemoryReservationLeaseStore:
 
     def __init__(self, agent_id: UUID, *, clock: Clock | None = None) -> None:
         self._agent_id = agent_id
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._records: dict[str, StoredReservationLease] = {}
         self._lock = RLock()
 
@@ -115,7 +116,7 @@ class InMemoryReservationLeaseStore:
         maximum_clock_skew_seconds: int = 0,
     ) -> StoredReservationLease:
         self._require_agent(lease.agent_id)
-        observed = _as_utc(observed_at or self._clock(), field="Lease observation timestamp")
+        observed = as_utc(observed_at or self._clock(), field="Lease observation timestamp")
         skew = lease_clock_skew(maximum_clock_skew_seconds)
 
         if lease.released_at is None:
@@ -219,7 +220,7 @@ class InMemoryReservationLeaseStore:
                 lease_version=lease_version,
             )
 
-        observed = _as_utc(observed_at or self._clock(), field="Lease validation timestamp")
+        observed = as_utc(observed_at or self._clock(), field="Lease validation timestamp")
         require_lease_time_valid(record, observed, lease_clock_skew(maximum_clock_skew_seconds))
         return record
 
@@ -309,13 +310,3 @@ def lease_clock_skew(maximum_clock_skew_seconds: int) -> timedelta:
     ):
         raise ValueError("maximum_clock_skew_seconds must be a non-negative integer")
     return timedelta(seconds=maximum_clock_skew_seconds)
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

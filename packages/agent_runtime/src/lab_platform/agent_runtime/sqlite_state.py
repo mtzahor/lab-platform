@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -21,6 +21,7 @@ from lab_platform.agent_runtime.leases import (
     require_lease_time_valid,
     resolve_lease_version,
 )
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.models import BufferedAgentEvent, BufferedEventPriority, ReservationLease
 from lab_platform.persistence import SQLiteDatabase
 
@@ -43,7 +44,7 @@ class SQLiteReservationLeaseStore:
     ) -> None:
         self._database = database
         self._agent_id = agent_id
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
 
     @property
     def agent_id(self) -> UUID:
@@ -57,7 +58,7 @@ class SQLiteReservationLeaseStore:
         maximum_clock_skew_seconds: int = 0,
     ) -> StoredReservationLease:
         self._require_agent(lease.agent_id)
-        observed = _as_utc(
+        observed = as_utc(
             observed_at or self._clock(),
             field="Lease observation timestamp",
         )
@@ -190,7 +191,7 @@ class SQLiteReservationLeaseStore:
                 reservation_id=str(reservation_id),
                 lease_version=lease_version,
             )
-        observed = _as_utc(
+        observed = as_utc(
             observed_at or self._clock(),
             field="Lease validation timestamp",
         )
@@ -251,7 +252,7 @@ class SQLiteAgentEventBuffer:
         self._database = database
         self._agent_id = agent_id
         self._capacity = capacity
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._event_id_factory = event_id_factory or uuid4
         self._metadata_key = f"agent_event_buffer:{agent_id}:state"
         with self._database.transaction(immediate=True) as connection:
@@ -859,18 +860,8 @@ def _dump_json(value: object) -> str:
 
 
 def _parse_datetime(value: str) -> datetime:
-    return _as_utc(datetime.fromisoformat(value), field="Persisted timestamp")
+    return as_utc(datetime.fromisoformat(value), field="Persisted timestamp")
 
 
 def _parse_optional_datetime(value: str | None) -> datetime | None:
     return _parse_datetime(value) if value is not None else None
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

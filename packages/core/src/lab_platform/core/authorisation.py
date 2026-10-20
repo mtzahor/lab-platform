@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
+from lab_platform.core.clock import as_utc
 from lab_platform.core.errors import PermissionDeniedError
 from lab_platform.models import (
     AuditEvent,
@@ -284,7 +285,7 @@ class AuthorisationService:
                 cache.decisions[decision_key] = denied
             return denied
 
-        now = _as_utc(self._clock())
+        now = as_utc(self._clock())
         access = await self._principal_access(principal)
         applicable = tuple(
             assignment
@@ -519,7 +520,7 @@ class AuthorisationService:
 
         if credential_restrictions is not None and permission not in credential_restrictions:
             return _denied_decision()
-        now = _as_utc(self._clock())
+        now = as_utc(self._clock())
         subjects: set[tuple[RoleSubjectType, UUID]] = {
             (_principal_subject_type(principal.type), principal.id)
         }
@@ -635,7 +636,7 @@ class AuthorisationService:
         return await self._audit_repository.create_audit_event(
             AuditEvent(
                 organisation_id=principal.organisation_id,
-                timestamp=_as_utc(self._clock()),
+                timestamp=as_utc(self._clock()),
                 actor_type=principal.type,
                 actor_id=principal.id,
                 actor_display_name=principal.display_name,
@@ -667,7 +668,7 @@ class AuthorisationService:
         return await self._audit_repository.create_audit_event(
             AuditEvent(
                 organisation_id=principal.organisation_id,
-                timestamp=_as_utc(self._clock()),
+                timestamp=as_utc(self._clock()),
                 actor_type=principal.type,
                 actor_id=principal.id,
                 actor_display_name=principal.display_name,
@@ -701,7 +702,7 @@ class AuthorisationService:
         return await self._audit_repository.create_audit_event(
             AuditEvent(
                 organisation_id=organisation_id,
-                timestamp=_as_utc(self._clock()),
+                timestamp=as_utc(self._clock()),
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,
@@ -805,12 +806,6 @@ def _assignment_applies_to(
         and resource.parent_agent_id is not None
         and assignment.resource_id == str(resource.parent_agent_id)
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Authorisation clock must return a timezone-aware timestamp")
-    return value.astimezone(UTC)
 
 
 def _optional_utc(value: datetime | None) -> datetime | None:
