@@ -47,6 +47,7 @@ from lab_platform.models.workflows import (
     WorkflowStep,
     WorkflowStepResult,
     WorkflowStepStatus,
+    canonical_capability,
 )
 from pydantic import ValidationError
 
@@ -344,9 +345,9 @@ def load_workflow_yaml(path: Path) -> WorkflowDefinition:
 
 
 def validate_workflow_capabilities(definition: WorkflowDefinition, bench: BenchSnapshot) -> None:
-    available = {_canonical_capability(capability) for capability in bench.capabilities}
+    available = {canonical_capability(capability) for capability in bench.capabilities}
     required = {
-        _canonical_capability(capability) for capability in definition.requirements.capabilities
+        canonical_capability(capability) for capability in definition.requirements.capabilities
     }
     missing = sorted(required.difference(available))
     if missing:
@@ -355,11 +356,6 @@ def validate_workflow_capabilities(definition: WorkflowDefinition, bench: BenchS
             bench_id=bench.id,
             missing_capabilities=missing,
         )
-
-
-def _canonical_capability(value: str) -> str:
-    normalized = value.strip().casefold()
-    return "flash" if normalized == "firmware" else normalized
 
 
 def resolve_workflow_inputs(

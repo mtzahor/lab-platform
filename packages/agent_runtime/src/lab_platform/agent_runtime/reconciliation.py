@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Protocol, TypeAlias
 from uuid import UUID
 
@@ -11,6 +11,7 @@ from lab_platform.agent_runtime.command_journal import (
 )
 from lab_platform.agent_runtime.event_buffer import AgentEventBufferRepository
 from lab_platform.agent_runtime.leases import ReservationLeaseStore
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.models import (
     ReconciliationBenchSnapshot,
     ReconciliationCommandState,
@@ -70,7 +71,7 @@ class AgentReconciliationReportBuilder:
         self._inventory = inventory
         self._events = events
         self._recent_command_limit = recent_command_limit
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
 
     @property
     def agent_id(self) -> UUID:
@@ -110,7 +111,7 @@ class AgentReconciliationReportBuilder:
         return ReconciliationReport(
             agent_id=self._agent_id,
             boot_id=self._boot_id,
-            generated_at=_as_utc(generated_at or self._clock()),
+            generated_at=as_utc(generated_at or self._clock(), field="Reconciliation clock"),
             active_commands=tuple(active_commands),
             recent_commands=tuple(recent_commands),
             local_reservation_leases=active_leases,
@@ -144,13 +145,3 @@ def _command_states(
         key=lambda state: (state.updated_at, state.command_id.hex),
         reverse=True,
     )
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Reconciliation clock must return a timezone-aware timestamp")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

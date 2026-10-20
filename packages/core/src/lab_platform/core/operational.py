@@ -4,9 +4,10 @@ import math
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from statistics import fmean, median
 
+from lab_platform.core.clock import as_utc
 from lab_platform.models.operational import (
     INFRASTRUCTURE_FAILURE_CATEGORIES,
     BenchMaintenanceState,
@@ -162,7 +163,7 @@ def calculate_queue_metrics(
     only to current queue depth. P95 uses the deterministic nearest-rank definition.
     """
 
-    now = _as_utc(observed_at)
+    now = as_utc(observed_at, field="observed_at")
     promoted_waits: list[float] = []
     abandoned = 0
     queue_depth = 0
@@ -474,12 +475,6 @@ def _primary_failure(
     if not counts:
         return None
     return min(counts, key=lambda value: (-counts[value], value))
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("observed_at must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 __all__ = [

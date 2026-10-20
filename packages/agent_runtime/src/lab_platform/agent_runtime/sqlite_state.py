@@ -3,18 +3,25 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from lab_platform.agent_runtime.event_buffer import EVENT_BUFFER_OVERFLOW, EventBufferStats
+from lab_platform.agent_runtime.event_buffer import (
+    EVENT_BUFFER_OVERFLOW,
+    EventBufferStats,
+    default_progress_key,
+)
 from lab_platform.agent_runtime.leases import (
-    ReservationLeaseExpiredError,
     ReservationLeaseInvalidError,
     ReservationLeaseTombstone,
     ReservationLeaseVersionMismatchError,
     StoredReservationLease,
+    lease_clock_skew,
+    require_lease_time_valid,
+    resolve_lease_version,
 )
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.models import BufferedAgentEvent, BufferedEventPriority, ReservationLease
 from lab_platform.persistence import SQLiteDatabase
 
@@ -37,7 +44,7 @@ class SQLiteReservationLeaseStore:
     ) -> None:
         self._database = database
         self._agent_id = agent_id
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
 
     @property
     def agent_id(self) -> UUID:
@@ -51,20 +58,20 @@ class SQLiteReservationLeaseStore:
         maximum_clock_skew_seconds: int = 0,
     ) -> StoredReservationLease:
         self._require_agent(lease.agent_id)
-        observed = _as_utc(
+        observed = as_utc(
             observed_at or self._clock(),
             field="Lease observation timestamp",
         )
-        skew = _clock_skew(maximum_clock_skew_seconds)
+        skew = lease_clock_skew(maximum_clock_skew_seconds)
         if lease.released_at is None:
-            _require_time_valid(lease, observed, skew)
+            require_lease_time_valid(lease, observed, skew)
         incoming = _stored_from_lease(lease)
 
         with self._database.transaction(immediate=True) as connection:
             previous = _current_lease(connection, lease.bench_id)
             if previous is not None:
                 self._require_agent(previous.agent_id)
-                replay = _resolve_lease_version(previous, incoming)
+                replay = resolve_lease_version(previous, incoming)
                 if replay is not None:
                     return replay
                 if (
@@ -113,7 +120,7 @@ class SQLiteReservationLeaseStore:
             previous = _current_lease(connection, bench_id)
             if previous is not None:
                 self._require_agent(previous.agent_id)
-                replay = _resolve_lease_version(previous, tombstone)
+                replay = resolve_lease_version(previous, tombstone)
                 if replay is not None:
                     if isinstance(replay, ReservationLeaseTombstone):
                         return replay
@@ -184,11 +191,11 @@ class SQLiteReservationLeaseStore:
                 reservation_id=str(reservation_id),
                 lease_version=lease_version,
             )
-        observed = _as_utc(
+        observed = as_utc(
             observed_at or self._clock(),
             field="Lease validation timestamp",
         )
-        _require_time_valid(record, observed, _clock_skew(maximum_clock_skew_seconds))
+        require_lease_time_valid(record, observed, lease_clock_skew(maximum_clock_skew_seconds))
         return record
 
     async def get(self, bench_id: str) -> StoredReservationLease | None:
@@ -245,7 +252,7 @@ class SQLiteAgentEventBuffer:
         self._database = database
         self._agent_id = agent_id
         self._capacity = capacity
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._event_id_factory = event_id_factory or uuid4
         self._metadata_key = f"agent_event_buffer:{agent_id}:state"
         with self._database.transaction(immediate=True) as connection:
@@ -293,7 +300,7 @@ class SQLiteAgentEventBuffer:
                 created_at=created_at or self._clock(),
             )
             key = (
-                coalesce_key or _default_progress_key(event_type, payload)
+                coalesce_key or default_progress_key(event_type, payload)
                 if priority is BufferedEventPriority.PROGRESS
                 else None
             )
@@ -480,7 +487,7 @@ class SQLiteAgentEventBuffer:
                     state["overflow_marker_id"] = str(event.id)
                     _restore_dropped_from_marker(state, event)
                 elif event.priority is BufferedEventPriority.PROGRESS:
-                    coalescing[_default_progress_key(event.event_type, event.payload)] = (
+                    coalescing[default_progress_key(event.event_type, event.payload)] = (
                         event.sequence_number
                     )
         self._save_state(connection, state)
@@ -595,48 +602,6 @@ def _insert_stored_lease(
     )
 
 
-def _resolve_lease_version(
-    previous: StoredReservationLease,
-    incoming: StoredReservationLease,
-) -> StoredReservationLease | None:
-    if incoming.lease_version < previous.lease_version:
-        raise ReservationLeaseVersionMismatchError(
-            "Reservation lease version is older than the latest stored version.",
-            bench_id=incoming.bench_id,
-            stored_lease_version=previous.lease_version,
-            received_lease_version=incoming.lease_version,
-        )
-    if incoming.lease_version > previous.lease_version:
-        return None
-    if (
-        previous.agent_id != incoming.agent_id
-        or previous.bench_id != incoming.bench_id
-        or previous.reservation_id != incoming.reservation_id
-    ):
-        raise ReservationLeaseInvalidError(
-            "Reservation lease version was reused for a different identity.",
-            bench_id=incoming.bench_id,
-            lease_version=incoming.lease_version,
-        )
-    if isinstance(previous, ReservationLeaseTombstone):
-        if isinstance(incoming, ReservationLeaseTombstone):
-            return previous
-        raise ReservationLeaseVersionMismatchError(
-            "A released reservation lease cannot be reactivated at the same version.",
-            bench_id=incoming.bench_id,
-            lease_version=incoming.lease_version,
-        )
-    if isinstance(incoming, ReservationLeaseTombstone):
-        return None
-    if previous == incoming:
-        return previous
-    raise ReservationLeaseVersionMismatchError(
-        "Reservation lease version was reused with different content.",
-        bench_id=incoming.bench_id,
-        lease_version=incoming.lease_version,
-    )
-
-
 def _require_stored_identity(
     record: StoredReservationLease,
     *,
@@ -656,39 +621,6 @@ def _require_stored_identity(
             bench_id=bench_id,
             reservation_id=str(reservation_id),
         )
-
-
-def _require_time_valid(
-    lease: ReservationLease,
-    observed: datetime,
-    skew: timedelta,
-) -> None:
-    if observed < lease.valid_from - skew:
-        raise ReservationLeaseInvalidError(
-            "Reservation lease is not valid yet.",
-            bench_id=lease.bench_id,
-            lease_version=lease.lease_version,
-            valid_from=lease.valid_from.isoformat(),
-            observed_at=observed.isoformat(),
-        )
-    if observed > lease.valid_until + skew:
-        raise ReservationLeaseExpiredError(
-            "Reservation lease has expired.",
-            bench_id=lease.bench_id,
-            lease_version=lease.lease_version,
-            valid_until=lease.valid_until.isoformat(),
-            observed_at=observed.isoformat(),
-        )
-
-
-def _clock_skew(maximum_clock_skew_seconds: int) -> timedelta:
-    if (
-        isinstance(maximum_clock_skew_seconds, bool)
-        or not isinstance(maximum_clock_skew_seconds, int)
-        or maximum_clock_skew_seconds < 0
-    ):
-        raise ValueError("maximum_clock_skew_seconds must be a non-negative integer")
-    return timedelta(seconds=maximum_clock_skew_seconds)
 
 
 def _initial_event_state(agent_id: UUID, capacity: int) -> dict[str, object]:
@@ -923,32 +855,13 @@ def _event_from_row(row: sqlite3.Row) -> BufferedAgentEvent:
     )
 
 
-def _default_progress_key(event_type: str, payload: Mapping[str, Any]) -> str:
-    identity_parts = [event_type]
-    for field in ("command_id", "operation_id", "workflow_run_id", "step_index", "bench_id"):
-        value = payload.get(field)
-        if value is not None:
-            identity_parts.append(f"{field}={value}")
-    return "|".join(identity_parts)
-
-
 def _dump_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _parse_datetime(value: str) -> datetime:
-    return _as_utc(datetime.fromisoformat(value), field="Persisted timestamp")
+    return as_utc(datetime.fromisoformat(value), field="Persisted timestamp")
 
 
 def _parse_optional_datetime(value: str | None) -> datetime | None:
     return _parse_datetime(value) if value is not None else None
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

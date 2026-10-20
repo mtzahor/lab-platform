@@ -21,6 +21,7 @@ from lab_platform.core.artifact_storage import (
     LocalPathArtifactStorage,
     StoredArtifact,
 )
+from lab_platform.core.clock import as_utc
 from lab_platform.core.errors import (
     ArtifactChecksumMismatchError,
     ArtifactTooLargeError,
@@ -434,7 +435,7 @@ class DistributedArtifactService:
             and transfer.agent_id != agent_id
         ):
             raise ArtifactTransferFailedError("Artifact transfer authentication failed.")
-        now = _utc(self._clock())
+        now = as_utc(self._clock())
         if transfer.expires_at <= now or transfer.status is ArtifactTransferStatus.EXPIRED:
             await self._expire(transfer, now)
             raise ArtifactTransferTokenExpiredError("Artifact transfer token has expired.")
@@ -468,7 +469,7 @@ class DistributedArtifactService:
                 expected_size_bytes=transfer.expected_size_bytes,
                 content_length=content_length,
             )
-        now = _utc(self._clock())
+        now = as_utc(self._clock())
         attempt_number = transfer.attempt_count + 1
         active = _transfer_copy(
             transfer,
@@ -496,7 +497,7 @@ class DistributedArtifactService:
             received = stored.size_bytes
             digest = stored.sha256
         except Exception as exc:
-            failed_at = _utc(self._clock())
+            failed_at = as_utc(self._clock())
             await self._repository.add_attempt(
                 ArtifactTransferAttempt(
                     transfer_id=transfer.id,
@@ -518,7 +519,7 @@ class DistributedArtifactService:
                 expected_statuses={ArtifactTransferStatus.IN_PROGRESS},
             )
             raise
-        completed_at = _utc(self._clock())
+        completed_at = as_utc(self._clock())
         await self._repository.add_attempt(
             ArtifactTransferAttempt(
                 transfer_id=transfer.id,
@@ -584,7 +585,7 @@ class DistributedArtifactService:
 
     async def _complete_download(self, transfer: ArtifactTransferRecord) -> None:
         if transfer.status is not ArtifactTransferStatus.COMPLETED:
-            now = _utc(self._clock())
+            now = as_utc(self._clock())
             attempt_number = transfer.attempt_count + 1
             active = _transfer_copy(
                 transfer,
@@ -628,7 +629,7 @@ class DistributedArtifactService:
         expected_sha256: str,
         expected_size_bytes: int,
     ) -> IssuedArtifactTransfer:
-        now = _utc(self._clock())
+        now = as_utc(self._clock())
         plaintext = self._token_factory()
         if (
             not plaintext.startswith("lpt_")
@@ -701,9 +702,3 @@ def _hash_file(path: Path) -> tuple[int, str]:
             size += len(chunk)
             digest.update(chunk)
     return size, digest.hexdigest()
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Artifact transfer timestamps must be timezone-aware")
-    return value.astimezone(UTC)

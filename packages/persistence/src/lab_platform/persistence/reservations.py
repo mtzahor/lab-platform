@@ -23,12 +23,17 @@ from lab_platform.models import (
     QueueEntryStatus,
     RecoveryReport,
     Reservation,
-    ReservationSource,
     ReservationStatus,
     TimelineCategory,
 )
 from lab_platform.models.domain import LEGACY_ORGANISATION_ID
-from lab_platform.persistence.database import SQLiteDatabase, insert_event
+from lab_platform.persistence.database import (
+    SQLiteDatabase,
+    datetime_value,
+    insert_event,
+    parse_datetime,
+    reservation_from_row,
+)
 
 
 class SQLiteTimedReservationRepository:
@@ -86,7 +91,7 @@ class SQLiteTimedReservationRepository:
                 f"SELECT * FROM reservations WHERE id = ?{scope}",  # noqa: S608
                 values,
             ).fetchone()
-        return _reservation_from_row(row) if row is not None else None
+        return reservation_from_row(row) if row is not None else None
 
     async def get_active(
         self,
@@ -106,7 +111,7 @@ class SQLiteTimedReservationRepository:
                 "ORDER BY starts_at LIMIT 1",
                 values,
             ).fetchone()
-        return _reservation_from_row(row) if row is not None else None
+        return reservation_from_row(row) if row is not None else None
 
     async def get_by_idempotency_key(
         self,
@@ -122,7 +127,7 @@ class SQLiteTimedReservationRepository:
                 "AND organisation_id = ?",
                 (bench_id, idempotency_key, str(scope_id)),
             ).fetchone()
-        return _reservation_from_row(row) if row is not None else None
+        return reservation_from_row(row) if row is not None else None
 
     async def update(
         self,
@@ -204,8 +209,8 @@ class SQLiteTimedReservationRepository:
             ("bench_id = ?", bench_id),
             ("owner = ?", owner),
             ("status = ?", status.value if status else None),
-            ("starts_at > ?", _datetime_value(starts_after)),
-            ("starts_at < ?", _datetime_value(starts_before)),
+            ("starts_at > ?", datetime_value(starts_after)),
+            ("starts_at < ?", datetime_value(starts_before)),
         ):
             if value is not None:
                 conditions.append(condition)
@@ -218,7 +223,7 @@ class SQLiteTimedReservationRepository:
                 "ORDER BY starts_at DESC, created_at DESC LIMIT ?",
                 values,
             ).fetchall()
-        return [_reservation_from_row(row) for row in rows]
+        return [reservation_from_row(row) for row in rows]
 
     async def find_conflict(
         self,
@@ -242,7 +247,7 @@ class SQLiteTimedReservationRepository:
                 f"{exclude} ORDER BY starts_at LIMIT 1",  # noqa: S608
                 values,
             ).fetchone()
-        return _reservation_from_row(row) if row is not None else None
+        return reservation_from_row(row) if row is not None else None
 
     async def list_due(self, now: datetime) -> builtins.list[Reservation]:
         with self._database.transaction() as connection:
@@ -251,7 +256,7 @@ class SQLiteTimedReservationRepository:
                 "AND starts_at <= ? ORDER BY starts_at, created_at, id",
                 (now.isoformat(),),
             ).fetchall()
-        return [_reservation_from_row(row) for row in rows]
+        return [reservation_from_row(row) for row in rows]
 
     async def list_expired(self, now: datetime) -> builtins.list[Reservation]:
         with self._database.transaction() as connection:
@@ -261,7 +266,7 @@ class SQLiteTimedReservationRepository:
                 "AND ends_at IS NOT NULL AND ends_at <= ? ORDER BY ends_at, id",
                 (now.isoformat(),),
             ).fetchall()
-        return [_reservation_from_row(row) for row in rows]
+        return [reservation_from_row(row) for row in rows]
 
     async def activate_if_available(
         self,
@@ -289,7 +294,7 @@ class SQLiteTimedReservationRepository:
                 row = connection.execute(
                     "SELECT * FROM reservations WHERE id = ?", (str(reservation_id),)
                 ).fetchone()
-                activated = _reservation_from_row(row)
+                activated = reservation_from_row(row)
                 if event_factory is not None:
                     insert_event(connection, event_factory(activated))
         except sqlite3.IntegrityError:
@@ -344,7 +349,7 @@ class SQLiteTimedReservationRepository:
             updated = connection.execute(
                 "SELECT * FROM reservations WHERE id = ?", (str(reservation_id),)
             ).fetchone()
-            expired = _reservation_from_row(updated)
+            expired = reservation_from_row(updated)
             if event_factory is not None:
                 insert_event(connection, event_factory(expired))
         return expired
@@ -356,7 +361,7 @@ class SQLiteTimedReservationRepository:
                 "AND starts_at >= ? ORDER BY starts_at, created_at, id LIMIT 1",
                 (bench_id, after.isoformat()),
             ).fetchone()
-        return _reservation_from_row(row) if row is not None else None
+        return reservation_from_row(row) if row is not None else None
 
     async def finalize_pending_expiry(self, bench_id: str, now: datetime) -> Reservation | None:
         with self._database.transaction(immediate=True) as connection:
@@ -375,7 +380,7 @@ class SQLiteTimedReservationRepository:
             updated = connection.execute(
                 "SELECT * FROM reservations WHERE id = ?", (row["id"],)
             ).fetchone()
-        return _reservation_from_row(updated)
+        return reservation_from_row(updated)
 
 
 class SQLiteQueueRepository:
@@ -739,7 +744,7 @@ class SQLiteOperationLockRepository:
                     "status = 'scheduled' AND starts_at <= ?)) LIMIT 1",
                     (
                         lock.bench_id,
-                        _datetime_value(lock.expires_at) or now.isoformat(),
+                        datetime_value(lock.expires_at) or now.isoformat(),
                     ),
                 ).fetchone()
                 if reservation is not None:
@@ -891,40 +896,17 @@ def _reservation_values(reservation: Reservation) -> tuple[object, ...]:
         reservation.owner_principal_type,
         str(reservation.organisation_id),
         reservation.created_at.isoformat(),
-        _datetime_value(reservation.released_at),
+        datetime_value(reservation.released_at),
         reservation.status.value,
-        _datetime_value(reservation.requested_at),
-        _datetime_value(reservation.starts_at),
-        _datetime_value(reservation.ends_at),
-        _datetime_value(reservation.activated_at),
-        _datetime_value(reservation.expired_at),
+        datetime_value(reservation.requested_at),
+        datetime_value(reservation.starts_at),
+        datetime_value(reservation.ends_at),
+        datetime_value(reservation.activated_at),
+        datetime_value(reservation.expired_at),
         reservation.source.value,
         json.dumps(reservation.metadata, sort_keys=True),
         reservation.idempotency_key,
         int(reservation.release_pending),
-    )
-
-
-def _reservation_from_row(row: sqlite3.Row) -> Reservation:
-    return Reservation(
-        id=UUID(row["id"]),
-        organisation_id=UUID(row["organisation_id"]),
-        bench_id=row["bench_id"],
-        owner=row["owner"],
-        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
-        owner_principal_type=row["owner_principal_type"],
-        created_at=datetime.fromisoformat(row["created_at"]),
-        released_at=_parse_datetime(row["released_at"]),
-        status=ReservationStatus(row["status"]),
-        requested_at=_parse_datetime(row["requested_at"]),
-        starts_at=_parse_datetime(row["starts_at"]),
-        ends_at=_parse_datetime(row["ends_at"]),
-        activated_at=_parse_datetime(row["activated_at"]),
-        expired_at=_parse_datetime(row["expired_at"]),
-        source=ReservationSource(row["source"]),
-        metadata=json.loads(row["metadata"]),
-        idempotency_key=row["idempotency_key"],
-        release_pending=bool(row["release_pending"]),
     )
 
 
@@ -940,8 +922,8 @@ def _queue_values(entry: QueueEntry) -> tuple[object, ...]:
         entry.description,
         entry.status.value,
         entry.created_at.isoformat(),
-        _datetime_value(entry.promoted_at),
-        _datetime_value(entry.cancelled_at),
+        datetime_value(entry.promoted_at),
+        datetime_value(entry.cancelled_at),
         entry.idempotency_key,
     )
 
@@ -958,8 +940,8 @@ def _queue_from_row(row: sqlite3.Row) -> QueueEntry:
         description=row["description"],
         status=QueueEntryStatus(row["status"]),
         created_at=datetime.fromisoformat(row["created_at"]),
-        promoted_at=_parse_datetime(row["promoted_at"]),
-        cancelled_at=_parse_datetime(row["cancelled_at"]),
+        promoted_at=parse_datetime(row["promoted_at"]),
+        cancelled_at=parse_datetime(row["cancelled_at"]),
         idempotency_key=row["idempotency_key"],
     )
 
@@ -969,7 +951,7 @@ def _lock_from_row(row: sqlite3.Row) -> BenchOperationLock:
         bench_id=row["bench_id"],
         operation_id=UUID(row["operation_id"]),
         acquired_at=datetime.fromisoformat(row["acquired_at"]),
-        expires_at=_parse_datetime(row["expires_at"]),
+        expires_at=parse_datetime(row["expires_at"]),
     )
 
 
@@ -984,7 +966,7 @@ def _insert_operation_lock(
             lock.bench_id,
             str(lock.operation_id),
             lock.acquired_at.isoformat(),
-            _datetime_value(lock.expires_at),
+            datetime_value(lock.expires_at),
         ),
     )
 
@@ -1102,11 +1084,3 @@ def _reservation_integrity_error(
         bench_id=reservation.bench_id,
         database_error=str(exc),
     )
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None

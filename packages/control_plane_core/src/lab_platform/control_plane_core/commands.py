@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -29,6 +29,7 @@ from lab_platform.control_plane_core.errors import (
     RemoteCommandNotFoundError,
 )
 from lab_platform.core.authorisation import AuthorisationDecision, AuthorisationService
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.core.errors import AuthenticationRequiredError, PermissionDeniedError
 from lab_platform.models import (
     DISTRIBUTED_OPERATION_TRANSITIONS,
@@ -377,7 +378,7 @@ class RemoteCommandService:
         self._queue_offline = queue_commands_for_offline_agents
         self._reconciliation_timeout = timedelta(seconds=reconciliation_timeout_seconds)
         self._payload_hydrator = payload_hydrator
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._authorisation: AuthorisationService | None = None
         self._authorisation_snapshots: AuthorisationSnapshotRepository | None = None
         self._workflow_definitions: WorkflowDefinitionCatalog | None = None
@@ -428,8 +429,8 @@ class RemoteCommandService:
         allow_legacy_authorisation: bool = False,
         allow_internal_authorisation: bool = False,
     ) -> tuple[RemoteCommand, DistributedOperation | None]:
-        now = _as_utc(self._clock())
-        expiry = _as_utc(expires_at)
+        now = as_utc(self._clock())
+        expiry = as_utc(expires_at)
         if expiry <= now:
             raise RemoteCommandExpiredError(
                 "Remote command expiry must be in the future.",
@@ -579,7 +580,7 @@ class RemoteCommandService:
     ) -> tuple[RemoteCommand, DistributedOperation | None]:
         command = await self._require_command(command_id)
         operation = await self._repository.get_operation_for_command(command.id)
-        now = _as_utc(self._clock())
+        now = as_utc(self._clock())
         if command.expires_at <= now:
             return await self._expire(command, operation, now)
         agent, _ = await self._require_route(command.agent_id, command.bench_id)
@@ -661,11 +662,11 @@ class RemoteCommandService:
                 command_id=command.id,
                 attempt_number=attempt_number,
                 dispatched_at=now,
-                failed_at=_as_utc(self._clock()),
+                failed_at=as_utc(self._clock()),
                 error_code=RemoteCommandDeliveryFailedError.code,
             )
             await self._repository.record_attempt(failed_attempt)
-            await self.mark_unknown(command.agent_id, observed_at=_as_utc(self._clock()))
+            await self.mark_unknown(command.agent_id, observed_at=as_utc(self._clock()))
             raise RemoteCommandDeliveryFailedError(
                 "Remote command delivery failed; state requires reconciliation.",
                 command_id=str(command.id),
@@ -835,7 +836,7 @@ class RemoteCommandService:
             return command
 
         if command.status in {RemoteCommandStatus.CREATED, RemoteCommandStatus.QUEUED}:
-            now = _as_utc(self._clock())
+            now = as_utc(self._clock())
             cancelled = _command_copy(
                 command,
                 status=RemoteCommandStatus.CANCELLED,
@@ -978,7 +979,7 @@ class RemoteCommandService:
                         evidence_decision.granting_assignment_ids,
                         key=str,
                     ),
-                    evaluated_at=_as_utc(self._clock()),
+                    evaluated_at=as_utc(self._clock()),
                 ),
             )
             snapshot_id = snapshot.id
@@ -1289,7 +1290,7 @@ class RemoteCommandService:
         *,
         observed_at: datetime | None = None,
     ) -> int:
-        now = _as_utc(observed_at or self._clock())
+        now = as_utc(observed_at or self._clock())
         commands = await self._repository.list_commands(
             agent_id=agent_id,
             statuses={
@@ -1327,7 +1328,7 @@ class RemoteCommandService:
         return changed
 
     async def expire_due(self, *, limit: int = 500) -> int:
-        now = _as_utc(self._clock())
+        now = as_utc(self._clock())
         commands = await self._repository.list_commands(
             statuses={
                 RemoteCommandStatus.CREATED,
@@ -1768,19 +1769,9 @@ def _event_targets(
         raise ValueError(f"{message_type.value} is not an operation event") from exc
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Distributed command timestamps must be timezone-aware")
-    return value.astimezone(UTC)
-
-
 def _validate_trusted_route_organisation(
     agent: AgentRecord,
     bench: GlobalBenchRecord,
 ) -> None:
     if agent.organisation_id != bench.organisation_id:
         raise ValueError("Agent and bench organisations do not match")
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

@@ -4,11 +4,12 @@ import builtins
 import json
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID
 
+from lab_platform.core.clock import as_utc
 from lab_platform.models import (
     BENCH_MAINTENANCE_LABEL,
     BENCH_MAINTENANCE_PREVIOUS_STATUS_LABEL,
@@ -57,7 +58,7 @@ class StoredBenchSnapshot(_PersistenceRecord):
     @field_validator("generated_at", "received_at")
     @classmethod
     def normalize_timestamps(cls, value: datetime) -> datetime:
-        return _as_utc(value)
+        return as_utc(value)
 
     @model_validator(mode="after")
     def validate_snapshot(self) -> StoredBenchSnapshot:
@@ -79,7 +80,7 @@ class StoredReconciliationReport(_PersistenceRecord):
     @field_validator("received_at")
     @classmethod
     def normalize_received_at(cls, value: datetime) -> datetime:
-        return _as_utc(value)
+        return as_utc(value)
 
 
 class ProtocolMessageRecordDisposition(StrEnum):
@@ -175,7 +176,7 @@ class SQLiteAgentConnectionRepository:
         heartbeat_at: datetime,
         observed_clock_offset_seconds: float,
     ) -> AgentConnectionRecord | None:
-        timestamp = _as_utc(heartbeat_at)
+        timestamp = as_utc(heartbeat_at)
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM agent_connections WHERE id = ? "
@@ -221,7 +222,7 @@ class SQLiteAgentConnectionRepository:
         *,
         expected_last_sequence_number: int | None = None,
     ) -> AgentConnectionRecord | None:
-        timestamp = _as_utc(disconnected_at)
+        timestamp = as_utc(disconnected_at)
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM agent_connections WHERE id = ? AND disconnected_at IS NULL",
@@ -436,7 +437,7 @@ class SQLiteGlobalBenchRepository:
         *,
         organisation_id: UUID | None = None,
     ) -> builtins.list[GlobalBenchRecord]:
-        timestamp = _as_utc(observed_at).isoformat()
+        timestamp = as_utc(observed_at).isoformat()
         scope = " AND organisation_id = ?" if organisation_id is not None else ""
         values: list[object] = [timestamp, str(agent_id), timestamp]
         if organisation_id is not None:
@@ -893,7 +894,7 @@ class SQLiteReservationLeaseRepository:
         lease_version: int,
         released_at: datetime,
     ) -> ReservationLease | None:
-        timestamp = _as_utc(released_at)
+        timestamp = as_utc(released_at)
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM reservation_leases WHERE reservation_id = ? AND lease_version = ?",
@@ -1024,7 +1025,7 @@ class SQLiteProtocolMessageJournalRepository:
     ) -> ProtocolMessageJournalRecord | None:
         if outcome not in {ProtocolMessageOutcome.HANDLED, ProtocolMessageOutcome.REJECTED}:
             raise ValueError("Only HANDLED or REJECTED can finalize a protocol message")
-        timestamp = _as_utc(handled_at)
+        timestamp = as_utc(handled_at)
         with self._database.transaction(immediate=True) as connection:
             row = connection.execute(
                 "SELECT * FROM protocol_message_journal WHERE agent_id = ? "
@@ -1155,7 +1156,7 @@ class SQLiteRemoteArtifactRepository:
         expected_uploaded_at: datetime | None = None,
         organisation_id: UUID | None = None,
     ) -> RemoteArtifactMetadata | None:
-        timestamp = _as_utc(uploaded_at)
+        timestamp = as_utc(uploaded_at)
         scope = " AND organisation_id = ?" if organisation_id is not None else ""
         identity_values: tuple[object, ...] = (
             (str(artifact_id), str(organisation_id))
@@ -1451,7 +1452,7 @@ class SQLiteAgentTimelineRepository:
             values.append(event_type)
         if since is not None:
             conditions.append("timestamp >= ?")
-            values.append(_as_utc(since).isoformat())
+            values.append(as_utc(since).isoformat())
         values.append(limit)
         where = " AND ".join(conditions)
         with self._database.transaction() as connection:
@@ -2308,18 +2309,12 @@ def _load_json(value: str) -> object:
     return json.loads(value)
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Distributed persistence timestamps must be timezone-aware")
-    return value.astimezone(UTC)
-
-
 def _datetime_value(value: datetime | None) -> str | None:
-    return _as_utc(value).isoformat() if value is not None else None
+    return as_utc(value).isoformat() if value is not None else None
 
 
 def _parse_datetime(value: str) -> datetime:
-    return _as_utc(datetime.fromisoformat(value))
+    return as_utc(datetime.fromisoformat(value))
 
 
 def _parse_optional_datetime(value: str | None) -> datetime | None:

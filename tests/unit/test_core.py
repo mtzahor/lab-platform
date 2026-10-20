@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
 
 import pytest
@@ -13,6 +14,7 @@ from lab_platform.core import (
     StateMachine,
     StateTransitionError,
 )
+from lab_platform.core.clock import UtcClock, as_utc, utc_now
 from lab_platform.models import (
     Bench,
     Capability,
@@ -20,6 +22,23 @@ from lab_platform.models import (
     HealthStatus,
     PluginMetadata,
 )
+
+
+def test_as_utc_normalizes_aware_values_and_names_rejected_field() -> None:
+    offset = datetime(2026, 7, 29, 12, tzinfo=timezone(timedelta(hours=3)))
+    assert as_utc(offset) == datetime(2026, 7, 29, 9, tzinfo=UTC)
+    assert as_utc(offset).tzinfo is UTC
+
+    naive = datetime(2026, 7, 29, 12)
+    with pytest.raises(ValueError, match="^A timezone-aware datetime is required$"):
+        as_utc(naive)
+    with pytest.raises(ValueError, match="^Gateway clock must be timezone-aware$"):
+        as_utc(naive, field="Gateway clock")
+
+
+def test_utc_now_and_utc_clock_return_aware_utc_timestamps() -> None:
+    assert utc_now().tzinfo is UTC
+    assert UtcClock().now().tzinfo is UTC
 
 
 def test_event_bus_supports_sync_async_wildcard_and_unsubscribe() -> None:

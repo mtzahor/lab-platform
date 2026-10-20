@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from lab_platform.core import (
@@ -12,6 +12,7 @@ from lab_platform.core import (
     calculate_reliability,
     maintenance_recommendation,
 )
+from lab_platform.core.clock import as_utc
 from lab_platform.models import (
     AgentTimelineRecord,
     BenchMaintenanceState,
@@ -95,7 +96,7 @@ def build_operational_snapshot(
 ) -> OperationalAnalyticsSnapshot:
     """Build an explainable operational view from durable control-plane records."""
 
-    observed_at = _as_utc(generated_at)
+    observed_at = as_utc(generated_at, field="generated_at")
     if window <= timedelta(0):
         raise ValueError("analytics window must be positive")
     observed_window = OperationalInterval(
@@ -368,12 +369,6 @@ def _default_maintenance_status(bench: GlobalBenchRecord) -> BenchMaintenanceSta
     if bench.status is GlobalBenchStatus.DEGRADED:
         return BenchMaintenanceStatus.DEGRADED
     return BenchMaintenanceStatus.HEALTHY
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("generated_at must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 __all__ = [

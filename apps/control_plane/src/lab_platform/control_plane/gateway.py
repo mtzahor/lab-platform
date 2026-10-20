@@ -76,6 +76,7 @@ from lab_platform.control_plane_core.enrollment import AgentEnrollmentService
 from lab_platform.control_plane_core.errors import AgentAuthenticationFailedError
 from lab_platform.control_plane_core.inventory import InventoryService
 from lab_platform.control_plane_core.presence import AgentPresenceService
+from lab_platform.core.clock import as_utc
 from lab_platform.core.errors import PlatformError
 from lab_platform.models import (
     AgentTimelineRecord,
@@ -316,7 +317,7 @@ class AgentConnectionHub(AgentCommandTransport):
             message_type,
             payload,
             correlation_id=correlation_id,
-            now=_utc(self._clock()),
+            now=as_utc(self._clock()),
         )
         try:
             session.outgoing.put_nowait(envelope)
@@ -572,7 +573,7 @@ class AgentMessageRouter:
         await self._timeline.append(
             AgentTimelineRecord(
                 agent_id=agent_id,
-                timestamp=_utc(observed_at),
+                timestamp=as_utc(observed_at),
                 event_type=event_type,
                 severity=severity,
                 message=message,
@@ -666,7 +667,7 @@ class AgentGateway:
                 max_recent_message_ids=self._settings.sequence_window_size,
             )
             tracker.observe(hello)
-            observed_at = _utc(self._clock())
+            observed_at = as_utc(self._clock())
             observed_monotonic = self._monotonic()
             prior = await self._presence.active_connection(agent_id)
             await self._presence.register_authenticated_connection(
@@ -757,13 +758,13 @@ class AgentGateway:
                         agent_id,
                         connection_id=connection_id,
                         boot_id=boot_id,
-                        observed_at=_utc(self._clock()),
+                        observed_at=as_utc(self._clock()),
                     )
                 if disconnected:
                     with suppress(Exception):
                         await self._router.mark_agent_unknown(
                             agent_id,
-                            observed_at=_utc(self._clock()),
+                            observed_at=as_utc(self._clock()),
                             disconnect_id=connection_id,
                         )
                     with suppress(Exception):
@@ -818,7 +819,7 @@ class AgentGateway:
             if envelope.agent_id != session.agent_id or isinstance(envelope, AgentHelloEnvelope):
                 raise ProtocolMessageInvalidError("Agent stream identity or handshake is invalid.")
             disposition = tracker.observe(envelope)
-            observed_at = _utc(self._clock())
+            observed_at = as_utc(self._clock())
             if disposition is SequenceDisposition.DUPLICATE:
                 await self._record(
                     envelope,
@@ -898,7 +899,7 @@ class AgentGateway:
             await self._record(
                 envelope,
                 session.connection_id,
-                _utc(self._clock()),
+                as_utc(self._clock()),
                 ProtocolMessageOutcome.SENT,
             )
 
@@ -994,7 +995,7 @@ class AgentGateway:
         await self._timeline.append(
             AgentTimelineRecord(
                 agent_id=agent_id,
-                timestamp=_utc(self._clock()),
+                timestamp=as_utc(self._clock()),
                 event_type=event_type,
                 severity=severity,
                 message=message,
@@ -1088,9 +1089,3 @@ def _safe_reason(error: BaseException) -> str:
     if isinstance(error, PlatformError):
         return error.code
     return "PROTOCOL_MESSAGE_INVALID"
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Gateway clock must return a timezone-aware timestamp")
-    return value.astimezone(UTC)

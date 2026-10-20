@@ -20,10 +20,14 @@ from lab_platform.models import (
     GlobalBenchStatus,
     Reservation,
     ReservationLease,
-    ReservationSource,
     ReservationStatus,
 )
-from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.database import (
+    SQLiteDatabase,
+    datetime_value,
+    parse_datetime,
+    reservation_from_row,
+)
 
 _TERMINAL_STATES = frozenset(
     {
@@ -289,7 +293,7 @@ class SQLiteCentralReservationLeaseRepository:
                 ).fetchone()
                 if row is None:
                     return None
-                reservation = _reservation_from_row(row)
+                reservation = reservation_from_row(row)
                 if (
                     reservation != request.reservation
                     or reservation.status is not ReservationStatus.SCHEDULED
@@ -746,7 +750,7 @@ def _insert_lease(connection: sqlite3.Connection, lease: ReservationLease) -> No
             lease.valid_from.isoformat(),
             lease.valid_until.isoformat(),
             lease.lease_version,
-            _datetime_value(lease.released_at),
+            datetime_value(lease.released_at),
         ),
     )
 
@@ -835,13 +839,13 @@ def _reservation_values(reservation: Reservation) -> tuple[object, ...]:
         reservation.owner_principal_type,
         str(reservation.organisation_id),
         reservation.created_at.isoformat(),
-        _datetime_value(reservation.released_at),
+        datetime_value(reservation.released_at),
         reservation.status.value,
-        _datetime_value(reservation.requested_at),
-        _datetime_value(reservation.starts_at),
-        _datetime_value(reservation.ends_at),
-        _datetime_value(reservation.activated_at),
-        _datetime_value(reservation.expired_at),
+        datetime_value(reservation.requested_at),
+        datetime_value(reservation.starts_at),
+        datetime_value(reservation.ends_at),
+        datetime_value(reservation.activated_at),
+        datetime_value(reservation.expired_at),
         reservation.source.value,
         json.dumps(reservation.metadata, sort_keys=True, separators=(",", ":")),
         reservation.idempotency_key,
@@ -855,8 +859,8 @@ def _record_payload(record: CoordinatedReservationLease) -> dict[str, Any]:
         "lease": record.lease.model_dump(mode="json"),
         "state": record.state.value,
         "revision": record.revision,
-        "unknown_since": _datetime_value(record.unknown_since),
-        "reconciliation_deadline": _datetime_value(record.reconciliation_deadline),
+        "unknown_since": datetime_value(record.unknown_since),
+        "reconciliation_deadline": datetime_value(record.reconciliation_deadline),
     }
 
 
@@ -882,8 +886,8 @@ def _record_from_payload(payload: dict[str, Any]) -> CoordinatedReservationLease
         lease=ReservationLease.model_validate(payload["lease"]),
         state=ReservationLeaseState(payload["state"]),
         revision=int(payload["revision"]),
-        unknown_since=_parse_datetime(payload.get("unknown_since")),
-        reconciliation_deadline=_parse_datetime(payload.get("reconciliation_deadline")),
+        unknown_since=parse_datetime(payload.get("unknown_since")),
+        reconciliation_deadline=parse_datetime(payload.get("reconciliation_deadline")),
     )
 
 
@@ -896,30 +900,7 @@ def _lease_from_row(row: sqlite3.Row) -> ReservationLease:
         valid_from=datetime.fromisoformat(row["valid_from"]),
         valid_until=datetime.fromisoformat(row["valid_until"]),
         lease_version=int(row["lease_version"]),
-        released_at=_parse_datetime(row["released_at"]),
-    )
-
-
-def _reservation_from_row(row: sqlite3.Row) -> Reservation:
-    return Reservation(
-        id=UUID(row["id"]),
-        organisation_id=UUID(row["organisation_id"]),
-        bench_id=row["bench_id"],
-        owner=row["owner"],
-        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
-        owner_principal_type=row["owner_principal_type"],
-        created_at=datetime.fromisoformat(row["created_at"]),
-        released_at=_parse_datetime(row["released_at"]),
-        status=ReservationStatus(row["status"]),
-        requested_at=_parse_datetime(row["requested_at"]),
-        starts_at=_parse_datetime(row["starts_at"]),
-        ends_at=_parse_datetime(row["ends_at"]),
-        activated_at=_parse_datetime(row["activated_at"]),
-        expired_at=_parse_datetime(row["expired_at"]),
-        source=ReservationSource(row["source"]),
-        metadata=json.loads(row["metadata"]),
-        idempotency_key=row["idempotency_key"],
-        release_pending=bool(row["release_pending"]),
+        released_at=parse_datetime(row["released_at"]),
     )
 
 
@@ -937,11 +918,3 @@ def _record_timestamp(record: CoordinatedReservationLease) -> datetime:
         if value is not None
     )
     return max(candidates).astimezone(UTC)
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None

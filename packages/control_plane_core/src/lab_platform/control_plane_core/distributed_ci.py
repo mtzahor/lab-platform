@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from lab_platform.control_plane_core.workflows import (
     DistributedWorkflowRequest,
 )
 from lab_platform.core.authorisation import AuthorisationService
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.core.errors import (
     AuthenticationRequiredError,
     CiSessionConflictError,
@@ -337,7 +338,7 @@ class DistributedCiSessionService:
         self._artifact_uploads = artifact_uploads
         self._authorisation: AuthorisationService | None = None
         self._authorisation_snapshots: DistributedCiAuthorisationSnapshotRepository | None = None
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._session_timeout_seconds = session_timeout_seconds
         self._maximum_session_timeout_seconds = maximum_session_timeout_seconds
         self._heartbeat_timeout_seconds = heartbeat_timeout_seconds
@@ -1480,7 +1481,7 @@ class DistributedCiSessionService:
         return self._locks[session_id.int % len(self._locks)]
 
     def _now(self) -> datetime:
-        return _as_utc(self._clock(), field="CI service clock")
+        return as_utc(self._clock(), field="CI service clock")
 
 
 def _operation_session_result(
@@ -1670,16 +1671,6 @@ def _require_text(value: str, *, field: str, maximum_length: int) -> str:
 def _require_positive_integer(value: int, *, field: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field} must be a positive integer")
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 __all__ = [

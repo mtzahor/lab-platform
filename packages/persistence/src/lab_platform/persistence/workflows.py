@@ -19,7 +19,7 @@ from lab_platform.models.workflows import (
     WorkflowStepResult,
     WorkflowStepStatus,
 )
-from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.database import SQLiteDatabase, datetime_value, parse_datetime
 
 WORKFLOW_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS workflows (
@@ -316,8 +316,8 @@ class SQLiteWorkflowRepository:
                     run.status.value,
                     run.current_step,
                     run.created_at.isoformat(),
-                    _datetime_value(run.started_at),
-                    _datetime_value(run.completed_at),
+                    datetime_value(run.started_at),
+                    datetime_value(run.completed_at),
                     run.error_code,
                     run.error_message,
                     str(run.id),
@@ -359,8 +359,8 @@ class SQLiteWorkflowRepository:
                     result.name,
                     result.action.value,
                     result.status.value,
-                    _datetime_value(result.started_at),
-                    _datetime_value(result.completed_at),
+                    datetime_value(result.started_at),
+                    datetime_value(result.completed_at),
                     json.dumps(result.output, sort_keys=True, default=str),
                     result.error_code,
                     result.error_message,
@@ -451,8 +451,8 @@ def _run_values(run: WorkflowRun) -> tuple[object, ...]:
         run.status.value,
         run.current_step,
         run.created_at.isoformat(),
-        _datetime_value(run.started_at),
-        _datetime_value(run.completed_at),
+        datetime_value(run.started_at),
+        datetime_value(run.completed_at),
         run.error_code,
         run.error_message,
     )
@@ -467,8 +467,8 @@ def _step_result_values(result: WorkflowStepResult) -> tuple[object, ...]:
         result.name,
         result.action.value,
         result.status.value,
-        _datetime_value(result.started_at),
-        _datetime_value(result.completed_at),
+        datetime_value(result.started_at),
+        datetime_value(result.completed_at),
         json.dumps(result.output, sort_keys=True, default=str),
         result.error_code,
         result.error_message,
@@ -488,8 +488,8 @@ def _run_from_row(row: sqlite3.Row) -> WorkflowRun:
         status=WorkflowRunStatus(row["status"]),
         current_step=row["current_step"],
         created_at=datetime.fromisoformat(row["created_at"]),
-        started_at=_parse_datetime(row["started_at"]),
-        completed_at=_parse_datetime(row["completed_at"]),
+        started_at=parse_datetime(row["started_at"]),
+        completed_at=parse_datetime(row["completed_at"]),
         error_code=row["error_code"],
         error_message=row["error_message"],
     )
@@ -504,18 +504,10 @@ def _step_result_from_row(row: sqlite3.Row) -> WorkflowStepResult:
         name=row["name"],
         action=WorkflowAction(row["action"]),
         status=WorkflowStepStatus(row["status"]),
-        started_at=_parse_datetime(row["started_at"]),
-        completed_at=_parse_datetime(row["completed_at"]),
+        started_at=parse_datetime(row["started_at"]),
+        completed_at=parse_datetime(row["completed_at"]),
         output=json.loads(row["output_json"]),
         error_code=row["error_code"],
         error_message=row["error_message"],
         artifact_ids=[UUID(item) for item in json.loads(row["artifact_ids_json"])],
     )
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None

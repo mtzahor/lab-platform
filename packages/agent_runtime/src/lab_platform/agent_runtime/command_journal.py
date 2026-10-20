@@ -5,7 +5,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Protocol, cast
 from uuid import UUID
 
@@ -14,6 +14,7 @@ from lab_platform.control_plane_core.errors import (
     AgentRestartedDuringOperationError,
     RemoteCommandDuplicateError,
 )
+from lab_platform.core.clock import as_utc
 from lab_platform.models import (
     TERMINAL_REMOTE_COMMAND_STATUSES,
     CommandJournalEntry,
@@ -121,7 +122,7 @@ class SQLiteAgentCommandJournal:
         same boot is intentionally a no-op; transport reconnects therefore retain active work.
         """
 
-        recovered = _as_utc(recovered_at)
+        recovered = as_utc(recovered_at)
         marker_key = "agent_command_journal:active_boot_id"
         current_boot = str(boot_id)
         interrupted: list[StoredCommandJournalEntry] = []
@@ -201,7 +202,7 @@ class SQLiteAgentCommandJournal:
         *,
         received_at: datetime,
     ) -> CommandJournalCreateResult:
-        received = _as_utc(received_at)
+        received = as_utc(received_at)
         fingerprint = command_fingerprint(request)
         command = request.command
         with self._database.transaction(immediate=True) as connection:
@@ -270,7 +271,7 @@ class SQLiteAgentCommandJournal:
         *,
         started_at: datetime,
     ) -> StoredCommandJournalEntry:
-        started = _as_utc(started_at)
+        started = as_utc(started_at)
         with self._database.transaction(immediate=True) as connection:
             row = _require_row(connection, command_id)
             current = _record_from_row(row)
@@ -310,7 +311,7 @@ class SQLiteAgentCommandJournal:
     ) -> StoredCommandJournalEntry:
         if status not in TERMINAL_REMOTE_COMMAND_STATUSES:
             raise ValueError("Command journal completion requires a terminal status")
-        completed = _as_utc(completed_at)
+        completed = as_utc(completed_at)
         with self._database.transaction(immediate=True) as connection:
             row = _require_row(connection, command_id)
             current = _record_from_row(row)
@@ -525,10 +526,4 @@ def _parse_optional_datetime(value: str | None) -> datetime | None:
 
 
 def _parse_datetime(value: str) -> datetime:
-    return _as_utc(datetime.fromisoformat(value))
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("Command journal timestamps must be timezone-aware")
-    return value.astimezone(UTC)
+    return as_utc(datetime.fromisoformat(value))

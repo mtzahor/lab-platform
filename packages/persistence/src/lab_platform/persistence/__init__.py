@@ -18,6 +18,7 @@ from lab_platform.persistence.database import (
     SQLiteOperationArtifactRepository,
     SQLiteOperationRepository,
     SQLiteReservationRepository,
+    sqlite_read_only_uri,
 )
 from lab_platform.persistence.database_management import (
     MINIMUM_SUPPORTED_SCHEMA_VERSION,
@@ -82,4 +83,5 @@ __all__ = [
     "inspect_database_schema",
     "migrate_database",
     "require_current_schema",
+    "sqlite_read_only_uri",
 ]

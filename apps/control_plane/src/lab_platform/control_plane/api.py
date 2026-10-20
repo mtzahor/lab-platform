@@ -29,6 +29,7 @@ from lab_platform.agent_protocol import PROTOCOL_VERSION
 from lab_platform.control_plane.artifact_access import ArtifactContent
 from lab_platform.control_plane.dashboard_api import (
     create_dashboard_router,
+    distributed_workflow_status,
     enrich_benches,
     reservation_action_permissions,
 )
@@ -124,6 +125,7 @@ from lab_platform.models import (
     WorkflowDefinition,
     WorkflowStepResult,
 )
+from lab_platform.models.workflows import canonical_capability
 from pydantic import AliasChoices, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from starlette.exceptions import HTTPException
 from starlette.types import Message
@@ -1958,7 +1960,7 @@ def create_app(runtime: ControlPlaneRuntime) -> FastAPI:
             "workflow_run_id": str(operation.id),
             "local_workflow_run_id": workflow.get("id"),
             "workflow_name": workflow.get("workflow_name") or operation.operation_type,
-            "status": _distributed_workflow_status(operation),
+            "status": distributed_workflow_status(operation),
             "results": [item.model_dump(mode="json") for item in results],
             "steps": [step.model_dump(mode="json") for step in steps],
         }
@@ -2614,8 +2616,8 @@ async def _action_bench(
     )
     if bench is None:
         raise BenchNotFoundError("Bench does not exist.", bench_id=bench_id)
-    required_capability = _canonical_capability(capability)
-    available_capabilities = {_canonical_capability(item) for item in bench.capabilities}
+    required_capability = canonical_capability(capability)
+    available_capabilities = {canonical_capability(item) for item in bench.capabilities}
     if required_capability not in available_capabilities:
         raise CapabilityNotSupportedError(
             "Bench does not support the requested action.",
@@ -2623,11 +2625,6 @@ async def _action_bench(
             required_capability=required_capability,
         )
     return bench
-
-
-def _canonical_capability(value: str) -> str:
-    normalized = value.strip().casefold()
-    return "flash" if normalized == "firmware" else normalized
 
 
 def _ci_session_is_owned_by(session: CiSession, principal: Principal) -> bool:
@@ -2717,22 +2714,6 @@ async def _distributed_operation(
     return operation
 
 
-def _distributed_workflow_status(operation: DistributedOperation) -> str:
-    if operation.status in {
-        DistributedOperationStatus.CREATED,
-        DistributedOperationStatus.DISPATCHED,
-        DistributedOperationStatus.ACCEPTED,
-    }:
-        return "pending"
-    if operation.status is DistributedOperationStatus.RUNNING:
-        return "running"
-    if operation.status is DistributedOperationStatus.UNKNOWN:
-        return "unknown"
-    if operation.status is DistributedOperationStatus.RECONCILING:
-        return "reconciling"
-    return operation.status.value.casefold()
-
-
 def _distributed_workflow_payload(
     operation: DistributedOperation,
     command: RemoteCommand | None = None,
@@ -2759,7 +2740,7 @@ def _distributed_workflow_payload(
             "reservation_id": (
                 str(operation.reservation_id) if operation.reservation_id is not None else None
             ),
-            "status": _distributed_workflow_status(operation),
+            "status": distributed_workflow_status(operation),
             "operation_status": operation.status.value,
             "progress": operation.progress,
             "message": operation.message,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -24,6 +24,7 @@ from lab_platform.control_plane_core.errors import (
     GlobalBenchIdConflictError,
     InventorySyncFailedError,
 )
+from lab_platform.core.clock import as_utc
 from lab_platform.core.errors import BenchNotFoundError
 from lab_platform.models import (
     AgentRecord,
@@ -117,7 +118,7 @@ class InMemoryInventoryRepository:
         boot_id: UUID | None = None,
         generated_at: datetime | None = None,
     ) -> InventoryReconciliation:
-        now = _as_utc(observed_at, field="inventory reconciliation timestamp")
+        now = as_utc(observed_at, field="inventory reconciliation timestamp")
         _validate_agent_identity(self._agent_slugs, self._agent_ids_by_slug, agent)
 
         incoming: dict[str, GlobalBenchRecord] = {}
@@ -202,7 +203,7 @@ class InMemoryInventoryRepository:
         *,
         observed_at: datetime,
     ) -> tuple[GlobalBenchRecord, ...]:
-        now = _as_utc(observed_at, field="Agent offline inventory timestamp")
+        now = as_utc(observed_at, field="Agent offline inventory timestamp")
         changed: list[GlobalBenchRecord] = []
         staged = dict(self._benches)
         for bench_id, existing in staged.items():
@@ -259,7 +260,7 @@ class InventoryService:
                 expected_boot_id=str(expected_boot_id),
                 received_boot_id=str(snapshot.boot_id),
             )
-        now = _as_utc(observed_at, field="inventory snapshot receipt timestamp")
+        now = as_utc(observed_at, field="inventory snapshot receipt timestamp")
         benches = tuple(_global_bench(agent, bench, now) for bench in snapshot.benches)
         return await self._repository.reconcile_agent_snapshot(
             agent,
@@ -278,7 +279,7 @@ class InventoryService:
     ) -> tuple[GlobalBenchRecord, ...]:
         return await self._repository.mark_agent_offline(
             agent_id,
-            observed_at=_as_utc(observed_at, field="Agent offline timestamp"),
+            observed_at=as_utc(observed_at, field="Agent offline timestamp"),
         )
 
     async def apply_bench_added(
@@ -290,7 +291,7 @@ class InventoryService:
         expected_boot_id: UUID,
     ) -> InventoryReconciliation:
         self._require_incremental_boot(payload.boot_id, expected_boot_id, agent.id)
-        now = _as_utc(observed_at, field="bench addition receipt timestamp")
+        now = as_utc(observed_at, field="bench addition receipt timestamp")
         existing = [bench for bench in await self._repository.list() if bench.agent_id == agent.id]
         incoming = _global_bench(agent, payload.bench, now)
         scoped = tuple(bench for bench in existing if bench.id != incoming.id) + (incoming,)
@@ -305,7 +306,7 @@ class InventoryService:
         expected_boot_id: UUID,
     ) -> InventoryReconciliation:
         self._require_incremental_boot(payload.boot_id, expected_boot_id, agent.id)
-        now = _as_utc(observed_at, field="bench removal receipt timestamp")
+        now = as_utc(observed_at, field="bench removal receipt timestamp")
         removed_id = f"{agent.slug}/{payload.local_bench_id}"
         existing = tuple(
             bench
@@ -323,7 +324,7 @@ class InventoryService:
         expected_boot_id: UUID,
     ) -> InventoryReconciliation:
         self._require_incremental_boot(payload.boot_id, expected_boot_id, agent.id)
-        now = _as_utc(observed_at, field="bench health receipt timestamp")
+        now = as_utc(observed_at, field="bench health receipt timestamp")
         bench_id = f"{agent.slug}/{payload.local_bench_id}"
         benches = [bench for bench in await self._repository.list() if bench.agent_id == agent.id]
         current = next((bench for bench in benches if bench.id == bench_id), None)
@@ -531,9 +532,3 @@ def _inventory_agent_identity(bench: GlobalBenchRecord) -> AgentRecord:
         registered_at=bench.created_at,
         enrollment_status=EnrollmentStatus.ENROLLED,
     )
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)

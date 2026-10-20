@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from lab_platform.persistence.database import sqlite_read_only_uri
 from lab_platform.persistence.migrations import SCHEMA_VERSION
 from lab_platform.persistence.postgresql import create_control_plane_database
 
@@ -137,7 +138,7 @@ def _inspect_sqlite(url: str) -> SchemaStatus:
     if not path.is_file():
         raise OSError(f"SQLite database path is not a regular file: {path}")
 
-    connection = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)
+    connection = sqlite3.connect(sqlite_read_only_uri(path), uri=True)
     try:
         row = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"

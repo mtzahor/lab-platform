@@ -652,8 +652,6 @@ def test_coordinated_reservation_invariants_and_validation_helpers() -> None:
         reservation_module._require_text(cast(Any, 1), field="owner", maximum_length=10)
     with pytest.raises(ValueError, match="cannot exceed"):
         reservation_module._require_text("too long", field="owner", maximum_length=2)
-    with pytest.raises(ValueError, match="timezone-aware"):
-        reservation_module._as_utc(datetime(2026, 7, 29), field="test")
 
     dummy = cast(Any, object())
     with pytest.raises(ValueError, match="Maximum lease TTL"):
@@ -845,8 +843,6 @@ def test_distributed_ci_helpers_cover_timeout_and_input_boundaries() -> None:
         ci_module._require_text(" ", field="value", maximum_length=2)
     with pytest.raises(ValueError, match="maximum length"):
         ci_module._require_text("long", field="value", maximum_length=2)
-    with pytest.raises(ValueError, match="timezone-aware"):
-        ci_module._as_utc(datetime(2026, 7, 29), field="value")
 
     dummy = cast(Any, object())
     with pytest.raises(ValueError, match="Default CI timeout"):
@@ -874,5 +870,3 @@ def test_artifact_private_timestamp_guard_and_hash_file(tmp_path: Path) -> None:
         len(content),
         hashlib.sha256(content).hexdigest(),
     )
-    with pytest.raises(ValueError, match="timezone-aware"):
-        artifact_module._utc(datetime(2026, 7, 29))

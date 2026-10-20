@@ -28,6 +28,7 @@ from lab_platform.control_plane_core.errors import (
     RemoteCommandRejectedError,
     ReservationLeaseInvalidError,
 )
+from lab_platform.core.clock import utc_now
 from lab_platform.core.errors import PlatformError
 from lab_platform.models import (
     TERMINAL_REMOTE_COMMAND_STATUSES,
@@ -178,7 +179,7 @@ class AgentCommandHandler:
         self._events = events
         self._safety = safety
         self._executor = executor
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._drain_state = is_draining
         self._locally_draining = False
         self._maximum_clock_skew_seconds = maximum_clock_skew_seconds
@@ -711,7 +712,3 @@ class AgentCommandHandler:
 
 def _stable_operation_id(command_id: UUID) -> UUID:
     return uuid5(NAMESPACE_URL, f"lab-platform:agent-operation:{command_id}")
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

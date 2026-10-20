@@ -44,7 +44,6 @@ from lab_platform.persistence.distributed import (
     SQLiteRemoteCommandRepository,
     SQLiteReservationLeaseRepository,
     StoredBenchSnapshot,
-    _as_utc,
     _dump_json_mapping,
 )
 
@@ -232,8 +231,6 @@ def test_snapshot_validation_and_connection_rejection_branches(tmp_path: Path) -
             received_at=NOW,
             benches=(_bench(), _bench()),
         )
-    with pytest.raises(ValueError, match="timezone-aware"):
-        _as_utc(datetime(2026, 7, 29))
 
     async def scenario() -> None:
         database = _database(tmp_path / "connections-coverage.db")

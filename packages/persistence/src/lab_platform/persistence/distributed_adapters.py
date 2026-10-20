@@ -41,7 +41,7 @@ from lab_platform.persistence.agents import (
     SQLiteAgentEnrollmentRepository,
     _agent_from_row,
 )
-from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.database import SQLiteDatabase, datetime_value
 from lab_platform.persistence.distributed import (
     ProtocolMessageRecordDisposition,
     SQLiteArtifactTransferRepository,
@@ -1269,19 +1269,15 @@ def _update_agent(connection: sqlite3.Connection, agent: AgentRecord) -> None:
             agent.protocol_version,
             agent.location,
             json.dumps(agent.labels, sort_keys=True, separators=(",", ":")),
-            _datetime_value(agent.last_connected_at),
-            _datetime_value(agent.last_seen_at),
-            _datetime_value(agent.disconnected_at),
+            datetime_value(agent.last_connected_at),
+            datetime_value(agent.last_seen_at),
+            datetime_value(agent.disconnected_at),
             agent.certificate_fingerprint,
             agent.enrollment_status.value,
-            _datetime_value(agent.revoked_at),
+            datetime_value(agent.revoked_at),
             str(agent.id),
             agent.slug,
         ),
     )
     if cursor.rowcount != 1:
         raise ValueError("Agent presence update lost its identity fence")
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None

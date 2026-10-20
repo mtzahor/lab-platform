@@ -249,6 +249,41 @@ def test_postgresql_adapter_checks_whether_restore_target_is_empty(
     assert connection.closed is True
 
 
+@pytest.mark.parametrize("directory_name", ["run#1", "run?1"])
+def test_sqlite_adapter_verifies_and_restores_paths_with_uri_delimiters(
+    tmp_path: Path,
+    directory_name: str,
+) -> None:
+    # An unencoded "file:" URI ends the path at "#" or "?", which used to verify
+    # and restore a different, empty database without any error.
+    directory = tmp_path / directory_name
+    directory.mkdir()
+    database_path = directory / "control.db"
+    writer = sqlite3.connect(database_path)
+    writer.execute("CREATE TABLE marker (value TEXT)")
+    writer.execute("INSERT INTO marker VALUES ('preserved')")
+    writer.commit()
+    writer.close()
+
+    adapter = DatabaseBackupAdapter(f"sqlite:///{database_path}")
+    dump = directory / "backup.dump"
+    adapter.create_dump(dump)
+    adapter.verify_dump(dump)
+    database_path.unlink()
+    adapter.restore_dump(dump, overwrite=True)
+
+    restored = sqlite3.connect(database_path)
+    try:
+        assert restored.execute("SELECT value FROM marker").fetchall() == [("preserved",)]
+    finally:
+        restored.close()
+
+    corrupt = directory / "corrupt.dump"
+    corrupt.write_bytes(b"not a sqlite database" * 64)
+    with pytest.raises(sqlite3.DatabaseError):
+        adapter.verify_dump(corrupt)
+
+
 def test_sqlite_adapter_handles_missing_empty_and_failed_integrity_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

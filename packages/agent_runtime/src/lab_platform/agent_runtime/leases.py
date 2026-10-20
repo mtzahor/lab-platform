@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from threading import RLock
 from typing import Protocol, TypeAlias
 from uuid import UUID
 
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.core.errors import PlatformError
 from lab_platform.models import ReservationLease
 
@@ -41,7 +42,7 @@ class ReservationLeaseTombstone:
         object.__setattr__(
             self,
             "released_at",
-            _as_utc(self.released_at, field="Reservation lease release timestamp"),
+            as_utc(self.released_at, field="Reservation lease release timestamp"),
         )
 
 
@@ -99,7 +100,7 @@ class InMemoryReservationLeaseStore:
 
     def __init__(self, agent_id: UUID, *, clock: Clock | None = None) -> None:
         self._agent_id = agent_id
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._records: dict[str, StoredReservationLease] = {}
         self._lock = RLock()
 
@@ -115,11 +116,11 @@ class InMemoryReservationLeaseStore:
         maximum_clock_skew_seconds: int = 0,
     ) -> StoredReservationLease:
         self._require_agent(lease.agent_id)
-        observed = _as_utc(observed_at or self._clock(), field="Lease observation timestamp")
-        skew = _clock_skew(maximum_clock_skew_seconds)
+        observed = as_utc(observed_at or self._clock(), field="Lease observation timestamp")
+        skew = lease_clock_skew(maximum_clock_skew_seconds)
 
         if lease.released_at is None:
-            _require_time_valid(lease, observed, skew)
+            require_lease_time_valid(lease, observed, skew)
 
         incoming: StoredReservationLease = (
             lease
@@ -135,7 +136,7 @@ class InMemoryReservationLeaseStore:
         with self._lock:
             previous = self._records.get(lease.bench_id)
             if previous is not None:
-                replay = _resolve_version(previous, incoming)
+                replay = resolve_lease_version(previous, incoming)
                 if replay is not None:
                     return replay
             self._records[lease.bench_id] = incoming
@@ -161,7 +162,7 @@ class InMemoryReservationLeaseStore:
         with self._lock:
             previous = self._records.get(bench_id)
             if previous is not None:
-                replay = _resolve_version(previous, tombstone)
+                replay = resolve_lease_version(previous, tombstone)
                 if replay is not None and isinstance(replay, ReservationLeaseTombstone):
                     return replay
                 # An equal-version release supersedes the active lease.
@@ -219,8 +220,8 @@ class InMemoryReservationLeaseStore:
                 lease_version=lease_version,
             )
 
-        observed = _as_utc(observed_at or self._clock(), field="Lease validation timestamp")
-        _require_time_valid(record, observed, _clock_skew(maximum_clock_skew_seconds))
+        observed = as_utc(observed_at or self._clock(), field="Lease validation timestamp")
+        require_lease_time_valid(record, observed, lease_clock_skew(maximum_clock_skew_seconds))
         return record
 
     async def get(self, bench_id: str) -> StoredReservationLease | None:
@@ -240,7 +241,7 @@ class InMemoryReservationLeaseStore:
             )
 
 
-def _resolve_version(
+def resolve_lease_version(
     previous: StoredReservationLease,
     incoming: StoredReservationLease,
 ) -> StoredReservationLease | None:
@@ -282,7 +283,7 @@ def _resolve_version(
     )
 
 
-def _require_time_valid(lease: ReservationLease, observed: datetime, skew: timedelta) -> None:
+def require_lease_time_valid(lease: ReservationLease, observed: datetime, skew: timedelta) -> None:
     if observed < lease.valid_from - skew:
         raise ReservationLeaseInvalidError(
             "Reservation lease is not valid yet.",
@@ -301,17 +302,11 @@ def _require_time_valid(lease: ReservationLease, observed: datetime, skew: timed
         )
 
 
-def _clock_skew(maximum_clock_skew_seconds: int) -> timedelta:
-    if isinstance(maximum_clock_skew_seconds, bool) or maximum_clock_skew_seconds < 0:
+def lease_clock_skew(maximum_clock_skew_seconds: int) -> timedelta:
+    if (
+        isinstance(maximum_clock_skew_seconds, bool)
+        or not isinstance(maximum_clock_skew_seconds, int)
+        or maximum_clock_skew_seconds < 0
+    ):
         raise ValueError("maximum_clock_skew_seconds must be a non-negative integer")
     return timedelta(seconds=maximum_clock_skew_seconds)
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)

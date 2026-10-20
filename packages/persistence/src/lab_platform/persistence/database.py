@@ -18,6 +18,7 @@ from lab_platform.models import (
     OperationStatus,
     OperationType,
     Reservation,
+    ReservationSource,
     ReservationStatus,
 )
 from lab_platform.persistence.migrations import SCHEMA_VERSION as SCHEMA_VERSION
@@ -122,7 +123,7 @@ class SQLiteReservationRepository:
                 (reservation.bench_id,),
             ).fetchone()
             if row is not None:
-                return _reservation_from_row(row)
+                return reservation_from_row(row)
             connection.execute(
                 "INSERT INTO reservations "
                 "(id, bench_id, owner, owner_principal_id, owner_principal_type, "
@@ -144,11 +145,11 @@ class SQLiteReservationRepository:
                     reservation.created_at.isoformat(),
                     None,
                     reservation.status.value,
-                    _datetime_value(reservation.requested_at),
-                    _datetime_value(reservation.starts_at),
-                    _datetime_value(reservation.ends_at),
-                    _datetime_value(reservation.activated_at),
-                    _datetime_value(reservation.expired_at),
+                    datetime_value(reservation.requested_at),
+                    datetime_value(reservation.starts_at),
+                    datetime_value(reservation.ends_at),
+                    datetime_value(reservation.activated_at),
+                    datetime_value(reservation.expired_at),
                     reservation.source.value,
                     json.dumps(reservation.metadata, sort_keys=True),
                     reservation.idempotency_key,
@@ -172,7 +173,7 @@ class SQLiteReservationRepository:
                 f"SELECT * FROM reservations WHERE bench_id = ? AND status = 'active'{scope}",  # noqa: S608
                 values,
             ).fetchone()
-        return _reservation_from_row(row) if row is not None else None
+        return reservation_from_row(row) if row is not None else None
 
     async def release(self, reservation: Reservation) -> None:
         with self._database.transaction(immediate=True) as connection:
@@ -180,7 +181,7 @@ class SQLiteReservationRepository:
                 "UPDATE reservations SET status = ?, released_at = ? WHERE id = ?",
                 (
                     reservation.status.value,
-                    _datetime_value(reservation.released_at),
+                    datetime_value(reservation.released_at),
                     str(reservation.id),
                 ),
             )
@@ -290,8 +291,8 @@ class SQLiteEventRepository:
         filters = (
             ("bench_id = ?", bench_id),
             ("type = ?", event_type),
-            ("timestamp > ?", _datetime_value(after)),
-            ("timestamp < ?", _datetime_value(before)),
+            ("timestamp > ?", datetime_value(after)),
+            ("timestamp < ?", datetime_value(before)),
         )
         for condition, value in filters:
             if value is not None:
@@ -370,8 +371,8 @@ def _operation_values(operation: Operation) -> tuple[object, ...]:
         operation.status.value,
         operation.requested_by,
         operation.created_at.isoformat(),
-        _datetime_value(operation.started_at),
-        _datetime_value(operation.completed_at),
+        datetime_value(operation.started_at),
+        datetime_value(operation.completed_at),
         operation.progress,
         operation.message,
         operation.error_code,
@@ -379,7 +380,7 @@ def _operation_values(operation: Operation) -> tuple[object, ...]:
     )
 
 
-def _reservation_from_row(row: sqlite3.Row) -> Reservation:
+def reservation_from_row(row: sqlite3.Row) -> Reservation:
     return Reservation(
         id=UUID(row["id"]),
         organisation_id=UUID(row["organisation_id"]),
@@ -388,14 +389,14 @@ def _reservation_from_row(row: sqlite3.Row) -> Reservation:
         owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
         owner_principal_type=row["owner_principal_type"],
         created_at=datetime.fromisoformat(row["created_at"]),
-        released_at=_parse_datetime(row["released_at"]),
+        released_at=parse_datetime(row["released_at"]),
         status=ReservationStatus(row["status"]),
-        requested_at=_parse_datetime(row["requested_at"]),
-        starts_at=_parse_datetime(row["starts_at"]),
-        ends_at=_parse_datetime(row["ends_at"]),
-        activated_at=_parse_datetime(row["activated_at"]),
-        expired_at=_parse_datetime(row["expired_at"]),
-        source=row["source"],
+        requested_at=parse_datetime(row["requested_at"]),
+        starts_at=parse_datetime(row["starts_at"]),
+        ends_at=parse_datetime(row["ends_at"]),
+        activated_at=parse_datetime(row["activated_at"]),
+        expired_at=parse_datetime(row["expired_at"]),
+        source=ReservationSource(row["source"]),
         metadata=json.loads(row["metadata"]),
         idempotency_key=row["idempotency_key"],
         release_pending=bool(row["release_pending"]),
@@ -410,13 +411,23 @@ def _operation_from_row(row: sqlite3.Row) -> Operation:
         status=OperationStatus(row["status"]),
         requested_by=row["requested_by"],
         created_at=datetime.fromisoformat(row["created_at"]),
-        started_at=_parse_datetime(row["started_at"]),
-        completed_at=_parse_datetime(row["completed_at"]),
+        started_at=parse_datetime(row["started_at"]),
+        completed_at=parse_datetime(row["completed_at"]),
         progress=row["progress"],
         message=row["message"],
         error_code=row["error_code"],
         error_message=row["error_message"],
     )
+
+
+def sqlite_read_only_uri(path: Path) -> str:
+    """Return a SQLite URI that opens ``path`` read-only.
+
+    The path is percent-encoded: in a raw ``file:`` URI, ``?`` and ``#`` end the
+    path and ``%`` starts an escape, so a directory name containing them would
+    silently open a different, empty database.
+    """
+    return f"{path.absolute().as_uri()}?mode=ro"
 
 
 def insert_event(connection: sqlite3.Connection, event: EventRecord) -> None:
@@ -468,9 +479,9 @@ def _operation_artifact_from_row(row: sqlite3.Row) -> OperationArtifact:
     )
 
 
-def _datetime_value(value: datetime | None) -> str | None:
+def datetime_value(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def _parse_datetime(value: str | None) -> datetime | None:
+def parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None

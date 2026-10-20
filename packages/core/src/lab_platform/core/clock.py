@@ -4,9 +4,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 
-def as_utc(value: datetime) -> datetime:
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def as_utc(value: datetime, *, field: str | None = None) -> datetime:
+    """Normalize an aware datetime to UTC, rejecting naive values.
+
+    ``field`` names the rejected value in the error message.
+    """
     if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("A timezone-aware datetime is required")
+        if field is None:
+            raise ValueError("A timezone-aware datetime is required")
+        raise ValueError(f"{field} must be timezone-aware")
     return value.astimezone(UTC)
 
 
@@ -16,7 +26,7 @@ class Clock(Protocol):
 
 class UtcClock:
     def now(self) -> datetime:
-        return datetime.now(UTC)
+        return utc_now()
 
 
 class FakeClock:

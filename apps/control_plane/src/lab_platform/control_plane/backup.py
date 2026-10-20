@@ -19,7 +19,12 @@ from urllib.parse import unquote
 
 from lab_platform.control_plane.compatibility import ApplicationVersion
 from lab_platform.core import VERSION
-from lab_platform.persistence import SCHEMA_VERSION, inspect_database_schema
+from lab_platform.core.clock import as_utc
+from lab_platform.persistence import (
+    SCHEMA_VERSION,
+    inspect_database_schema,
+    sqlite_read_only_uri,
+)
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 BACKUP_FORMAT_VERSION = 1
@@ -63,7 +68,7 @@ class BackupManifest:
         ApplicationVersion.parse(self.application_version)
         if self.database_schema < 0:
             raise ValueError("database schema version cannot be negative")
-        _utc(self.created_at)
+        as_utc(self.created_at, field="backup timestamp")
         if self.database_backend not in {"postgresql", "sqlite"}:
             raise ValueError("backup database backend must be postgresql or sqlite")
         if bool(self.artifacts) != self.artifacts_included:
@@ -77,7 +82,7 @@ class BackupManifest:
             "format_version": self.format_version,
             "application_version": self.application_version,
             "database_schema": self.database_schema,
-            "created_at": _utc(self.created_at).isoformat().replace("+00:00", "Z"),
+            "created_at": as_utc(self.created_at).isoformat().replace("+00:00", "Z"),
             "database_backend": self.database_backend,
             "database_dump": self.database_dump.as_dict(),
             "artifacts_included": self.artifacts_included,
@@ -264,7 +269,7 @@ class DatabaseBackupAdapter:
 
     def verify_dump(self, source: Path) -> None:
         if self._sqlite_path is not None:
-            connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+            connection = sqlite3.connect(sqlite_read_only_uri(source), uri=True)
             try:
                 row = connection.execute("PRAGMA quick_check").fetchone()
             finally:
@@ -296,7 +301,7 @@ class DatabaseBackupAdapter:
             self._sqlite_path.parent.mkdir(parents=True, exist_ok=True)
             incoming = self._sqlite_path.with_name(f".{self._sqlite_path.name}.restore")
             incoming.unlink(missing_ok=True)
-            source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+            source_connection = sqlite3.connect(sqlite_read_only_uri(source), uri=True)
             target_connection = sqlite3.connect(incoming)
             try:
                 source_connection.backup(target_connection)
@@ -715,7 +720,7 @@ class BackupService:
         self.clock = clock
 
     def create(self, destination: Path, *, include_artifacts: bool = True) -> Path:
-        created_at = _utc(self.clock())
+        created_at = as_utc(self.clock(), field="backup timestamp")
         output = _backup_output_path(destination, created_at)
         if output.exists():
             raise FileExistsError(f"backup already exists: {output}")
@@ -1055,12 +1060,6 @@ def _strict_bool(value: object, name: str) -> bool:
 def _validate_sha256(value: str) -> None:
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError("backup SHA-256 must contain 64 lowercase hexadecimal digits")
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("backup timestamp must be timezone-aware")
-    return value.astimezone(UTC)
 
 
 __all__ = [

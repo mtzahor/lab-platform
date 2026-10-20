@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
+from lab_platform.core.clock import utc_now
 from lab_platform.core.errors import PlatformError
 from lab_platform.models.hardware import (
     BenchComposition,
@@ -31,10 +32,6 @@ class ResourceConflictError(PlatformError):
 
 class ResourceUnavailableError(PlatformError):
     code = "RESOURCE_UNAVAILABLE"
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 class ResourceCatalog:
@@ -200,7 +197,7 @@ class ResourceLockManager:
         self,
         catalog: ResourceCatalog,
         *,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self._catalog = catalog
         self._clock = clock

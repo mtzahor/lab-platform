@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
@@ -28,6 +28,7 @@ from lab_platform.control_plane_core.reservations import (
     CoordinatedReservationLease,
     ReservationLeaseState,
 )
+from lab_platform.core.clock import as_utc, utc_now
 from lab_platform.core.errors import (
     AuthenticationRequiredError,
     BenchAlreadyReservedError,
@@ -451,7 +452,7 @@ class DistributedWorkflowCoordinator:
         self._commands = commands
         self._authorisation = authorisation
         self._definition_catalog = definition_catalog
-        self._clock = clock or _utc_now
+        self._clock = clock or utc_now
         self._maximum_idempotency_entries = maximum_idempotency_entries
         self._request_lock = asyncio.Lock()
         self._requests: dict[tuple[UUID, str], _IdempotentRequest] = {}
@@ -697,7 +698,7 @@ class DistributedWorkflowCoordinator:
 
         transfers: list[WorkflowArtifactTransferDescriptor] = []
         try:
-            now = _as_utc(self._clock(), field="workflow dispatch timestamp")
+            now = as_utc(self._clock(), field="workflow dispatch timestamp")
             for input_name, reference in artifact_inputs:
                 target_path = _artifact_target_path(reference.artifact_id)
                 descriptor = await self._artifacts.issue_download(
@@ -1499,16 +1500,6 @@ def _require_positive_optional_seconds(value: int | None, *, field: str) -> None
 def _require_positive_seconds(value: int, *, field: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{field} must be a positive integer")
-
-
-def _as_utc(value: datetime, *, field: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 __all__ = [
