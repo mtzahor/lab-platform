@@ -419,6 +419,16 @@ def _operation_from_row(row: sqlite3.Row) -> Operation:
     )
 
 
+def sqlite_read_only_uri(path: Path) -> str:
+    """Return a SQLite URI that opens ``path`` read-only.
+
+    The path is percent-encoded: in a raw ``file:`` URI, ``?`` and ``#`` end the
+    path and ``%`` starts an escape, so a directory name containing them would
+    silently open a different, empty database.
+    """
+    return f"{path.absolute().as_uri()}?mode=ro"
+
+
 def insert_event(connection: sqlite3.Connection, event: EventRecord) -> None:
     """Insert an idempotent event inside an existing SQLite unit of work."""
 

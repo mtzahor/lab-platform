@@ -19,7 +19,11 @@ from urllib.parse import unquote
 
 from lab_platform.control_plane.compatibility import ApplicationVersion
 from lab_platform.core import VERSION
-from lab_platform.persistence import SCHEMA_VERSION, inspect_database_schema
+from lab_platform.persistence import (
+    SCHEMA_VERSION,
+    inspect_database_schema,
+    sqlite_read_only_uri,
+)
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 BACKUP_FORMAT_VERSION = 1
@@ -264,7 +268,7 @@ class DatabaseBackupAdapter:
 
     def verify_dump(self, source: Path) -> None:
         if self._sqlite_path is not None:
-            connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+            connection = sqlite3.connect(sqlite_read_only_uri(source), uri=True)
             try:
                 row = connection.execute("PRAGMA quick_check").fetchone()
             finally:
@@ -296,7 +300,7 @@ class DatabaseBackupAdapter:
             self._sqlite_path.parent.mkdir(parents=True, exist_ok=True)
             incoming = self._sqlite_path.with_name(f".{self._sqlite_path.name}.restore")
             incoming.unlink(missing_ok=True)
-            source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+            source_connection = sqlite3.connect(sqlite_read_only_uri(source), uri=True)
             target_connection = sqlite3.connect(incoming)
             try:
                 source_connection.backup(target_connection)

@@ -33,6 +33,7 @@ from lab_platform.control_plane.runtime import ControlPlaneRuntime
 from lab_platform.control_plane.server import ControlPlaneHttpServer
 from lab_platform.core import VERSION, build_metadata
 from lab_platform.logging import configure_logging, redact_log_text
+from lab_platform.persistence.database import sqlite_read_only_uri
 from lab_platform.persistence.database_management import (
     SchemaStatus,
     inspect_database_schema,
@@ -410,7 +411,7 @@ def _database_agent_versions(config: ControlPlaneConfig) -> list[AgentVersionInf
     connection: Any
     if url.startswith("sqlite:///"):
         database_path = Path(unquote(url.removeprefix("sqlite:///"))).expanduser().resolve()
-        connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+        connection = sqlite3.connect(sqlite_read_only_uri(database_path), uri=True)
     else:
         try:
             import psycopg

@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from lab_platform.persistence import SCHEMA_VERSION
+from lab_platform.persistence import SCHEMA_VERSION, sqlite_read_only_uri
 from lab_platform.persistence.database_management import (
     MINIMUM_SUPPORTED_SCHEMA_VERSION,
     SchemaCompatibilityError,
@@ -15,6 +15,28 @@ from lab_platform.persistence.database_management import (
     inspect_database_schema,
     require_current_schema,
 )
+
+
+@pytest.mark.parametrize("directory_name", ["plain", "with space", "run#1", "run?1", "run%41"])
+def test_sqlite_read_only_uri_opens_the_named_file_despite_uri_delimiters(
+    tmp_path: Path,
+    directory_name: str,
+) -> None:
+    database_path = tmp_path / directory_name / "control.db"
+    database_path.parent.mkdir()
+    writer = sqlite3.connect(database_path)
+    writer.execute("CREATE TABLE marker (value TEXT)")
+    writer.commit()
+    writer.close()
+
+    reader = sqlite3.connect(sqlite_read_only_uri(database_path), uri=True)
+    try:
+        tables = reader.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        assert tables == [("marker",)]
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            reader.execute("INSERT INTO marker VALUES ('write')")
+    finally:
+        reader.close()
 
 
 @pytest.mark.parametrize(
