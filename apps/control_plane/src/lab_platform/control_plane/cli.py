@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import unquote
 from uuid import UUID
 
+from lab_platform.config import deep_merge
 from lab_platform.control_plane.backup import (
     ArtifactBackupAdapter,
     BackupService,
@@ -140,35 +141,6 @@ async def _run_once(runtime: ControlPlaneRuntime) -> None:
         print(f"✓ {values['bench_inventory_total']} benches in unified inventory")
     finally:
         await runtime.stop()
-
-
-def _run_migrations(runtime: ControlPlaneRuntime) -> None:
-    events = StructuredOperationalEventSink()
-    events.emit(
-        "DATABASE_MIGRATION_STARTED",
-        {
-            "profile": runtime.config.profile,
-            "database_backend": runtime.config.database.url.partition(":")[0],
-            "allow_unsupported_source": False,
-        },
-    )
-    runtime.database.initialize()
-    try:
-        status = inspect_database_schema(runtime.config.database.url)
-        events.emit(
-            "DATABASE_MIGRATION_COMPLETED",
-            {
-                "profile": runtime.config.profile,
-                "database_backend": status.backend,
-                "schema_version": status.current_version,
-                "target_schema_version": status.target_version,
-            },
-        )
-        print(f"Lab Control Plane v{VERSION}")
-        print("✓ Configuration loaded")
-        print("✓ Database migrations applied")
-    finally:
-        runtime.database.close()
 
 
 def _run_database_command(
@@ -572,18 +544,7 @@ def _with_config_overrides(
     payload = config.model_dump(mode="python")
     if not isinstance(payload.get("control_plane"), dict):  # pragma: no cover - model invariant
         raise TypeError("Control-plane configuration did not serialize as a mapping")
-    return ControlPlaneConfig.model_validate(_deep_merge(payload, overrides))
-
-
-def _deep_merge(base: Mapping[str, object], update: Mapping[str, object]) -> dict[str, object]:
-    merged: dict[str, object] = dict(base)
-    for key, value in update.items():
-        existing = merged.get(key)
-        if isinstance(existing, Mapping) and isinstance(value, Mapping):
-            merged[key] = _deep_merge(existing, value)
-        else:
-            merged[key] = value
-    return merged
+    return ControlPlaneConfig.model_validate(deep_merge(payload, overrides))
 
 
 def _validate_command_shape(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

@@ -1692,7 +1692,7 @@ def _workflow_run_summary(operation: DistributedOperation) -> WorkflowRunSummary
         agent_id=operation.agent_id,
         bench_id=operation.bench_id,
         reservation_id=operation.reservation_id,
-        status=_workflow_status(operation),
+        status=distributed_workflow_status(operation),
         operation_status=operation.status,
         progress=operation.progress,
         message=operation.message,
@@ -1710,7 +1710,7 @@ def _operation_summary(operation: DistributedOperation) -> OperationSummary:
     )
 
 
-def _workflow_status(operation: DistributedOperation) -> str:
+def distributed_workflow_status(operation: DistributedOperation) -> str:
     if operation.status in {
         DistributedOperationStatus.CREATED,
         DistributedOperationStatus.DISPATCHED,

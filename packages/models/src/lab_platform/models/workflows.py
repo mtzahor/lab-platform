@@ -328,12 +328,12 @@ class WorkflowDefinition(WorkflowModel):
     @model_validator(mode="after")
     def require_declared_step_capabilities(self) -> WorkflowDefinition:
         required = {
-            _canonical_capability(capability)
+            canonical_capability(capability)
             for step in self.steps
             if (capability := _STEP_CAPABILITY.get(WorkflowAction(step.action))) is not None
         }
         declared = {
-            _canonical_capability(capability) for capability in self.requirements.capabilities
+            canonical_capability(capability) for capability in self.requirements.capabilities
         }
         undeclared = sorted(required.difference(declared))
         if undeclared:
@@ -395,7 +395,7 @@ _STEP_CAPABILITY: dict[WorkflowAction, str | None] = {
 }
 
 
-def _canonical_capability(value: str) -> str:
+def canonical_capability(value: str) -> str:
     normalized = value.strip().casefold()
     return "flash" if normalized == "firmware" else normalized
 

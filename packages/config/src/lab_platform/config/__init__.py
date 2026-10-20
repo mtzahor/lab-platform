@@ -32,6 +32,7 @@ from lab_platform.config.loader import (
     SimLabSettings,
     UsbMatchSettings,
     WorkflowSettings,
+    deep_merge,
     load_config,
     validate_config,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "SerialConnectionSettings",
     "UsbMatchSettings",
     "WorkflowSettings",
+    "deep_merge",
     "load_config",
     "validate_config",
 ]

@@ -451,7 +451,7 @@ def load_config(config_dir: str | Path = "config") -> PlatformConfig:
         return PlatformConfig.model_validate(_expand_backend_config_paths(data, root.parent))
     merged_data: dict[str, Any] = {}
     for filename in ("agent.yaml", "simlab.yaml", "hardware.yaml", "backends.yaml"):
-        merged_data = _deep_merge(merged_data, _read_yaml_file(root / filename))
+        merged_data = deep_merge(merged_data, _read_yaml_file(root / filename))
     return PlatformConfig.model_validate(_expand_backend_config_paths(merged_data, root))
 
 
@@ -473,12 +473,12 @@ def _read_yaml_file(path: Path) -> Mapping[str, Any]:
     return raw
 
 
-def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+def deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
     merged: dict[str, Any] = dict(base)
     for key, value in update.items():
         existing = merged.get(key)
         if isinstance(existing, Mapping) and isinstance(value, Mapping):
-            merged[key] = _deep_merge(existing, value)
+            merged[key] = deep_merge(existing, value)
         else:
             merged[key] = value
     return merged
@@ -508,7 +508,7 @@ def _expand_backend_config_paths(data: Mapping[str, Any], base: Path) -> dict[st
         inline = _normalize_simlab_aliases(
             {key: value for key, value in raw_config.items() if key != "config_path"}
         )
-        merged_config = _deep_merge(external, inline)
+        merged_config = deep_merge(external, inline)
         merged_config["config_path"] = path
         backends.append({**raw_backend, "config": merged_config})
     expanded["backends"] = backends

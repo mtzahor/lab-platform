@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import yaml
-from lab_platform.config import CONFIG_VERSION
+from lab_platform.config import CONFIG_VERSION, deep_merge
 from lab_platform.core.decision_engine.settings import DecisionSettings
 from pydantic import (
     AliasChoices,
@@ -706,9 +706,9 @@ def load_control_plane_config(
             "LAB_SECRET_KEY_FILE"
         )
     environment_values = _control_plane_environment(os.environ if environ is None else environ)
-    merged = _deep_merge(file_values, environment_values)
+    merged = deep_merge(file_values, environment_values)
     if overrides is not None:
-        merged = _deep_merge(merged, overrides)
+        merged = deep_merge(merged, overrides)
     return ControlPlaneConfig.model_validate(merged)
 
 
@@ -880,17 +880,6 @@ def _set_nested_value(values: dict[str, object], path: tuple[str, ...], value: o
             raise TypeError(f"Environment path collision at {component}")
         target = existing
     target[path[-1]] = value
-
-
-def _deep_merge(base: Mapping[str, object], update: Mapping[str, object]) -> dict[str, object]:
-    merged: dict[str, object] = dict(base)
-    for key, value in update.items():
-        existing = merged.get(key)
-        if isinstance(existing, Mapping) and isinstance(value, Mapping):
-            merged[key] = _deep_merge(existing, value)
-        else:
-            merged[key] = value
-    return merged
 
 
 def _nested_value_present(values: Mapping[str, object], path: tuple[str, ...]) -> bool:
