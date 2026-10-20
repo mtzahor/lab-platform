@@ -6,7 +6,7 @@ from datetime import datetime
 from uuid import UUID
 
 from lab_platform.models import ApiToken, ApiTokenScope
-from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.database import SQLiteDatabase, datetime_value, parse_datetime
 
 
 class SQLiteApiTokenRepository:
@@ -135,9 +135,9 @@ def _token_values(token: ApiToken) -> tuple[object, ...]:
         token.owner,
         json.dumps(scopes, separators=(",", ":")),
         token.created_at.isoformat(),
-        _datetime_value(token.expires_at),
-        _datetime_value(token.revoked_at),
-        _datetime_value(token.last_used_at),
+        datetime_value(token.expires_at),
+        datetime_value(token.revoked_at),
+        datetime_value(token.last_used_at),
     )
 
 
@@ -149,15 +149,7 @@ def _token_from_row(row: sqlite3.Row) -> ApiToken:
         owner=row["owner"],
         scopes={ApiTokenScope(item) for item in json.loads(row["scopes_json"])},
         created_at=datetime.fromisoformat(row["created_at"]),
-        expires_at=_parse_datetime(row["expires_at"]),
-        revoked_at=_parse_datetime(row["revoked_at"]),
-        last_used_at=_parse_datetime(row["last_used_at"]),
+        expires_at=parse_datetime(row["expires_at"]),
+        revoked_at=parse_datetime(row["revoked_at"]),
+        last_used_at=parse_datetime(row["last_used_at"]),
     )
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None

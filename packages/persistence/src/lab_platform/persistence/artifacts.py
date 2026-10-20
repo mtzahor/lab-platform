@@ -12,7 +12,7 @@ from lab_platform.core.retention import (
     retention_class_for_artifact_type,
 )
 from lab_platform.models import LEGACY_ORGANISATION_ID, ArtifactOwnerType, ArtifactRecord
-from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.database import SQLiteDatabase, datetime_value, parse_datetime
 
 
 class SQLiteGenericArtifactRepository:
@@ -443,7 +443,7 @@ def _artifact_values(record: ArtifactRecord) -> tuple[object, ...]:
         record.size_bytes,
         record.sha256,
         record.created_at.isoformat(),
-        _datetime_value(record.expires_at),
+        datetime_value(record.expires_at),
         json.dumps(record.metadata, sort_keys=True, separators=(",", ":")),
     )
 
@@ -461,7 +461,7 @@ def _artifact_from_row(row: sqlite3.Row) -> ArtifactRecord:
         size_bytes=row["size_bytes"],
         sha256=row["sha256"],
         created_at=datetime.fromisoformat(row["created_at"]),
-        expires_at=_parse_datetime(row["expires_at"]),
+        expires_at=parse_datetime(row["expires_at"]),
         metadata=json.loads(row["metadata_json"]),
     )
 
@@ -469,11 +469,3 @@ def _artifact_from_row(row: sqlite3.Row) -> ArtifactRecord:
 def _enum_value(value: object) -> str:
     candidate = getattr(value, "value", value)
     return str(candidate)
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None

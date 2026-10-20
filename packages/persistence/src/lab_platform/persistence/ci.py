@@ -18,10 +18,13 @@ from lab_platform.models import (
     CleanupStatus,
     DistributedCiWorkflowBinding,
     Reservation,
-    ReservationSource,
-    ReservationStatus,
 )
-from lab_platform.persistence.database import SQLiteDatabase
+from lab_platform.persistence.database import (
+    SQLiteDatabase,
+    datetime_value,
+    parse_datetime,
+    reservation_from_row,
+)
 from lab_platform.persistence.migrations import DEFAULT_ORGANISATION_ID
 
 _ASSIGNABLE_SESSION_STATUSES = (
@@ -612,7 +615,7 @@ class SQLiteCiSessionRepository:
                     ).fetchone()
                     if reservation_row is None:
                         return None
-                    return _session_from_row(session_row), _reservation_from_row(reservation_row)
+                    return _session_from_row(session_row), reservation_from_row(reservation_row)
                 if CiSessionStatus(session_row["status"]) not in _ASSIGNABLE_SESSION_STATUSES:
                     return None
 
@@ -678,7 +681,7 @@ class SQLiteCiSessionRepository:
                 ).fetchone()
         except sqlite3.IntegrityError:
             return None
-        return _session_from_row(assigned_row), _reservation_from_row(reservation_row)
+        return _session_from_row(assigned_row), reservation_from_row(reservation_row)
 
 
 class _Candidate:
@@ -830,10 +833,10 @@ def _session_values(session: CiSession) -> tuple[object, ...]:
         str(session.workflow_run_id) if session.workflow_run_id is not None else None,
         session.status.value,
         session.created_at.isoformat(),
-        _datetime_value(session.started_at),
-        _datetime_value(session.completed_at),
-        _datetime_value(session.heartbeat_at),
-        _datetime_value(session.timeout_at),
+        datetime_value(session.started_at),
+        datetime_value(session.completed_at),
+        datetime_value(session.heartbeat_at),
+        datetime_value(session.timeout_at),
         session.cleanup_status.value,
         session.bench_request.model_dump_json() if session.bench_request is not None else None,
     )
@@ -883,10 +886,10 @@ def _session_from_row(row: sqlite3.Row) -> CiSession:
         status=CiSessionStatus(row["status"]),
         outcome=CiOutcome(row["outcome"] or CiOutcome.PENDING.value),
         created_at=datetime.fromisoformat(row["created_at"]),
-        started_at=_parse_datetime(row["started_at"]),
-        completed_at=_parse_datetime(row["completed_at"]),
-        heartbeat_at=_parse_datetime(row["heartbeat_at"]),
-        timeout_at=_parse_datetime(row["timeout_at"]),
+        started_at=parse_datetime(row["started_at"]),
+        completed_at=parse_datetime(row["completed_at"]),
+        heartbeat_at=parse_datetime(row["heartbeat_at"]),
+        timeout_at=parse_datetime(row["timeout_at"]),
         cleanup_status=CleanupStatus(row["cleanup_status"]),
         bench_request=(BenchRequest.model_validate_json(bench_request) if bench_request else None),
     )
@@ -908,29 +911,6 @@ def _distributed_binding_from_row(row: sqlite3.Row) -> DistributedCiWorkflowBind
     )
 
 
-def _reservation_from_row(row: sqlite3.Row) -> Reservation:
-    return Reservation(
-        id=UUID(row["id"]),
-        organisation_id=UUID(row["organisation_id"]),
-        bench_id=row["bench_id"],
-        owner=row["owner"],
-        owner_principal_id=(UUID(row["owner_principal_id"]) if row["owner_principal_id"] else None),
-        owner_principal_type=row["owner_principal_type"],
-        created_at=datetime.fromisoformat(row["created_at"]),
-        released_at=_parse_datetime(row["released_at"]),
-        status=ReservationStatus(row["status"]),
-        requested_at=_parse_datetime(row["requested_at"]),
-        starts_at=_parse_datetime(row["starts_at"]),
-        ends_at=_parse_datetime(row["ends_at"]),
-        activated_at=_parse_datetime(row["activated_at"]),
-        expired_at=_parse_datetime(row["expired_at"]),
-        source=ReservationSource(row["source"]),
-        metadata=json.loads(row["metadata"]),
-        idempotency_key=row["idempotency_key"],
-        release_pending=bool(row["release_pending"]),
-    )
-
-
 def _cleanup_from_row(row: sqlite3.Row) -> CleanupResult:
     return CleanupResult(
         reservation_released=bool(row["reservation_released"]),
@@ -944,11 +924,3 @@ def _cleanup_from_row(row: sqlite3.Row) -> CleanupResult:
 
 def _dump_errors(errors: Sequence[str]) -> str:
     return json.dumps(list(errors), separators=(",", ":"))
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None

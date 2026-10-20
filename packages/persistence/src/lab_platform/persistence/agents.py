@@ -19,7 +19,12 @@ from lab_platform.models import (
     EnrollmentStatus,
     EventRecord,
 )
-from lab_platform.persistence.database import SQLiteDatabase, insert_event
+from lab_platform.persistence.database import (
+    SQLiteDatabase,
+    datetime_value,
+    insert_event,
+    parse_datetime,
+)
 
 
 class _EnrollmentWriteConflict(Exception):
@@ -549,8 +554,8 @@ def _token_values(token: AgentEnrollmentToken) -> tuple[object, ...]:
         token.token_hash,
         token.created_at.isoformat(),
         token.expires_at.isoformat(),
-        _datetime_value(token.used_at),
-        _datetime_value(token.revoked_at),
+        datetime_value(token.used_at),
+        datetime_value(token.revoked_at),
         json.dumps(token.allowed_labels, sort_keys=True, separators=(",", ":")),
         str(token.used_by_agent_id) if token.used_by_agent_id is not None else None,
         str(token.enrollment_request_id) if token.enrollment_request_id is not None else None,
@@ -569,12 +574,12 @@ def _agent_values(agent: AgentRecord) -> tuple[object, ...]:
         agent.location,
         json.dumps(agent.labels, sort_keys=True, separators=(",", ":")),
         agent.registered_at.isoformat(),
-        _datetime_value(agent.last_connected_at),
-        _datetime_value(agent.last_seen_at),
-        _datetime_value(agent.disconnected_at),
+        datetime_value(agent.last_connected_at),
+        datetime_value(agent.last_seen_at),
+        datetime_value(agent.disconnected_at),
         agent.certificate_fingerprint,
         agent.enrollment_status.value,
-        _datetime_value(agent.revoked_at),
+        datetime_value(agent.revoked_at),
     )
 
 
@@ -587,9 +592,9 @@ def _credential_values(credential: AgentCredential) -> tuple[object, ...]:
         credential.credential_hash,
         credential.version,
         credential.created_at.isoformat(),
-        _datetime_value(credential.expires_at),
-        _datetime_value(credential.revoked_at),
-        _datetime_value(credential.last_used_at),
+        datetime_value(credential.expires_at),
+        datetime_value(credential.revoked_at),
+        datetime_value(credential.last_used_at),
     )
 
 
@@ -601,8 +606,8 @@ def _token_from_row(row: sqlite3.Row) -> AgentEnrollmentToken:
         token_hash=row["token_hash"],
         created_at=datetime.fromisoformat(row["created_at"]),
         expires_at=datetime.fromisoformat(row["expires_at"]),
-        used_at=_parse_datetime(row["used_at"]),
-        revoked_at=_parse_datetime(row["revoked_at"]),
+        used_at=parse_datetime(row["used_at"]),
+        revoked_at=parse_datetime(row["revoked_at"]),
         allowed_labels=json.loads(row["allowed_labels_json"]),
         used_by_agent_id=(
             UUID(row["used_by_agent_id"]) if row["used_by_agent_id"] is not None else None
@@ -625,12 +630,12 @@ def _agent_from_row(row: sqlite3.Row) -> AgentRecord:
         location=row["location"],
         labels=json.loads(row["labels_json"]),
         registered_at=datetime.fromisoformat(row["registered_at"]),
-        last_connected_at=_parse_datetime(row["last_connected_at"]),
-        last_seen_at=_parse_datetime(row["last_seen_at"]),
-        disconnected_at=_parse_datetime(row["disconnected_at"]),
+        last_connected_at=parse_datetime(row["last_connected_at"]),
+        last_seen_at=parse_datetime(row["last_seen_at"]),
+        disconnected_at=parse_datetime(row["disconnected_at"]),
         certificate_fingerprint=row["certificate_fingerprint"],
         enrollment_status=EnrollmentStatus(row["enrollment_status"]),
-        revoked_at=_parse_datetime(row["revoked_at"]),
+        revoked_at=parse_datetime(row["revoked_at"]),
     )
 
 
@@ -643,15 +648,7 @@ def _credential_from_row(row: sqlite3.Row) -> AgentCredential:
         credential_hash=row["credential_hash"],
         version=row["version"],
         created_at=datetime.fromisoformat(row["created_at"]),
-        expires_at=_parse_datetime(row["expires_at"]),
-        revoked_at=_parse_datetime(row["revoked_at"]),
-        last_used_at=_parse_datetime(row["last_used_at"]),
+        expires_at=parse_datetime(row["expires_at"]),
+        revoked_at=parse_datetime(row["revoked_at"]),
+        last_used_at=parse_datetime(row["last_used_at"]),
     )
-
-
-def _datetime_value(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value is not None else None
