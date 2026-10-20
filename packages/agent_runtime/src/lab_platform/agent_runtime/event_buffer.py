@@ -123,7 +123,7 @@ class InMemoryAgentEventBuffer:
                 created_at=created_at,
             )
             key = (
-                coalesce_key or _default_progress_key(event_type, payload)
+                coalesce_key or default_progress_key(event_type, payload)
                 if priority is BufferedEventPriority.PROGRESS
                 else None
             )
@@ -265,7 +265,7 @@ class InMemoryAgentEventBuffer:
         }
 
 
-def _default_progress_key(event_type: str, payload: Mapping[str, Any]) -> str:
+def default_progress_key(event_type: str, payload: Mapping[str, Any]) -> str:
     identity_parts = [event_type]
     for field in ("command_id", "operation_id", "workflow_run_id", "step_index", "bench_id"):
         value = payload.get(field)

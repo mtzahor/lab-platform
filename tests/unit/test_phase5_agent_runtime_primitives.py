@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -96,14 +97,17 @@ def test_lease_store_validates_identity_time_and_clock_skew() -> None:
                 bench_id=lease.bench_id,
                 lease_version=lease.lease_version,
             )
-        with pytest.raises(ValueError, match="non-negative integer"):
-            await store.validate(
-                agent_id=agent_id,
-                reservation_id=lease.reservation_id,
-                bench_id=lease.bench_id,
-                lease_version=lease.lease_version,
-                maximum_clock_skew_seconds=-1,
-            )
+        # The in-memory and SQLite stores share one skew rule, so both reject
+        # fractional and boolean skews as well as negative ones.
+        for invalid_skew in (-1, 1.5, True):
+            with pytest.raises(ValueError, match="non-negative integer"):
+                await store.validate(
+                    agent_id=agent_id,
+                    reservation_id=lease.reservation_id,
+                    bench_id=lease.bench_id,
+                    lease_version=lease.lease_version,
+                    maximum_clock_skew_seconds=cast(Any, invalid_skew),
+                )
 
     asyncio.run(scenario())
 
