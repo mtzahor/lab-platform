@@ -46,7 +46,7 @@ plugins:
         debugger: ST-Link
         target_config: target/stm32f4x.cfg
         status: EXPERIMENTAL
-        automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+        automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
         latest_physical_evidence: null
         limitations:
           - Command construction and backend behavior are automated; a physical Nucleo run is pending.
@@ -63,7 +63,7 @@ plugins:
     tested:
       - board: Raspberry Pi Pico
         status: EXPERIMENTAL
-        automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+        automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
         latest_physical_evidence: null
         limitations: [A physical adapter/board validation run is pending.]
 
@@ -79,7 +79,7 @@ plugins:
     tested:
       - board: Nordic nRF52 development board
         status: EXPERIMENTAL
-        automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+        automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
         latest_physical_evidence: null
         limitations: [A physical board/debugger validation run is pending.]
 
@@ -91,7 +91,7 @@ accessories:
     status: EXPERIMENTAL
     implementation_state: sdk_power_driver_and_safe_command_transport_implemented
     supported_operating_systems: [linux, macos, windows]
-    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
     latest_physical_evidence: null
     limitations:
       - No specific relay vendor/model has qualifying physical evidence.
@@ -105,7 +105,7 @@ accessories:
     implementation_state: safe_commander_script_target_and_plugin_contract_implemented
     external_dependencies: [SEGGER J-Link Software]
     supported_operating_systems: [linux, macos, windows]
-    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
     latest_physical_evidence: null
     limitations: [SEGGER tooling and its license are installed outside Lab Platform.]
 
@@ -117,7 +117,7 @@ accessories:
     implementation_state: socketcan_send_receive_filter_and_capture_contract_implemented
     external_dependencies: [Linux SocketCAN]
     supported_operating_systems: [linux]
-    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
     latest_physical_evidence: null
     limitations:
       - Interface provisioning and bitrate remain host-administrator responsibilities.
@@ -130,6 +130,6 @@ accessories:
     status: EXPERIMENTAL
     implementation_state: generic_measure_capture_and_programmable_power_driver_contract_implemented
     supported_operating_systems: [linux, macos, windows]
-    automated_contract: tests/unit/test_phase9_hardware_ecosystem.py
+    automated_contract: tests/unit/plugins/test_hardware_ecosystem.py
     latest_physical_evidence: null
     limitations: [No official SCPI, logic-analyzer, or oscilloscope driver is verified.]

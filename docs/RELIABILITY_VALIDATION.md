@@ -39,10 +39,10 @@ Run the complete regression plus focused scale/recovery suites:
 
 ```console
 .venv/bin/pytest
-.venv/bin/pytest tests/end_to_end/test_phase5_distributed_scale.py
-.venv/bin/pytest tests/recovery/test_phase5_reconciliation_drain.py
-.venv/bin/pytest tests/unit/test_phase9_resources.py
-.venv/bin/pytest tests/unit/test_phase9_operational_maturity.py
+.venv/bin/pytest tests/end_to_end/test_distributed_scale.py
+.venv/bin/pytest tests/distributed/test_reconciliation_drain.py
+.venv/bin/pytest tests/unit/plugins/test_hardware_ecosystem.py
+.venv/bin/pytest tests/unit/operations/test_operational_analytics.py
 ```
 
 These runs can make automated evidence available for review. They cannot set criteria 34–40 to

@@ -42,7 +42,7 @@ smoke test explicitly:
 
 ```console
 export LAB_PLATFORM_TEST_POSTGRESQL_URL='postgresql://lab@127.0.0.1/lab_platform_test?sslmode=require'
-uv run pytest tests/unit/test_phase5_postgresql.py -k optional_live_smoke
+uv run pytest tests/unit/persistence/test_postgresql.py -k optional_live_smoke
 ```
 
 The ordinary non-hardware suite remains self-contained and uses temporary SQLite databases.
