@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -203,3 +204,52 @@ def test_demo_bootstrap_reuses_the_configured_default_organisation() -> None:
     assert ensure < bootstrap
     assert "slug=config.identity.default_organisation_slug" in source
     assert "name=config.identity.default_organisation_name" in source
+
+
+def _fake_deployment(tmp_path: Path) -> acceptance.ComposeDeployment:
+    return acceptance.ComposeDeployment(
+        compose_file=tmp_path / "compose.yaml",
+        project_name="lab-platform-acceptance-test",
+        volume_prefix="lab-platform-acceptance-test",
+        control_plane_image="control-plane:test",
+        agent_image="agent:test",
+        port=18080,
+    )
+
+
+def test_schema_status_ignores_compose_progress_written_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status = {"current_version": SCHEMA_VERSION, "ready": True}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["stdout"] is subprocess.PIPE
+        assert kwargs["stderr"] is subprocess.PIPE
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(status, indent=2) + "\n",
+            stderr=" Container lab-platform-control-plane-run-1 Creating \n"
+            " Container lab-platform-control-plane-run-1 Created \n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert acceptance.schema_status(_fake_deployment(tmp_path)) == status
+
+
+def test_failed_compose_command_reports_stdout_and_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 2, stdout="partial output\n", stderr="no such service: control-plane\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(acceptance.AcceptanceError) as raised:
+        _fake_deployment(tmp_path).run("ps", capture=True)
+
+    assert "partial output" in str(raised.value)
+    assert "no such service: control-plane" in str(raised.value)

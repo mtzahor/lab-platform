@@ -142,11 +142,17 @@ class ComposeDeployment:
             input=input_text,
             text=True,
             stdout=subprocess.PIPE if capture else None,
-            stderr=subprocess.STDOUT if capture else None,
+            # Keep stderr separate so Compose progress lines ("Container ... Created")
+            # never corrupt machine-readable stdout such as `--output json`.
+            stderr=subprocess.PIPE if capture else None,
             check=False,
         )
         if check and completed.returncode != 0:
-            output = (completed.stdout or "").strip()
+            output = "\n".join(
+                part.strip()
+                for part in (completed.stdout, completed.stderr)
+                if part and part.strip()
+            )
             if len(output) > 6_000:
                 output = output[-6_000:]
             raise AcceptanceError(
@@ -785,13 +791,14 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
     except Exception as exc:
         evidence["status"] = "failed"
         evidence["error"] = str(exc)
-        logs = deployment.run(
+        completed_logs = deployment.run(
             "logs",
             "--no-color",
             "--timestamps",
             capture=True,
             check=False,
-        ).stdout
+        )
+        logs = (completed_logs.stdout or "") + (completed_logs.stderr or "")
         log_path.write_text(logs or "<no Compose logs available>\n", encoding="utf-8")
         raise
     finally:
