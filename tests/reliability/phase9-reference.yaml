@@ -18,7 +18,7 @@ load:
   operation_progress_p95_ms: 2000
   agent_status_propagation_p95_ms: 30000
   automated_evidence:
-    - tests/end_to_end/test_phase5_distributed_scale.py
+    - tests/end_to_end/test_distributed_scale.py
     - apps/web/src/pages/Scale.acceptance.test.tsx
   probe_command:
     - python

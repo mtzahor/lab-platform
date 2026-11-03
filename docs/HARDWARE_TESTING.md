@@ -61,7 +61,7 @@ export LAB_PLATFORM_DISTRIBUTED_HARDWARE_BENCH=esp32-devkit-01
 export LAB_PLATFORM_DISTRIBUTED_HARDWARE_CONFIG=examples/esp32-local.yaml
 export LAB_PLATFORM_DISTRIBUTED_HARDWARE_FIRMWARE=examples/esp32-firmware/.pio/build/esp32dev/firmware.bin
 export LAB_PLATFORM_DISTRIBUTED_HARDWARE_FIRMWARE_VERSION=0.1.0
-uv run pytest tests/hardware/test_phase5_distributed_esp32_hardware.py -m hardware -v
+uv run pytest tests/hardware/test_distributed_esp32_hardware.py -m hardware -v
 ```
 
 `LAB_PLATFORM_DISTRIBUTED_HARDWARE_BENCH` must exactly match the sole bench in the sole real
