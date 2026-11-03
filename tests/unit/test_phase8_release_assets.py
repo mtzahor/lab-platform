@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from scripts.release import check_oss_boundary, check_release_assets, metadata
+from tests.support.paths import REPOSITORY_ROOT
 
 
 @pytest.mark.parametrize(
@@ -155,7 +156,7 @@ def test_oss_boundary_rejects_relative_imports_namespaces_and_dependencies(
 
 
 def test_packaged_deployment_templates_track_inspectable_source_templates() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
     package_root = root / "apps/cli/src/lab_platform/cli/deployment"
     production_files = {
         "compose.yaml",
@@ -191,7 +192,7 @@ def test_packaged_deployment_templates_track_inspectable_source_templates() -> N
 
 
 def test_demo_container_prepares_shared_non_root_state_directory() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
     control_plane = (root / "docker/control-plane/Dockerfile").read_text(encoding="utf-8")
     agent = (root / "docker/agent/Dockerfile").read_text(encoding="utf-8")
 
@@ -209,7 +210,7 @@ def test_demo_container_prepares_shared_non_root_state_directory() -> None:
 
 
 def test_production_template_pins_the_matching_release_image() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
     product_version = metadata.repository_versions(root)[
         "packages/core/src/lab_platform/core/version.py"
     ]
@@ -222,7 +223,7 @@ def test_production_template_pins_the_matching_release_image() -> None:
 
 
 def test_security_workflow_uses_available_actions_and_guards_dependency_review() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
     workflow = (root / ".github/workflows/security.yml").read_text(encoding="utf-8")
 
     assert workflow.count("aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25") == 3

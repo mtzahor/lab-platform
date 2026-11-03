@@ -488,7 +488,7 @@ def test_concurrent_same_token_enrollment_has_exactly_one_winner(tmp_path: Path)
     seed_database.close()
 
     worker_count = 8
-    barrier = Barrier(worker_count)
+    barrier = Barrier(worker_count, timeout=30)
     databases = [_database(path) for _ in range(worker_count)]
 
     def enroll(index: int) -> EnrolledAgent | Exception:

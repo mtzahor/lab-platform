@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import yaml
 from lab_platform.config import CONFIG_VERSION, PlatformConfig, load_config
@@ -18,7 +16,9 @@ from lab_platform.models import (
 )
 from pydantic import ValidationError
 
-ROOT = Path(__file__).resolve().parents[2]
+from tests.support.paths import REPOSITORY_ROOT
+
+ROOT = REPOSITORY_ROOT
 
 
 def _workflow_document(*, api_version: str = WORKFLOW_API_VERSION) -> dict[str, object]:

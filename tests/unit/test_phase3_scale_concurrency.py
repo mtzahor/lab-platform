@@ -110,7 +110,7 @@ def test_concurrent_overlapping_schedules_have_one_atomic_winner(tmp_path: Path)
     worker_count = 16
     databases = _open_databases(tmp_path / "scheduled-race.db", worker_count)
     repositories = [SQLiteTimedReservationRepository(database) for database in databases]
-    barrier = Barrier(worker_count)
+    barrier = Barrier(worker_count, timeout=30)
 
     def create(index: int) -> Reservation | Exception:
         barrier.wait(timeout=5)
@@ -241,7 +241,7 @@ def test_100_benches_promote_and_expire_1000_fifo_requests(tmp_path: Path) -> No
 def test_simultaneous_immediate_submissions_create_one_reservation(tmp_path: Path) -> None:
     worker_count = 12
     databases = _open_databases(tmp_path / "submission-race.db", worker_count)
-    barrier = Barrier(worker_count)
+    barrier = Barrier(worker_count, timeout=30)
     services = [
         ReservationService(
             SQLiteTimedReservationRepository(database),
@@ -315,7 +315,7 @@ def test_concurrent_schedulers_promote_exactly_one_fifo_entry(tmp_path: Path) ->
         )
         setup_clock.advance(microseconds=1)
 
-    promotion_barrier = Barrier(worker_count)
+    promotion_barrier = Barrier(worker_count, timeout=30)
     schedulers = []
     for database in databases:
         clock = FakeClock(NOW + timedelta(microseconds=20))
@@ -372,7 +372,7 @@ def test_operation_lock_contention_is_atomic_and_benches_are_independent(
     worker_count = 12
     databases = _open_databases(tmp_path / "lock-race.db", worker_count)
     repositories = [SQLiteOperationLockRepository(database) for database in databases]
-    shared_barrier = Barrier(worker_count)
+    shared_barrier = Barrier(worker_count, timeout=30)
 
     def acquire_shared(index: int) -> BenchOperationLock | Exception:
         shared_barrier.wait(timeout=5)
@@ -402,7 +402,7 @@ def test_operation_lock_contention_is_atomic_and_benches_are_independent(
         assert not asyncio.run(repositories[0].release("shared-bench", UUID(int=999)))
         assert asyncio.run(repositories[0].release("shared-bench", winner.operation_id))
 
-        independent_barrier = Barrier(worker_count)
+        independent_barrier = Barrier(worker_count, timeout=30)
 
         def acquire_independent(index: int) -> BenchOperationLock | Exception:
             independent_barrier.wait(timeout=5)

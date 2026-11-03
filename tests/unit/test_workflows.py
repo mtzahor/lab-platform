@@ -42,6 +42,8 @@ from lab_platform.persistence.database import SQLiteDatabase
 from lab_platform.persistence.workflows import SQLiteWorkflowRepository
 from lab_platform.simlab_adapter import SimLabBackend
 
+from tests.support.paths import REPOSITORY_ROOT
+
 NOW = datetime(2026, 7, 20, 10, tzinfo=UTC)
 
 
@@ -593,9 +595,7 @@ steps: [{action: wait, seconds: 30}]
 
 def test_checked_in_esp32_smoke_workflow_runs_unchanged_on_simlab(tmp_path: Path) -> None:
     async def scenario() -> None:
-        workflow_path = (
-            Path(__file__).resolve().parents[2] / "examples" / "workflows" / "esp32-smoke-test.yaml"
-        )
+        workflow_path = REPOSITORY_ROOT / "examples" / "workflows" / "esp32-smoke-test.yaml"
         backend = SimLabBackend(
             bench_count=1,
             bench_prefix="portable",

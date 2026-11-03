@@ -19,8 +19,9 @@ from scripts.reliability.phase9_http_probe import (
     summarize,
     validate_target,
 )
+from tests.support.paths import REPOSITORY_ROOT
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = REPOSITORY_ROOT
 
 
 def test_phase9_records_are_structurally_valid_but_fail_closed_for_1_0(

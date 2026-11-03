@@ -11,8 +11,9 @@ import yaml
 from lab_platform.persistence import MINIMUM_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION
 
 from scripts import deployment_acceptance as acceptance
+from tests.support.paths import REPOSITORY_ROOT
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = REPOSITORY_ROOT
 
 
 def test_acceptance_compose_consumes_images_without_building_source() -> None:

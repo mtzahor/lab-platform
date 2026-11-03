@@ -545,7 +545,7 @@ def test_concurrent_atomic_selection_never_double_assigns_a_bench(
 
     asyncio.run(seed())
     database.close()
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=30)
 
     def assign(session_id: UUID) -> str | None:
         worker_database = _database(path)

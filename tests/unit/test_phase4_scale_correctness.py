@@ -100,7 +100,7 @@ def test_50_concurrent_ci_sessions_atomically_select_unique_benches(
         return created
 
     created_sessions = asyncio.run(prepare())
-    barrier = Barrier(worker_count)
+    barrier = Barrier(worker_count, timeout=30)
 
     try:
         worker_databases = [_database(path) for _ in range(worker_count)]

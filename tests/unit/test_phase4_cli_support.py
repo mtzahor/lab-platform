@@ -28,7 +28,9 @@ from lab_platform.cli.ci_summary import (
 )
 from lab_platform.cli.client import AgentApiError, AgentClient, AgentConnectionError
 
-ROOT = Path(__file__).resolve().parents[2]
+from tests.support.paths import REPOSITORY_ROOT
+
+ROOT = REPOSITORY_ROOT
 
 
 class FakeResponse(BytesIO):

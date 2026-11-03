@@ -18,6 +18,8 @@ from lab_platform.control_plane.config import (
 from lab_platform.core import VERSION
 from pydantic import ValidationError
 
+from tests.support.paths import REPOSITORY_ROOT
+
 
 def _loopback_config(*, development: dict[str, object] | None = None) -> ControlPlaneConfig:
     development_settings: dict[str, object] = {
@@ -83,7 +85,7 @@ def test_phase6_identity_and_security_defaults_preserve_phase5_configuration() -
 
 
 def test_checked_in_configs_expose_phase6_settings() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
 
     local = load_control_plane_config(root / "config" / "control-plane.yaml")
     production = load_control_plane_config(root / "config" / "control-plane.postgresql.yaml")
@@ -326,7 +328,7 @@ def test_phase6_sections_remain_strict_and_bounded() -> None:
 
 
 def test_phase6_version_identifiers_are_consistent() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert project["project"]["version"] == "0.9.0b0"

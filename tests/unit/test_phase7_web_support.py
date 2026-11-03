@@ -16,6 +16,8 @@ from lab_platform.control_plane.identity_api import safe_spa_return_to
 from lab_platform.control_plane.web import create_web_router, web_content_security_policy
 from pydantic import ValidationError
 
+from tests.support.paths import REPOSITORY_ROOT
+
 
 def test_web_settings_are_strict_bounded_and_cross_checked() -> None:
     settings = WebSettings.model_validate(
@@ -61,7 +63,7 @@ def test_web_settings_are_strict_bounded_and_cross_checked() -> None:
 
 
 def test_checked_in_control_plane_configs_enable_integrated_web() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
 
     local = load_control_plane_config(root / "config" / "control-plane.yaml")
     production = load_control_plane_config(root / "config" / "control-plane.postgresql.yaml")
@@ -140,7 +142,7 @@ def test_post_login_return_path_is_limited_to_spa_routes(
 
 
 def test_wheel_verifier_selects_current_build_from_a_mixed_version_glob() -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = REPOSITORY_ROOT
     verifier = runpy.run_path(str(root / "scripts" / "verify_web_wheel.py"))
     select_current_wheel = verifier["_select_current_wheel"]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]

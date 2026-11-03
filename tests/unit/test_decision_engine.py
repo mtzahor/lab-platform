@@ -6,7 +6,6 @@ import asyncio
 import copy
 import importlib.metadata
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -35,10 +34,12 @@ from lab_platform.models.workflows import WorkflowRun, WorkflowStepResult
 from lab_platform.persistence.database import SQLiteDatabase
 from lab_platform.persistence.decisions import SQLiteDecisionRepository
 
+from tests.support.paths import TESTS_ROOT
+
 if TYPE_CHECKING:
     from lab_platform.control_plane.runtime import ControlPlaneRuntime
 
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "decision_engine"
+FIXTURES = TESTS_ROOT / "fixtures" / "decision_engine"
 CASES = json.loads((FIXTURES / "cases.json").read_text())
 RESPONSES = json.loads((FIXTURES / "synthetic_responses.json").read_text())
 SETTINGS = DecisionSettings(enabled=True)

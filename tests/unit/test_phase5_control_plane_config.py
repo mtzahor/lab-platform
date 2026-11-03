@@ -13,6 +13,8 @@ from lab_platform.control_plane.config import (
 )
 from pydantic import ValidationError
 
+from tests.support.paths import REPOSITORY_ROOT
+
 
 def test_control_plane_config_has_safe_loopback_bounded_defaults_and_is_frozen() -> None:
     with pytest.raises(ValidationError, match="requires control-plane TLS"):
@@ -101,7 +103,7 @@ development:
 
 
 def test_checked_in_postgresql_configuration_is_production_safe() -> None:
-    path = Path(__file__).resolve().parents[2] / "config" / "control-plane.postgresql.yaml"
+    path = REPOSITORY_ROOT / "config" / "control-plane.postgresql.yaml"
 
     config = load_control_plane_config(path)
 
