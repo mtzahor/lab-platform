@@ -30,8 +30,9 @@ from lab_platform.agent_runtime.sqlite_state import (
 )
 from lab_platform.control_plane_core.errors import ArtifactTransferFailedError
 from lab_platform.models import BufferedAgentEvent, BufferedEventPriority, ReservationLease
-from lab_platform.persistence import SQLiteDatabase
 from pydantic import SecretStr
+
+from tests.support.persistence import open_sqlite_database
 
 NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 
@@ -373,12 +374,6 @@ def test_event_buffer_assigns_unique_monotonic_sequences_under_async_and_thread_
     assert (asyncio.run(buffer.stats())).last_issued_sequence == 101
 
 
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
-
-
 def test_sqlite_lease_store_retains_highest_version_and_tombstone_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -388,7 +383,7 @@ def test_sqlite_lease_store_retains_highest_version_and_tombstone_after_restart(
         reservation_id = uuid4()
         first = _lease(agent_id, reservation_id=reservation_id)
 
-        database = _database(path)
+        database = open_sqlite_database(path)
         store: ReservationLeaseStore = SQLiteReservationLeaseStore(
             database,
             agent_id,
@@ -397,7 +392,7 @@ def test_sqlite_lease_store_retains_highest_version_and_tombstone_after_restart(
         assert await store.apply(first) == first
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         restarted: ReservationLeaseStore = SQLiteReservationLeaseStore(
             reopened,
             agent_id,
@@ -422,7 +417,7 @@ def test_sqlite_lease_store_retains_highest_version_and_tombstone_after_restart(
         )
         reopened.close()
 
-        after_release = _database(path)
+        after_release = open_sqlite_database(path)
         durable = SQLiteReservationLeaseStore(after_release, agent_id, clock=lambda: NOW)
         assert await durable.get(first.bench_id) == tombstone
         assert (
@@ -461,7 +456,7 @@ def test_sqlite_lease_store_preserves_validation_and_replay_rules(
 ) -> None:
     async def scenario() -> None:
         agent_id = uuid4()
-        database = _database(tmp_path / "lease-validation.db")
+        database = open_sqlite_database(tmp_path / "lease-validation.db")
         store = SQLiteReservationLeaseStore(database, agent_id, clock=lambda: NOW)
         lease = _lease(
             agent_id,
@@ -514,7 +509,7 @@ def test_sqlite_event_buffer_persists_dedup_and_progress_coalescing(
         latest_id = uuid4()
         state_id = uuid4()
 
-        database = _database(path)
+        database = open_sqlite_database(path)
         buffer: AgentEventBufferRepository = SQLiteAgentEventBuffer(
             database,
             agent_id,
@@ -550,7 +545,7 @@ def test_sqlite_event_buffer_persists_dedup_and_progress_coalescing(
         assert first is not None and latest is not None and state is not None
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         restarted = SQLiteAgentEventBuffer(
             reopened,
             agent_id,
@@ -589,28 +584,28 @@ def test_sqlite_event_buffer_persists_ack_watermarks_and_next_sequence(
     async def scenario() -> None:
         path = tmp_path / "event-ack.db"
         agent_id = uuid4()
-        database = _database(path)
+        database = open_sqlite_database(path)
         buffer = SQLiteAgentEventBuffer(database, agent_id, capacity=3, clock=lambda: NOW)
         first = await buffer.append("STATE_ONE", {}, event_id=uuid4())
         second = await buffer.append("STATE_TWO", {}, event_id=uuid4())
         assert first is not None and second is not None
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         restarted = SQLiteAgentEventBuffer(reopened, agent_id, capacity=3, clock=lambda: NOW)
         with pytest.raises(ValueError, match="has not been peeked"):
             await restarted.acknowledge_through(1)
         assert await restarted.peek(limit=1) == (first,)
         reopened.close()
 
-        after_peek = _database(path)
+        after_peek = open_sqlite_database(path)
         durable = SQLiteAgentEventBuffer(after_peek, agent_id, capacity=3, clock=lambda: NOW)
         assert await durable.acknowledge_through(1) == 1
         assert await durable.peek() == (second,)
         assert await durable.acknowledge_through(2) == 1
         after_peek.close()
 
-        after_ack = _database(path)
+        after_ack = open_sqlite_database(path)
         empty = SQLiteAgentEventBuffer(after_ack, agent_id, capacity=3, clock=lambda: NOW)
         assert await empty.acknowledge_through(2) == 0
         third = await empty.append("STATE_THREE", {}, event_id=uuid4())
@@ -629,7 +624,7 @@ def test_sqlite_event_buffer_bounds_overflow_and_marker_ack_survive_restart(
         agent_id = uuid4()
         marker_id = uuid4()
         dropped_id = uuid4()
-        database = _database(path)
+        database = open_sqlite_database(path)
         buffer = SQLiteAgentEventBuffer(
             database,
             agent_id,
@@ -673,7 +668,7 @@ def test_sqlite_event_buffer_bounds_overflow_and_marker_ack_survive_restart(
         )
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         restarted = SQLiteAgentEventBuffer(
             reopened,
             agent_id,
@@ -726,7 +721,7 @@ def test_sqlite_event_buffer_bounds_overflow_and_marker_ack_survive_restart(
         assert await restarted.peek(limit=10) == (newer_terminal,)
         reopened.close()
 
-        after_marker_ack = _database(path)
+        after_marker_ack = open_sqlite_database(path)
         durable = SQLiteAgentEventBuffer(
             after_marker_ack,
             agent_id,
@@ -748,9 +743,9 @@ def test_sqlite_event_buffer_coordinates_repository_instances_and_capacity(
     async def scenario() -> None:
         path = tmp_path / "event-shared.db"
         agent_id = uuid4()
-        first_database = _database(path)
+        first_database = open_sqlite_database(path)
         first = SQLiteAgentEventBuffer(first_database, agent_id, capacity=5, clock=lambda: NOW)
-        second_database = _database(path)
+        second_database = open_sqlite_database(path)
         second = SQLiteAgentEventBuffer(second_database, agent_id, capacity=5, clock=lambda: NOW)
         shared_id = uuid4()
 

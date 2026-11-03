@@ -28,6 +28,8 @@ from lab_platform.persistence import (
 )
 from lab_platform.persistence.database import SQLiteDatabase
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 7, 28, 14, tzinfo=UTC)
 AGENT_ID = UUID(int=101)
 OTHER_AGENT_ID = UUID(int=102)
@@ -36,12 +38,6 @@ FINGERPRINT_A = "a" * 64
 FINGERPRINT_B = "b" * 64
 ORG_A = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 ORG_B = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _seed_agent(
@@ -152,7 +148,7 @@ async def _grant(
 
 
 def test_coordinated_schema_is_migrated_and_repository_is_exported(tmp_path: Path) -> None:
-    database = _database(tmp_path / "schema.db")
+    database = open_sqlite_database(tmp_path / "schema.db")
     with database.transaction() as connection:
         tables = {
             row[0]
@@ -181,7 +177,7 @@ def test_coordinated_schema_is_migrated_and_repository_is_exported(tmp_path: Pat
 def test_due_scheduled_row_is_atomically_claimed_and_restart_replayed(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "scheduled-claim.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         _seed_bench(database)
         timed = SQLiteTimedReservationRepository(database)
@@ -249,7 +245,7 @@ def test_future_schedule_allows_safe_immediate_but_protects_queue_boundary(
     tmp_path: Path,
 ) -> None:
     async def grant_with_window(path: Path, protection_seconds: int) -> bool:
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         _seed_bench(database)
         timed = SQLiteTimedReservationRepository(database)
@@ -291,7 +287,7 @@ def test_grant_persists_base_lease_coordination_and_restart_safe_replay(
 ) -> None:
     async def scenario() -> None:
         path = tmp_path / "grant.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         _seed_bench(database)
         repository = SQLiteCentralReservationLeaseRepository(database)
@@ -348,7 +344,7 @@ def test_grant_persists_base_lease_coordination_and_restart_safe_replay(
             )
 
         database.close()
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         restarted = SQLiteCentralReservationLeaseRepository(reopened)
         assert await restarted.get(request.reservation.id) == result.record
         restarted_replay = await restarted.get_mutation_result(
@@ -371,7 +367,7 @@ def test_grant_persists_base_lease_coordination_and_restart_safe_replay(
 
 def test_mutation_replay_is_tenant_scoped_for_direct_grants(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "tenant-mutations.db")
+        database = open_sqlite_database(tmp_path / "tenant-mutations.db")
         routes = (
             (ORG_A, UUID(int=211), "tenant-a", "tenant-a/bench", UUID(int=213)),
             (ORG_B, UUID(int=212), "tenant-b", "tenant-b/bench", UUID(int=214)),
@@ -511,7 +507,7 @@ def test_mutation_replay_is_tenant_scoped_for_direct_grants(tmp_path: Path) -> N
 
 def test_v9_mutation_replay_is_preserved_by_tenant_key_upgrade(tmp_path: Path) -> None:
     async def seed(path: Path) -> CoordinatedReservationLease:
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         _seed_bench(database)
         repository = SQLiteCentralReservationLeaseRepository(database)
@@ -551,7 +547,7 @@ def test_v9_mutation_replay_is_preserved_by_tenant_key_upgrade(tmp_path: Path) -
         return result.record
 
     async def verify(path: Path, expected: CoordinatedReservationLease) -> None:
-        upgraded = _database(path)
+        upgraded = open_sqlite_database(path)
         repository = SQLiteCentralReservationLeaseRepository(upgraded)
         replay = await repository.get_mutation_result(
             "legacy-mutation",
@@ -582,7 +578,7 @@ def test_grant_atomically_checks_status_ownership_and_current_uniqueness(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "eligibility.db")
+        database = open_sqlite_database(tmp_path / "eligibility.db")
         _seed_agent(database, status=AgentStatus.OFFLINE)
         _seed_agent(database, OTHER_AGENT_ID, slug="other-lab")
         _seed_bench(database)
@@ -648,7 +644,7 @@ def test_replacement_is_a_stateful_cas_and_synchronizes_history_and_base_row(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "replacement.db")
+        database = open_sqlite_database(tmp_path / "replacement.db")
         _seed_agent(database)
         _seed_bench(database)
         repository = SQLiteCentralReservationLeaseRepository(database)
@@ -846,12 +842,12 @@ def test_replacement_is_a_stateful_cas_and_synchronizes_history_and_base_row(
 
 def test_parallel_connections_have_exactly_one_grant_winner(tmp_path: Path) -> None:
     path = tmp_path / "parallel.db"
-    seed = _database(path)
+    seed = open_sqlite_database(path)
     _seed_agent(seed)
     _seed_bench(seed)
     seed.close()
-    first_database = _database(path)
-    second_database = _database(path)
+    first_database = open_sqlite_database(path)
+    second_database = open_sqlite_database(path)
     first_repository = SQLiteCentralReservationLeaseRepository(first_database)
     second_repository = SQLiteCentralReservationLeaseRepository(second_database)
 

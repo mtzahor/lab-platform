@@ -25,6 +25,8 @@ from lab_platform.persistence import (
 )
 from pydantic import ValidationError
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 7, 26, 12, tzinfo=UTC)
 ENROLLMENT_SECRET = f"lpe_{'e' * 48}"
 FIRST_CREDENTIAL = f"lpa_{'a' * 48}"
@@ -52,12 +54,6 @@ class BarrierEnrollmentRepository(SQLiteAgentEnrollmentRepository):
         return token
 
 
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
-
-
 def _service(
     repository: SQLiteAgentEnrollmentRepository,
     clock: MutableClock,
@@ -77,7 +73,7 @@ def test_schema_v5_upgrade_preserves_phase4_data_and_repairs_v6_objects(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "phase5-migration.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     with database.transaction(immediate=True) as connection:
         connection.execute(
             "INSERT INTO api_tokens "
@@ -100,7 +96,7 @@ def test_schema_v5_upgrade_preserves_phase4_data_and_repairs_v6_objects(
         )
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 5
 
-    upgraded = _database(path)
+    upgraded = open_sqlite_database(path)
     with upgraded.transaction() as connection:
         assert SCHEMA_VERSION == 12
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
@@ -126,7 +122,7 @@ def test_schema_v5_upgrade_preserves_phase4_data_and_repairs_v6_objects(
         connection.execute("DROP TABLE agent_credentials")
         connection.execute("DROP INDEX agents_status_seen")
 
-    repaired = _database(path)
+    repaired = open_sqlite_database(path)
     with repaired.transaction() as connection:
         assert (
             connection.execute(
@@ -160,7 +156,7 @@ def test_sqlite_agent_lifecycle_survives_restart(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "agent-lifecycle.db"
         clock = MutableClock()
-        database = _database(path)
+        database = open_sqlite_database(path)
         repository = SQLiteAgentEnrollmentRepository(database)
         service = _service(repository, clock)
 
@@ -212,7 +208,7 @@ def test_sqlite_agent_lifecycle_survives_restart(tmp_path: Path) -> None:
             await service.authenticate(enrolled.agent.id, REPLACEMENT_CREDENTIAL)
         database.close()
 
-        reopened_database = _database(path)
+        reopened_database = open_sqlite_database(path)
         reopened_repository = SQLiteAgentEnrollmentRepository(reopened_database)
         assert await reopened_repository.get_agent(enrolled.agent.id) == revoked
         persisted_token = await reopened_repository.get_token(issued.token.id)
@@ -250,7 +246,7 @@ def test_sqlite_rows_database_file_and_audit_events_exclude_plaintext(tmp_path: 
     async def scenario() -> None:
         path = tmp_path / "secret-boundary.db"
         clock = MutableClock()
-        database = _database(path)
+        database = open_sqlite_database(path)
         repository = SQLiteAgentEnrollmentRepository(database)
         service = _service(repository, clock)
 
@@ -310,7 +306,7 @@ def test_sqlite_rows_database_file_and_audit_events_exclude_plaintext(tmp_path: 
 
 def test_sqlite_authentication_rejects_pending_or_unenrolled_identity(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "agent-auth-state.db")
+        database = open_sqlite_database(tmp_path / "agent-auth-state.db")
         clock = MutableClock()
         service = _service(SQLiteAgentEnrollmentRepository(database), clock)
         issued = await service.issue_token(
@@ -343,7 +339,7 @@ def test_sqlite_authentication_rejects_pending_or_unenrolled_identity(tmp_path: 
 
 def test_sqlite_registry_lists_and_revokes_tokens_and_agents(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "agent-registry.db")
+        database = open_sqlite_database(tmp_path / "agent-registry.db")
         repository = SQLiteAgentEnrollmentRepository(database)
         tokens = iter((ENROLLMENT_SECRET, f"lpe_{'f' * 48}"))
         service = AgentEnrollmentService(
@@ -387,7 +383,7 @@ def test_sqlite_registry_lists_and_revokes_tokens_and_agents(tmp_path: Path) -> 
 
 def test_agent_state_rolls_back_when_audit_event_id_conflicts(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "agent-audit-conflict.db")
+        database = open_sqlite_database(tmp_path / "agent-audit-conflict.db")
         repository = SQLiteAgentEnrollmentRepository(database)
         token_id = UUID(int=26_001)
         conflicting_event_id = UUID(int=26_002)
@@ -425,7 +421,7 @@ def test_agent_state_rolls_back_when_audit_event_id_conflicts(tmp_path: Path) ->
 
 def test_clock_rollback_cannot_commit_invalid_agent_timestamps(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "agent-clock-rollback.db")
+        database = open_sqlite_database(tmp_path / "agent-clock-rollback.db")
         repository = SQLiteAgentEnrollmentRepository(database)
         clock = MutableClock()
         service = _service(repository, clock)
@@ -472,7 +468,7 @@ def test_clock_rollback_cannot_commit_invalid_agent_timestamps(tmp_path: Path) -
 
 def test_concurrent_same_token_enrollment_has_exactly_one_winner(tmp_path: Path) -> None:
     path = tmp_path / "enrollment-race.db"
-    seed_database = _database(path)
+    seed_database = open_sqlite_database(path)
     seed_service = _service(
         SQLiteAgentEnrollmentRepository(seed_database),
         MutableClock(),
@@ -489,7 +485,7 @@ def test_concurrent_same_token_enrollment_has_exactly_one_winner(tmp_path: Path)
 
     worker_count = 8
     barrier = Barrier(worker_count, timeout=30)
-    databases = [_database(path) for _ in range(worker_count)]
+    databases = [open_sqlite_database(path) for _ in range(worker_count)]
 
     def enroll(index: int) -> EnrolledAgent | Exception:
         repository = BarrierEnrollmentRepository(databases[index], barrier)

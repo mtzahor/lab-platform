@@ -33,13 +33,9 @@ from lab_platform.persistence import (
     SQLiteTimedReservationRepository,
 )
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 7, 23, 12, tzinfo=UTC)
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _waiting_session(index: int, request: BenchRequest) -> CiSession:
@@ -59,7 +55,7 @@ def test_50_concurrent_ci_sessions_atomically_select_unique_benches(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "atomic-ci-assignment.db"
-    setup_database = _database(path)
+    setup_database = open_sqlite_database(path)
     worker_databases: list[SQLiteDatabase] = []
     worker_count = 50
     request = BenchRequest(
@@ -103,7 +99,7 @@ def test_50_concurrent_ci_sessions_atomically_select_unique_benches(
     barrier = Barrier(worker_count, timeout=30)
 
     try:
-        worker_databases = [_database(path) for _ in range(worker_count)]
+        worker_databases = [open_sqlite_database(path) for _ in range(worker_count)]
         repositories = [SQLiteCiSessionRepository(database) for database in worker_databases]
 
         def assign(index: int) -> tuple[CiSession, Reservation] | None:
@@ -252,7 +248,7 @@ def test_500_waiting_ci_sessions_survive_a_database_restart(tmp_path: Path) -> N
         required_labels={"pool": "hardware-ci"},
     )
     expected = [_waiting_session(index, request) for index in range(500)]
-    database = _database(path)
+    database = open_sqlite_database(path)
     try:
         repository = SQLiteCiSessionRepository(database)
 
@@ -264,7 +260,7 @@ def test_500_waiting_ci_sessions_survive_a_database_restart(tmp_path: Path) -> N
     finally:
         database.close()
 
-    reopened = _database(path)
+    reopened = open_sqlite_database(path)
     try:
         persisted = asyncio.run(
             SQLiteCiSessionRepository(reopened).list(
@@ -285,7 +281,7 @@ def test_1000_generic_artifact_metadata_rows_survive_a_database_restart(
 ) -> None:
     path = tmp_path / "artifact-metadata.db"
     owner_id = UUID(int=50_000)
-    database = _database(path)
+    database = open_sqlite_database(path)
     try:
         repository = SQLiteGenericArtifactRepository(database)
 
@@ -312,7 +308,7 @@ def test_1000_generic_artifact_metadata_rows_survive_a_database_restart(
     finally:
         database.close()
 
-    reopened = _database(path)
+    reopened = open_sqlite_database(path)
     try:
         artifacts = asyncio.run(
             SQLiteGenericArtifactRepository(reopened).list_for_owner(
@@ -331,7 +327,7 @@ def test_1000_generic_artifact_metadata_rows_survive_a_database_restart(
 
 def test_10000_workflow_events_are_persisted_and_queryable(tmp_path: Path) -> None:
     path = tmp_path / "workflow-events.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     event_count = 10_000
     try:
         rows = []
@@ -368,7 +364,7 @@ def test_10000_workflow_events_are_persisted_and_queryable(tmp_path: Path) -> No
     finally:
         database.close()
 
-    reopened = _database(path)
+    reopened = open_sqlite_database(path)
     try:
         with reopened.transaction() as connection:
             assert (

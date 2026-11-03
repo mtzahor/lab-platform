@@ -28,6 +28,12 @@ uv build
 Tests must retain more than 90% combined branch coverage. Add unit tests for business
 rules and integration tests for changes that cross package or process boundaries.
 
+Tests are grouped by subject, not by the project phase that introduced them. Put unit tests
+in the matching `tests/unit/<domain>/` folder (`agent`, `artifacts`, `auth`, `ci`, `cli`,
+`config`, `control_plane`, `core`, `operations`, `persistence`, `plugins`, `release`,
+`reservations`, `workflows`) and extend an existing module before creating a new one. Test
+module basenames must be unique across `tests/`. Shared helpers live in `tests/support/`.
+
 ## Design rules
 
 - Keep `packages/core` free from I/O and framework imports.

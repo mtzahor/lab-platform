@@ -32,13 +32,14 @@ from lab_platform.persistence import (
     DEFAULT_ORGANISATION_ID,
     SCHEMA_VERSION,
     SQLiteCiSessionRepository,
-    SQLiteDatabase,
     SQLiteGenericArtifactRepository,
     SQLiteQueueRepository,
     SQLiteTimedReservationRepository,
     SQLiteWorkflowRepository,
 )
 from lab_platform.persistence.migrations import apply_migrations
+
+from tests.support.persistence import open_sqlite_database
 
 NOW = datetime(2026, 8, 9, 12, tzinfo=UTC)
 
@@ -86,17 +87,11 @@ def _session(organisation_id: UUID, *, session_id: UUID | None = None) -> CiSess
     )
 
 
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
-
-
 def test_two_organisations_can_reuse_workflow_and_retry_keys_without_cross_tenant_replay(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "tenant-keys.db")
+        database = open_sqlite_database(tmp_path / "tenant-keys.db")
         workflows = SQLiteWorkflowRepository(database, initialize_schema=False)
         ci_sessions = SQLiteCiSessionRepository(database)
         artifacts = SQLiteGenericArtifactRepository(database)
@@ -301,7 +296,7 @@ def test_v9_workflow_upgrade_preserves_rows_and_rebinds_run_and_step_tenant(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "upgrade-v9-workflows.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     run_id = uuid4()
     step_id = uuid4()
     with database.transaction(immediate=True) as connection:
@@ -407,7 +402,7 @@ def test_v9_workflow_upgrade_preserves_rows_and_rebinds_run_and_step_tenant(
         )
         connection.commit()
 
-    upgraded = _database(path)
+    upgraded = open_sqlite_database(path)
     try:
         with upgraded.transaction() as connection:
             assert SCHEMA_VERSION == 12
@@ -438,7 +433,7 @@ def test_v9_workflow_upgrade_preserves_rows_and_rebinds_run_and_step_tenant(
 
 
 def test_fresh_v10_schema_uses_tenant_primary_and_retry_keys(tmp_path: Path) -> None:
-    database = _database(tmp_path / "fresh-v10.db")
+    database = open_sqlite_database(tmp_path / "fresh-v10.db")
     try:
         with database.transaction() as connection:
             workflow_pk = [
@@ -570,7 +565,7 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 def test_schema_v10_installs_identity_tables_default_organisation_and_scope_columns(
     tmp_path: Path,
 ) -> None:
-    database = _database(tmp_path / "phase6.db")
+    database = open_sqlite_database(tmp_path / "phase6.db")
     with database.transaction() as connection:
         assert SCHEMA_VERSION == 12
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
@@ -612,7 +607,7 @@ def test_existing_v10_database_repairs_ci_cancel_evidence_schema_unconditionally
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "existing-v10-ci-cancel.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     database.close()
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = OFF")
@@ -651,7 +646,7 @@ def test_existing_v10_database_repairs_ci_cancel_evidence_schema_unconditionally
         assert old_definition is not None
         assert "CI_SESSION" not in str(old_definition[0])
 
-    repaired = _database(path)
+    repaired = open_sqlite_database(path)
     with repaired.transaction() as connection:
         assert {
             "cancel_actor_context_json",
@@ -669,7 +664,7 @@ def test_existing_v10_database_repairs_ci_cancel_evidence_schema_unconditionally
 def test_phase6_migration_is_idempotent_and_legacy_inserts_receive_default_scope(
     tmp_path: Path,
 ) -> None:
-    database = _database(tmp_path / "idempotent.db")
+    database = open_sqlite_database(tmp_path / "idempotent.db")
     with database.transaction(immediate=True) as connection:
         apply_migrations(connection)
         apply_migrations(connection)
@@ -698,7 +693,7 @@ def test_v8_upgrade_preserves_legacy_rows_and_repairs_interrupted_phase6_objects
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "upgrade-v8.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     with database.transaction(immediate=True) as connection:
         connection.execute(
             "INSERT INTO api_tokens "
@@ -746,7 +741,7 @@ def test_v8_upgrade_preserves_legacy_rows_and_repairs_interrupted_phase6_objects
         )
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
 
-    upgraded = _database(path)
+    upgraded = open_sqlite_database(path)
     with upgraded.transaction() as connection:
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
         legacy_token = connection.execute(

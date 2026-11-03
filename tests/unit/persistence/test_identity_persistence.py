@@ -68,6 +68,8 @@ from lab_platform.persistence.distributed import (
     SQLiteRemoteCommandRepository,
 )
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 
 
@@ -75,12 +77,6 @@ DEFAULT_ORG_ID = UUID(DEFAULT_ORGANISATION_ID)
 
 
 SECOND_ORG_ID = UUID("00000000-0000-0000-0000-000000000002")
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _user(
@@ -104,7 +100,7 @@ def _user(
 
 def test_atomic_user_bootstrap_password_membership_and_tenant_scoping(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "users.db")
+        database = open_sqlite_database(tmp_path / "users.db")
         repository = SQLiteIdentityRepository(database)
         default = await repository.ensure_default_organisation(
             slug="engineering",
@@ -196,7 +192,7 @@ def test_team_membership_and_role_assignment_adapters_are_organisation_scoped(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "authorisation.db")
+        database = open_sqlite_database(tmp_path / "authorisation.db")
         repository = SQLiteIdentityRepository(database)
         user = _user(201)
         await repository.create_user(user)
@@ -287,7 +283,7 @@ def test_team_membership_and_role_assignment_adapters_are_organisation_scoped(
 
 def test_sessions_service_accounts_and_api_credentials_round_trip(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "credentials.db")
+        database = open_sqlite_database(tmp_path / "credentials.db")
         repository = SQLiteIdentityRepository(database)
         user = _user(301)
         await repository.create_user(user)
@@ -365,7 +361,7 @@ def test_sessions_service_accounts_and_api_credentials_round_trip(tmp_path: Path
 
 def test_session_rotation_fences_stale_touch_and_token_logout(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "session-cas.db")
+        database = open_sqlite_database(tmp_path / "session-cas.db")
         repository = SQLiteIdentityRepository(database)
         user = _user(311)
         await repository.create_user(user)
@@ -429,7 +425,7 @@ def test_session_rotation_fences_stale_touch_and_token_logout(tmp_path: Path) ->
 
 def test_policies_snapshots_and_append_only_audit_are_scoped(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "audit.db")
+        database = open_sqlite_database(tmp_path / "audit.db")
         repository = SQLiteIdentityRepository(database)
         team_id = UUID(int=401)
         bench_policy = BenchAccessPolicy(
@@ -525,7 +521,7 @@ def test_policies_snapshots_and_append_only_audit_are_scoped(tmp_path: Path) -> 
 
 def test_login_attempt_rate_limit_queries_and_clear_are_subject_scoped(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "login-attempts.db")
+        database = open_sqlite_database(tmp_path / "login-attempts.db")
         repository = SQLiteIdentityRepository(database)
         attempts = [
             LoginAttempt(

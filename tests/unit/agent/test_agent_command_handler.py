@@ -36,6 +36,8 @@ from lab_platform.models import (
 )
 from lab_platform.persistence import SQLiteDatabase
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 AGENT_ID = UUID("9a975329-5ec8-4a5f-83b4-762684206e34")
 OTHER_AGENT_ID = UUID("bfc5823d-c598-492d-9386-00922aebaf37")
@@ -114,12 +116,6 @@ class BlockingExecutor(FakeExecutor):
         return None  # pragma: no cover - cancellation always interrupts the wait
 
 
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
-
-
 def _lease(**updates: object) -> ReservationLease:
     values: dict[str, object] = {
         "reservation_id": RESERVATION_ID,
@@ -177,7 +173,7 @@ async def _handler(
     InMemoryAgentEventBuffer,
 ]:
     current_clock = clock or MutableClock()
-    database = _database(path)
+    database = open_sqlite_database(path)
     journal = SQLiteAgentCommandJournal(database)
     lease_store = leases or InMemoryReservationLeaseStore(AGENT_ID, clock=current_clock)
     if (
@@ -207,7 +203,7 @@ def test_sqlite_journal_replays_after_reopen_and_rejects_fingerprint_collisions(
     async def scenario() -> None:
         path = tmp_path / "command-journal.db"
         request = _request()
-        database = _database(path)
+        database = open_sqlite_database(path)
         journal = SQLiteAgentCommandJournal(database)
 
         created = await journal.create_or_replay(request, received_at=NOW)
@@ -249,7 +245,7 @@ def test_sqlite_journal_replays_after_reopen_and_rejects_fingerprint_collisions(
         assert completed.entry.status is RemoteCommandStatus.SUCCEEDED
         database.close()
 
-        reopened_database = _database(path)
+        reopened_database = open_sqlite_database(path)
         reopened = SQLiteAgentCommandJournal(reopened_database)
         stored = await reopened.find_replay(request)
         assert stored is not None
@@ -266,8 +262,8 @@ def test_sqlite_journal_replays_after_reopen_and_rejects_fingerprint_collisions(
 def test_sqlite_journal_atomically_fences_concurrent_identical_creates(tmp_path: Path) -> None:
     path = tmp_path / "concurrent-journal.db"
     request = _request()
-    first_database = _database(path)
-    second_database = _database(path)
+    first_database = open_sqlite_database(path)
+    second_database = open_sqlite_database(path)
     first = SQLiteAgentCommandJournal(first_database)
     second = SQLiteAgentCommandJournal(second_database)
 
@@ -309,7 +305,7 @@ def test_handler_journals_before_execution_emits_ordered_progress_and_replays_te
         ]
         database.close()
 
-        reopened_database = _database(path)
+        reopened_database = open_sqlite_database(path)
         reopened_journal = SQLiteAgentCommandJournal(reopened_database)
         replay_events = InMemoryAgentEventBuffer(AGENT_ID, clock=MutableClock())
         replay_executor = FakeExecutor()
@@ -361,13 +357,13 @@ def test_handler_replays_accepted_and_running_across_same_boot_reopen_without_ex
         path = tmp_path / "handler-inflight-replay.db"
         request = _request()
         boot_id = uuid4()
-        database = _database(path)
+        database = open_sqlite_database(path)
         journal = SQLiteAgentCommandJournal(database)
         assert not await journal.recover_interrupted(boot_id=boot_id, recovered_at=NOW)
         await journal.create_or_replay(request, received_at=NOW)
         database.close()
 
-        accepted_database = _database(path)
+        accepted_database = open_sqlite_database(path)
         accepted_journal = SQLiteAgentCommandJournal(accepted_database)
         assert not await accepted_journal.recover_interrupted(
             boot_id=boot_id,
@@ -392,7 +388,7 @@ def test_handler_replays_accepted_and_running_across_same_boot_reopen_without_ex
         )
         accepted_database.close()
 
-        running_database = _database(path)
+        running_database = open_sqlite_database(path)
         running_journal = SQLiteAgentCommandJournal(running_database)
         assert not await running_journal.recover_interrupted(
             boot_id=boot_id,
@@ -430,7 +426,7 @@ def test_new_boot_atomically_fails_active_journal_and_replays_terminal_history(
         old_boot = uuid4()
         new_boot = uuid4()
 
-        database = _database(path)
+        database = open_sqlite_database(path)
         journal = SQLiteAgentCommandJournal(database)
         assert not await journal.recover_interrupted(boot_id=old_boot, recovered_at=NOW)
         await journal.create_or_replay(accepted_request, received_at=NOW)
@@ -448,7 +444,7 @@ def test_new_boot_atomically_fails_active_journal_and_replays_terminal_history(
         )
         database.close()
 
-        restarted_database = _database(path)
+        restarted_database = open_sqlite_database(path)
         restarted_journal = SQLiteAgentCommandJournal(restarted_database)
         interrupted = await restarted_journal.recover_interrupted(
             boot_id=new_boot,
@@ -666,7 +662,7 @@ def test_dispatch_persists_acceptance_before_execution_and_survives_crash_bounda
         await asyncio.gather(dispatch.execution, return_exceptions=True)
         database.close()
 
-        reopened_database = _database(path)
+        reopened_database = open_sqlite_database(path)
         reopened = SQLiteAgentCommandJournal(reopened_database)
         after_restart = await reopened.get(request.command.id)
         assert after_restart is not None

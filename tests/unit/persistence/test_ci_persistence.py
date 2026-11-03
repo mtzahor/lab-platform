@@ -38,13 +38,9 @@ from lab_platform.persistence import (
     SQLiteWorkflowRepository,
 )
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 7, 23, 12, tzinfo=UTC)
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _session(
@@ -155,11 +151,11 @@ def test_v4_upgrade_preserves_workflow_rows_and_installs_phase4_schema(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "upgrade.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     database.close()
     run_id, step_id = _downgrade_workflow_steps_and_remove_phase4(path)
 
-    database = _database(path)
+    database = open_sqlite_database(path)
     try:
         with database.transaction() as connection:
             assert (
@@ -206,7 +202,7 @@ def test_api_tokens_round_trip_update_revoke_and_monotonic_last_use(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "tokens.db")
+        database = open_sqlite_database(tmp_path / "tokens.db")
         repository = SQLiteApiTokenRepository(database)
         token = ApiToken(
             name="github",
@@ -245,7 +241,7 @@ def test_generic_artifacts_are_idempotent_and_listed_by_typed_owner(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "artifacts.db")
+        database = open_sqlite_database(tmp_path / "artifacts.db")
         repository = SQLiteGenericArtifactRepository(database)
         owner_id = uuid4()
         first = _artifact(owner_id)
@@ -271,7 +267,7 @@ def test_ci_session_cas_staleness_cleanup_and_launch_finalize_idempotency(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "ci-sessions.db")
+        database = open_sqlite_database(tmp_path / "ci-sessions.db")
         repository = SQLiteCiSessionRepository(database)
         session = _session()
         duplicate = _session(external_run_id="different")
@@ -447,7 +443,7 @@ def test_atomic_selection_uses_preference_then_lru_and_explicit_bench(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "selection-order.db")
+        database = open_sqlite_database(tmp_path / "selection-order.db")
         repository = SQLiteCiSessionRepository(database)
         _insert_catalog_bench(
             database,
@@ -521,7 +517,7 @@ def test_concurrent_atomic_selection_never_double_assigns_a_bench(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "selection-race.db"
-    database = _database(path)
+    database = open_sqlite_database(path)
     _insert_catalog_bench(
         database,
         "bench-a",
@@ -548,7 +544,7 @@ def test_concurrent_atomic_selection_never_double_assigns_a_bench(
     barrier = Barrier(2, timeout=30)
 
     def assign(session_id: UUID) -> str | None:
-        worker_database = _database(path)
+        worker_database = open_sqlite_database(path)
         try:
             repository = SQLiteCiSessionRepository(worker_database)
             barrier.wait()
@@ -571,7 +567,7 @@ def test_concurrent_atomic_selection_never_double_assigns_a_bench(
 
     assert all(item is not None for item in selected)
     assert sorted(item for item in selected if item is not None) == ["bench-a", "bench-b"]
-    database = _database(path)
+    database = open_sqlite_database(path)
     try:
         with database.transaction() as connection:
             active = connection.execute(

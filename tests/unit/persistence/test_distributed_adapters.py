@@ -65,17 +65,13 @@ from lab_platform.persistence.distributed_adapters import (
     _reconciliation_result_json,
 )
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 7, 28, 8, tzinfo=UTC)
 AGENT_ID = UUID("36cc8c54-1468-45a4-8566-2fc09e646f71")
 OTHER_AGENT_ID = UUID("4fc9ff80-e6d5-47e6-bf03-a1af26dcab79")
 BOOT_ID = UUID("eaf220d1-7a8c-48c5-b30d-66bf6fb43b54")
 BENCH_ID = "coverage-agent/bench-1"
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _seed_agent(
@@ -231,7 +227,7 @@ def test_sqlite_presence_adapter_fences_connections_and_preserves_identity(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "presence-adapter.db")
+        database = open_sqlite_database(tmp_path / "presence-adapter.db")
         repository = SQLiteAgentPresenceAdapter(database)
 
         missing = AgentRecord(
@@ -377,7 +373,7 @@ def test_sqlite_inventory_adapter_is_atomic_idempotent_and_report_compatible(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "inventory-adapter.db")
+        database = open_sqlite_database(tmp_path / "inventory-adapter.db")
         agent = _seed_agent(database)
         presence = SQLiteAgentPresenceAdapter(database)
         inventory = SQLiteInventoryAdapter(database)
@@ -513,7 +509,7 @@ def test_remote_command_adapter_bundles_idempotently_and_uses_status_cas(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "commands-adapter.db")
+        database = open_sqlite_database(tmp_path / "commands-adapter.db")
         agent = _seed_agent(database)
         await SQLiteInventoryAdapter(database).reconcile_agent_snapshot(
             agent,
@@ -664,7 +660,7 @@ def test_reconciliation_report_store_fences_content_and_round_trips_results(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "reconciliation-claims.db")
+        database = open_sqlite_database(tmp_path / "reconciliation-claims.db")
         _seed_agent(database)
         store = SQLiteReconciliationReportStore(database)
         report_id = UUID(int=501)
@@ -775,7 +771,7 @@ def test_reconciliation_boot_lease_and_persisted_handler_integrate_with_sqlite(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "reconciliation-adapters.db")
+        database = open_sqlite_database(tmp_path / "reconciliation-adapters.db")
         enrolled = _seed_agent(database)
         presence = SQLiteAgentPresenceAdapter(database)
         connected = enrolled.model_copy(
@@ -902,7 +898,7 @@ def test_drain_and_protocol_adapters_report_real_workload_and_cancel_queued_work
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "drain-protocol-adapters.db")
+        database = open_sqlite_database(tmp_path / "drain-protocol-adapters.db")
         agent = _seed_agent(database, status=AgentStatus.ONLINE)
         inventory = SQLiteInventoryAdapter(database)
         await inventory.reconcile_agent_snapshot(agent, (_bench(agent),), observed_at=NOW)
@@ -1067,7 +1063,7 @@ def test_artifact_transfer_adapter_enforces_upload_and_attempt_compare_and_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "artifact-transfer-adapter.db")
+        database = open_sqlite_database(tmp_path / "artifact-transfer-adapter.db")
         agent = _seed_agent(database)
         await SQLiteInventoryAdapter(database).reconcile_agent_snapshot(
             agent,
@@ -1174,7 +1170,7 @@ def test_artifact_transfer_adapter_enforces_upload_and_attempt_compare_and_set(
         persisted_transfer = await repository.get_transfer(transfer.id)
         assert persisted_transfer is not None and persisted_transfer.attempt_count == 1
 
-        fresh_database = _database(tmp_path / "artifact-cas.db")
+        fresh_database = open_sqlite_database(tmp_path / "artifact-cas.db")
         fresh_agent = _seed_agent(fresh_database)
         await SQLiteInventoryAdapter(fresh_database).reconcile_agent_snapshot(
             fresh_agent,

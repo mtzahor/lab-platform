@@ -38,6 +38,8 @@ from lab_platform.persistence import (
     SQLiteIdentityRepository,
 )
 
+from tests.support.persistence import open_sqlite_database
+
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 
 
@@ -693,12 +695,6 @@ class EventSink:
         return event
 
 
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
-
-
 def _record(
     *,
     expires_at: datetime | None,
@@ -725,7 +721,7 @@ def test_default_retention_expires_content_metadata_and_emits_once(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "retention.db")
+        database = open_sqlite_database(tmp_path / "retention.db")
         repository = SQLiteGenericArtifactRepository(database)
         events = EventSink()
         storage_root = tmp_path / "artifacts"
@@ -786,7 +782,7 @@ def test_repository_lists_expired_records_in_stable_order_and_honors_limit(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "listing.db")
+        database = open_sqlite_database(tmp_path / "listing.db")
         repository = SQLiteGenericArtifactRepository(database)
         first = _record(expires_at=NOW_ARTIFACT_RETENTION - timedelta(minutes=3))
         second = _record(expires_at=NOW_ARTIFACT_RETENTION - timedelta(minutes=2))
@@ -826,7 +822,7 @@ def test_expiry_never_unlinks_paths_outside_exact_managed_object_directory(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "path-safety.db")
+        database = open_sqlite_database(tmp_path / "path-safety.db")
         repository = SQLiteGenericArtifactRepository(database)
         events = EventSink()
         storage_root = tmp_path / "artifacts"
@@ -893,7 +889,7 @@ def test_expiry_never_unlinks_paths_outside_exact_managed_object_directory(
 
 def test_expire_due_validates_cutoff_and_batch_size(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "validation.db")
+        database = open_sqlite_database(tmp_path / "validation.db")
         repository = SQLiteGenericArtifactRepository(database)
         service = ArtifactService(repository, tmp_path / "artifacts", maximum_size_bytes=10)
         try:

@@ -59,8 +59,9 @@ from lab_platform.models import (
     WorkflowStepResult,
     WorkflowStepStatus,
 )
-from lab_platform.persistence import SQLiteDatabase
 from pydantic import SecretStr
+
+from tests.support.persistence import open_sqlite_database
 
 NOW = datetime(2026, 7, 29, 12, tzinfo=UTC)
 
@@ -513,12 +514,6 @@ async def test_heartbeat_state_and_in_flight_watermark_validation() -> None:
     assert batch.acknowledged_event_sequence == 7
 
 
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
-
-
 def _lease(
     agent_id: UUID,
     *,
@@ -541,7 +536,7 @@ def _lease(
 async def test_sqlite_lease_store_covers_release_validation_and_integrity_edges(
     tmp_path: Path,
 ) -> None:
-    database = _database(tmp_path / "leases.db")
+    database = open_sqlite_database(tmp_path / "leases.db")
     agent_id = uuid4()
     store = SQLiteReservationLeaseStore(database, agent_id, clock=lambda: NOW)
     reservation_id = uuid4()
@@ -627,7 +622,7 @@ async def test_sqlite_lease_store_covers_release_validation_and_integrity_edges(
 
 @pytest.mark.anyio
 async def test_sqlite_event_buffer_input_and_metadata_invariants(tmp_path: Path) -> None:
-    database = _database(tmp_path / "event-invariants.db")
+    database = open_sqlite_database(tmp_path / "event-invariants.db")
     agent_id = uuid4()
     for capacity in (True, 0):
         with pytest.raises(ValueError, match="positive integer"):
@@ -719,7 +714,7 @@ def test_sqlite_state_private_helpers_reject_corrupt_payloads() -> None:
 async def test_sqlite_event_buffer_restores_legacy_rows_and_detects_corruption(
     tmp_path: Path,
 ) -> None:
-    database = _database(tmp_path / "legacy-events.db")
+    database = open_sqlite_database(tmp_path / "legacy-events.db")
     agent_id = uuid4()
     overflow = BufferedAgentEvent(
         id=uuid4(),

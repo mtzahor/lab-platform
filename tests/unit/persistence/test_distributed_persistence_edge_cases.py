@@ -47,17 +47,13 @@ from lab_platform.persistence.distributed import (
     _dump_json_mapping,
 )
 
+from tests.support.persistence import open_sqlite_database
+
 AGENT_ID = UUID("9a975329-5ec8-4a5f-83b4-762684206e34")
 OTHER_AGENT_ID = UUID("59d9f19a-75ac-4248-9ada-d31065a5f409")
 BOOT_ID = UUID("1ab59e13-5517-482f-849c-2fe8145db25c")
 NOW = datetime(2026, 7, 29, 10, tzinfo=UTC)
 BENCH_ID = "coverage-lab/esp32-01"
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _seed_agent(database: SQLiteDatabase, agent_id: UUID = AGENT_ID) -> None:
@@ -233,7 +229,7 @@ def test_snapshot_validation_and_connection_rejection_branches(tmp_path: Path) -
         )
 
     async def scenario() -> None:
-        database = _database(tmp_path / "connections-coverage.db")
+        database = open_sqlite_database(tmp_path / "connections-coverage.db")
         _seed_agent(database)
         repository = SQLiteAgentConnectionRepository(database)
         assert await repository.get(uuid4()) is None
@@ -330,7 +326,7 @@ def test_snapshot_validation_and_connection_rejection_branches(tmp_path: Path) -
 
 def test_inventory_filters_identity_fencing_and_snapshot_edges(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "inventory-coverage.db")
+        database = open_sqlite_database(tmp_path / "inventory-coverage.db")
         _seed_agent(database)
         _seed_agent(database, OTHER_AGENT_ID)
         repository = SQLiteGlobalBenchRepository(database)
@@ -411,7 +407,7 @@ def test_inventory_filters_identity_fencing_and_snapshot_edges(tmp_path: Path) -
 
 def test_command_and_operation_cas_failure_branches(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "commands-coverage.db")
+        database = open_sqlite_database(tmp_path / "commands-coverage.db")
         _seed_agent(database)
         await SQLiteGlobalBenchRepository(database).upsert(_bench())
         commands = SQLiteRemoteCommandRepository(database)
@@ -566,7 +562,7 @@ def test_command_and_operation_cas_failure_branches(tmp_path: Path) -> None:
 
 def test_lease_reconciliation_protocol_and_timeline_edges(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "journal-coverage.db")
+        database = open_sqlite_database(tmp_path / "journal-coverage.db")
         _seed_agent(database)
         await SQLiteGlobalBenchRepository(database).upsert(_bench())
         reservation_id = UUID(int=1401)
@@ -715,7 +711,7 @@ def test_lease_reconciliation_protocol_and_timeline_edges(tmp_path: Path) -> Non
 
 def test_artifact_and_transfer_failure_branches(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "artifact-coverage.db")
+        database = open_sqlite_database(tmp_path / "artifact-coverage.db")
         _seed_agent(database)
         await SQLiteGlobalBenchRepository(database).upsert(_bench())
         command = await SQLiteRemoteCommandRepository(database).create(_command())
@@ -850,7 +846,7 @@ def test_corrupted_rows_and_json_serialization_are_rejected(tmp_path: Path) -> N
         _dump_json_mapping({"large": "x" * 20}, field="payload", maximum_bytes=5)
 
     async def scenario() -> None:
-        database = _database(tmp_path / "corruption-coverage.db")
+        database = open_sqlite_database(tmp_path / "corruption-coverage.db")
         _seed_agent(database)
         _seed_agent(database, OTHER_AGENT_ID)
         benches = SQLiteGlobalBenchRepository(database)

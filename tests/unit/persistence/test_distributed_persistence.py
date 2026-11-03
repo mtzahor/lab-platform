@@ -52,16 +52,12 @@ from lab_platform.persistence.distributed import (
 )
 from lab_platform.persistence.migrations import SCHEMA_VERSION
 
+from tests.support.persistence import open_sqlite_database
+
 AGENT_ID = UUID("9a975329-5ec8-4a5f-83b4-762684206e34")
 BOOT_ID = UUID("1ab59e13-5517-482f-849c-2fe8145db25c")
 NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 BENCH_ID = "home-lab/esp32-01"
-
-
-def _database(path: Path) -> SQLiteDatabase:
-    database = SQLiteDatabase(path)
-    database.initialize()
-    return database
 
 
 def _seed_agent(database: SQLiteDatabase) -> None:
@@ -152,7 +148,7 @@ def _seed_reservation(database: SQLiteDatabase, reservation_id: UUID) -> None:
 def test_v8_migration_exposes_every_distributed_table_and_uniqueness_index(
     tmp_path: Path,
 ) -> None:
-    database = _database(tmp_path / "shape.db")
+    database = open_sqlite_database(tmp_path / "shape.db")
     with database.transaction() as connection:
         assert SCHEMA_VERSION == 12
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
@@ -201,7 +197,7 @@ def test_v8_migration_exposes_every_distributed_table_and_uniqueness_index(
 def test_v7_upgrade_adds_operation_results_without_losing_existing_work(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "upgrade-v7.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         await _seed_bench(database)
         command = _command()
@@ -225,7 +221,7 @@ def test_v7_upgrade_adds_operation_results_without_losing_existing_work(tmp_path
             )
             connection.commit()
 
-        upgraded = _database(path)
+        upgraded = open_sqlite_database(path)
         with upgraded.transaction() as connection:
             assert (
                 connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
@@ -251,7 +247,7 @@ def test_v7_upgrade_adds_operation_results_without_losing_existing_work(tmp_path
 def test_connection_heartbeat_cas_and_reconnect_fencing_survive_restart(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "connections.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         repository = SQLiteAgentConnectionRepository(database)
         first = AgentConnectionRecord(
@@ -319,7 +315,7 @@ def test_connection_heartbeat_cas_and_reconnect_fencing_survive_restart(tmp_path
         assert disconnected.disconnected_at == NOW + timedelta(seconds=40)
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         reloaded = await SQLiteAgentConnectionRepository(reopened).get(second.id)
         assert reloaded == disconnected
         reopened.close()
@@ -331,7 +327,7 @@ def test_inventory_snapshot_is_atomic_idempotent_and_marks_missing_benches_offli
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "inventory.db")
+        database = open_sqlite_database(tmp_path / "inventory.db")
         _seed_agent(database)
         repository = SQLiteGlobalBenchRepository(database)
         first = StoredBenchSnapshot(
@@ -384,7 +380,7 @@ def test_remote_command_attempt_and_operation_updates_use_idempotency_and_status
 ) -> None:
     async def scenario() -> None:
         path = tmp_path / "commands.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         await _seed_bench(database)
         commands = SQLiteRemoteCommandRepository(database)
@@ -546,7 +542,7 @@ def test_remote_command_attempt_and_operation_updates_use_idempotency_and_status
         )
         database.close()
 
-        restarted = _database(path)
+        restarted = open_sqlite_database(path)
         assert await SQLiteDistributedOperationRepository(restarted).get(operation.id) == succeeded
         restarted.close()
 
@@ -555,7 +551,7 @@ def test_remote_command_attempt_and_operation_updates_use_idempotency_and_status
 
 def test_reservation_leases_are_monotonic_and_have_one_current_owner(tmp_path: Path) -> None:
     async def scenario() -> None:
-        database = _database(tmp_path / "leases.db")
+        database = open_sqlite_database(tmp_path / "leases.db")
         _seed_agent(database)
         await _seed_bench(database)
         reservation_id = UUID(int=401)
@@ -610,7 +606,7 @@ def test_reconciliation_protocol_deduplication_and_agent_timeline_are_durable(
 ) -> None:
     async def scenario() -> None:
         path = tmp_path / "journals.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         connections = SQLiteAgentConnectionRepository(database)
         connection_record = AgentConnectionRecord(
@@ -719,7 +715,7 @@ def test_reconciliation_protocol_deduplication_and_agent_timeline_are_durable(
         assert await timelines.list(AGENT_ID, severity=AgentTimelineSeverity.INFO) == [entry]
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         assert await SQLiteReconciliationRepository(reopened).latest(AGENT_ID) == stored
         assert await SQLiteAgentTimelineRepository(reopened).list(AGENT_ID) == [entry]
         reopened.close()
@@ -730,7 +726,7 @@ def test_reconciliation_protocol_deduplication_and_agent_timeline_are_durable(
 def test_remote_artifact_transfer_and_attempt_lifecycle_survives_reopen(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "artifacts.db"
-        database = _database(path)
+        database = open_sqlite_database(path)
         _seed_agent(database)
         await _seed_bench(database)
         command_repository = SQLiteRemoteCommandRepository(database)
@@ -829,7 +825,7 @@ def test_remote_artifact_transfer_and_attempt_lifecycle_survives_reopen(tmp_path
         assert await transfers.list_attempts(transfer.id) == [attempt]
         database.close()
 
-        reopened = _database(path)
+        reopened = open_sqlite_database(path)
         assert await SQLiteRemoteArtifactRepository(reopened).get(artifact.id) == uploaded
         assert await SQLiteArtifactTransferRepository(reopened).get(transfer.id) == completed
         reopened.close()
